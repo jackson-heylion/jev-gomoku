@@ -151,6 +151,74 @@ async function testJevFinalDecisionAuthority() {
   }
 }
 
+/**
+ * Grandmaster runs two bounded background analyses. It may skip Jev when the
+ * evidence converges, but disagreement/timeout may trigger at most one Jev call.
+ */
+async function testGrandmasterParallelThreatMode() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      const criteria = payload?.questions?.best_move?.criteria || {};
+      const keys = Object.keys(criteria);
+      if (keys.length < 2) throw new Error('Grandmaster Jev arbitration needs at least two candidates');
+      if (!payload?.state?.threat_space_search) {
+        throw new Error('Grandmaster Jev payload is missing threat-space search state');
+      }
+      const choice = keys[keys.length - 1];
+      return {
+        model: 'mock-jev',
+        answers: { best_move: oneHotChoice(choice, keys) },
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevFinal('grandmaster');
+
+  console.log('grandmaster regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    localChoice: result.localChoice,
+    requestCount,
+    requestShape: result.decisionTrace?.requestShape,
+    deepSearch: result.decisionTrace?.preJevDeepSearch,
+    threatSearch: result.decisionTrace?.preJevThreatSearch
+  }));
+
+  if (result.mode !== 'grandmaster') throw new Error('Grandmaster result mode was not preserved');
+  if (!result.candidates?.some(candidate => candidate.key === result.finalChoice)) {
+    throw new Error('Grandmaster final choice is outside the filtered candidate set');
+  }
+  if (requestCount > 1) throw new Error('Grandmaster must use at most one Jev request, got ' + requestCount);
+  if (result.candidates.length > 1) {
+    if (result.decisionTrace?.requestShape?.parallelEvidence !== true) {
+      throw new Error('Grandmaster trace must record parallel evidence');
+    }
+    if (!result.decisionTrace?.preJevDeepSearch) {
+      throw new Error('Grandmaster deep-search evidence is missing');
+    }
+    if (!result.decisionTrace?.preJevThreatSearch) {
+      throw new Error('Grandmaster threat-space evidence is missing');
+    }
+  }
+  if (requestCount === 1) {
+    if (result.decisionTrace?.requestShape?.decisionAuthority !== 'jev_on_disagreement') {
+      throw new Error('Grandmaster Jev call must only occur on disagreement/evidence uncertainty');
+    }
+    if (result.decisionTrace?.requestShape?.threatEvidenceVisibleToJev !== true) {
+      throw new Error('Grandmaster Jev arbitration did not receive threat evidence');
+    }
+  } else if (!['multi_engine_consensus', 'threat_filter_single', 'single_candidate'].includes(
+    result.decisionTrace?.requestShape?.decisionAuthority
+  )) {
+    throw new Error('Unexpected zero-Jev grandmaster decision authority');
+  }
+}
+
 /** A single deterministic candidate must never trigger a Jev request. */
 async function testSingleCandidateShortCircuit() {
   let requestCount = 0;
@@ -490,6 +558,7 @@ function testCoordinateHelpers() {
 await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
 await testJevFinalDecisionAuthority();
+await testGrandmasterParallelThreatMode();
 await testArbitrationOracle();
 await testMustBlockOpponentForkCreator();
 await testRenjuForbiddenMoves();
