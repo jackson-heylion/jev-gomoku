@@ -75,7 +75,7 @@ function undoMove(move, color) {
 }
 
 function cachePut(cache, key, entry) {
-  if (cache.size < TT_MAX_ENTRIES) cache.set(key, entry);
+  if (cache.has(key) || cache.size < TT_MAX_ENTRIES) cache.set(key, entry);
 }
 
 function otherColor(color) {
@@ -398,6 +398,112 @@ function localConnectivity(r, c, color) {
   return { allies, enemies };
 }
 
+function lineTokensThrough(r, c, color, dr, dc, span = 5) {
+  const tokens = [];
+  for (let offset = -span; offset <= span; offset++) {
+    const rr = r + dr * offset;
+    const cc = c + dc * offset;
+    if (!inBounds(rr, cc)) tokens.push('#');
+    else if (board[rr][cc] === color) tokens.push('O');
+    else if (board[rr][cc] === EMPTY) tokens.push('.');
+    else tokens.push('#');
+  }
+  return tokens;
+}
+
+function lineWinningCompletionIndexes(tokens, center) {
+  const points = new Set();
+  for (let start = 0; start <= tokens.length - 5; start++) {
+    if (start > center || start + 4 < center) continue;
+    let own = 0;
+    let empty = 0;
+    let emptyIndex = -1;
+    let blocked = false;
+    for (let i = start; i < start + 5; i++) {
+      if (tokens[i] === '#') { blocked = true; break; }
+      if (tokens[i] === 'O') own++;
+      else if (tokens[i] === '.') { empty++; emptyIndex = i; }
+    }
+    if (!blocked && own === 4 && empty === 1) points.add(emptyIndex);
+  }
+  return points;
+}
+
+function directionalThreatPattern(r, c, color, dr, dc) {
+  const tokens = lineTokensThrough(r, c, color, dr, dc);
+  const center = 5;
+  const completions = lineWinningCompletionIndexes(tokens, center);
+  const openThreeExtensions = new Set();
+  let twoPotential = 0;
+
+  for (let start = 0; start <= tokens.length - 6; start++) {
+    if (start > center || start + 5 < center) continue;
+    const window = tokens.slice(start, start + 6);
+    if (window.includes('#')) continue;
+    const own = window.filter(value => value === 'O').length;
+    if (own === 2) twoPotential++;
+  }
+
+  for (let i = 1; i < tokens.length - 1; i++) {
+    if (tokens[i] !== '.' || Math.abs(i - center) > 4) continue;
+    tokens[i] = 'O';
+    if (lineWinningCompletionIndexes(tokens, center).size >= 2) openThreeExtensions.add(i);
+    tokens[i] = '.';
+  }
+
+  return {
+    winningPoints: completions.size,
+    openFour: completions.size >= 2,
+    rushFour: completions.size === 1,
+    openThree: openThreeExtensions.size > 0,
+    twoPotential
+  };
+}
+
+function threatPatternProfilePlaced(r, c, color) {
+  let winningPoints = 0;
+  let openFourDirections = 0;
+  let rushFourDirections = 0;
+  let openThreeDirections = 0;
+  let twoDirections = 0;
+  let activeDirections = 0;
+
+  for (const [dr, dc] of RENJU_DIRS) {
+    const line = directionalThreatPattern(r, c, color, dr, dc);
+    winningPoints += line.winningPoints;
+    if (line.openFour) openFourDirections++;
+    if (line.rushFour) rushFourDirections++;
+    if (line.openThree) openThreeDirections++;
+    if (line.twoPotential > 0) twoDirections++;
+    if (line.winningPoints > 0 || line.openThree || line.twoPotential > 0) activeDirections++;
+  }
+
+  const winsNow = isWin(r, c, color);
+  const fourDirections = openFourDirections + rushFourDirections;
+  const multiAxis = Math.max(0, activeDirections - 1);
+  const score =
+    (winsNow ? 900000000 : 0) +
+    winningPoints * 180000 +
+    openFourDirections * 120000 +
+    rushFourDirections * 32000 +
+    openThreeDirections * 6500 +
+    twoDirections * 420 +
+    multiAxis * 900;
+
+  return {
+    winsNow,
+    winningPoints,
+    openFourDirections,
+    rushFourDirections,
+    fourDirections,
+    openThreeDirections,
+    twoDirections,
+    activeDirections,
+    multiAxis,
+    score
+  };
+}
+
 function quickMoveScore(move, color) {
   playMove(move, color);
   let score;
@@ -433,47 +539,72 @@ function orderedMoves(color, limit, radius = 2) {
     .slice(0, limit);
 }
 
-function boardKey(toMove, depth) {
-  return toMove + ':' + depth + ':' + hashA + ':' + hashB;
+function boardKey(toMove) {
+  return toMove + ':' + hashA + ':' + hashB;
 }
 
-function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
+function prioritizeCachedMove(candidates, key) {
+  if (!key) return candidates;
+  const index = candidates.findIndex(move => move.key === key);
+  if (index <= 0) return candidates;
+  return [candidates[index], ...candidates.slice(0, index), ...candidates.slice(index + 1)];
+}
+
+function forcingMoves(color, limit, radius) {
+  const wins = immediateWins(color, radius);
+  if (wins.length) return { moves: wins.slice(0, limit), mandatory: true, reason: 'win' };
+
+  const blocks = immediateWins(otherColor(color), radius)
+    .filter(move => isLegalMoveForColor(move.r, move.c, color));
+  if (blocks.length) return { moves: blocks.slice(0, limit), mandatory: true, reason: 'block' };
+
+  const candidates = orderedMoves(color, Math.max(limit * 2, 6), radius);
+  const forcing = [];
+  for (const move of candidates) {
+    assertTime();
+    playMove(move, color);
+    const profile = threatPatternProfilePlaced(move.r, move.c, color);
+    undoMove(move, color);
+    if (
+      profile.winningPoints > 0 ||
+      profile.fourDirections > 0 ||
+      profile.openThreeDirections > 0
+    ) {
+      forcing.push({ ...move, threatScore: profile.score });
+    }
+  }
+  return {
+    moves: forcing.sort((a, b) => b.threatScore - a.threatScore).slice(0, limit),
+    mandatory: false,
+    reason: 'shape'
+  };
+}
+
+function threatQuiescence(alpha, beta, toMove, remaining, branch, radius) {
   assertTime();
-  if (depth <= 0) return evaluateStatic();
+  const standPat = evaluateStatic();
+  if (remaining <= 0) return standPat;
 
-  const cacheKey = boardKey(toMove, depth);
-  const alphaStart = alpha;
-  const betaStart = beta;
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    if (cached.flag === 'EXACT') return cached.value;
-    if (cached.flag === 'LOWER') alpha = Math.max(alpha, cached.value);
-    else if (cached.flag === 'UPPER') beta = Math.min(beta, cached.value);
-    if (alpha >= beta) return cached.value;
-  }
-
-  const immediate = immediateWins(toMove, radius);
-  if (immediate.length) {
-    const score = toMove === rootSide ? MATE_SCORE + depth : -MATE_SCORE - depth;
-    cachePut(cache, cacheKey, { value: score, flag: 'EXACT' });
-    return score;
-  }
-
-  const localBranch = Math.max(4, branch - (depth <= 2 ? 2 : depth <= 4 ? 1 : 0));
-  const candidates = orderedMoves(toMove, localBranch, radius);
-  if (!candidates.length) return evaluateStatic();
+  const forcing = forcingMoves(toMove, Math.min(4, branch), radius);
+  const candidates = forcing.moves;
+  if (!candidates.length) return standPat;
 
   const maximizing = toMove === rootSide;
-  let value = maximizing ? -Infinity : Infinity;
+  let value = forcing.mandatory ? (maximizing ? -Infinity : Infinity) : standPat;
+  if (!forcing.mandatory) {
+    if (maximizing) alpha = Math.max(alpha, value);
+    else beta = Math.min(beta, value);
+    if (beta <= alpha) return value;
+  }
 
   for (const move of candidates) {
     assertTime();
     playMove(move, toMove);
     let child;
     if (isWin(move.r, move.c, toMove)) {
-      child = maximizing ? MATE_SCORE + depth : -MATE_SCORE - depth;
+      child = maximizing ? MATE_SCORE + remaining : -MATE_SCORE - remaining;
     } else {
-      child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), branch, radius, cache);
+      child = threatQuiescence(alpha, beta, otherColor(toMove), remaining - 1, branch, radius);
     }
     undoMove(move, toMove);
 
@@ -486,11 +617,97 @@ function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
     }
     if (beta <= alpha) break;
   }
+  return value;
+}
+
+function mayContainForcingPattern(move, color) {
+  if (!move) return false;
+  for (const [dr, dc] of RENJU_DIRS) {
+    let own = 0;
+    for (let offset = -4; offset <= 4; offset++) {
+      if (!offset) continue;
+      const rr = move.r + dr * offset;
+      const cc = move.c + dc * offset;
+      if (!inBounds(rr, cc)) continue;
+      if (board[rr][cc] === color) own++;
+    }
+    if (own >= 2) return true;
+  }
+  return false;
+}
+
+function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache, lastMove = null) {
+  assertTime();
+  if (depth <= 0) {
+    if (lastMove) {
+      const lastMover = otherColor(toMove);
+      if (mayContainForcingPattern(lastMove, lastMover)) {
+        const volatile = threatPatternProfilePlaced(lastMove.r, lastMove.c, lastMover);
+        if (volatile.winningPoints > 0 || volatile.fourDirections > 0) {
+          return threatQuiescence(alpha, beta, toMove, 2, branch, radius);
+        }
+        if (volatile.openThreeDirections > 0) {
+          return threatQuiescence(alpha, beta, toMove, 1, branch, radius);
+        }
+      }
+    }
+    return evaluateStatic();
+  }
+
+  const cacheKey = boardKey(toMove);
+  const alphaStart = alpha;
+  const betaStart = beta;
+  const cached = cache.get(cacheKey);
+  if (cached && cached.depth >= depth) {
+    if (cached.flag === 'EXACT') return cached.value;
+    if (cached.flag === 'LOWER') alpha = Math.max(alpha, cached.value);
+    else if (cached.flag === 'UPPER') beta = Math.min(beta, cached.value);
+    if (alpha >= beta) return cached.value;
+  }
+
+  const immediate = immediateWins(toMove, radius);
+  if (immediate.length) {
+    const score = toMove === rootSide ? MATE_SCORE + depth : -MATE_SCORE - depth;
+    cachePut(cache, cacheKey, { depth, value: score, flag: 'EXACT', bestMove: immediate[0]?.key || null });
+    return score;
+  }
+
+  const localBranch = Math.max(4, branch - (depth <= 2 ? 2 : depth <= 4 ? 1 : 0));
+  const candidates = prioritizeCachedMove(
+    orderedMoves(toMove, localBranch, radius),
+    cached?.bestMove || null
+  );
+  if (!candidates.length) return evaluateStatic();
+
+  const maximizing = toMove === rootSide;
+  let value = maximizing ? -Infinity : Infinity;
+  let bestMove = candidates[0]?.key || null;
+
+  for (const move of candidates) {
+    assertTime();
+    playMove(move, toMove);
+    let child;
+    if (isWin(move.r, move.c, toMove)) {
+      child = maximizing ? MATE_SCORE + depth : -MATE_SCORE - depth;
+    } else {
+      child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), branch, radius, cache, move);
+    }
+    undoMove(move, toMove);
+
+    if (maximizing) {
+      if (child > value) { value = child; bestMove = move.key; }
+      alpha = Math.max(alpha, value);
+    } else {
+      if (child < value) { value = child; bestMove = move.key; }
+      beta = Math.min(beta, value);
+    }
+    if (beta <= alpha) break;
+  }
 
   let flag = 'EXACT';
   if (value <= alphaStart) flag = 'UPPER';
   else if (value >= betaStart) flag = 'LOWER';
-  cachePut(cache, cacheKey, { value, flag });
+  cachePut(cache, cacheKey, { depth, value, flag, bestMove });
   return value;
 }
 
@@ -503,7 +720,7 @@ function evaluateRootCandidate(move, depth, branch, radius, cache) {
   if (isWin(move.r, move.c, rootSide)) {
     score = MATE_SCORE * 10;
   } else {
-    score = alphaBeta(depth - 1, -Infinity, Infinity, opponentSide, branch, radius, cache);
+    score = alphaBeta(depth - 1, -Infinity, Infinity, opponentSide, branch, radius, cache, move);
     score += evaluateStatic() * .035;
   }
   undoMove(move, rootSide);
@@ -536,9 +753,9 @@ function runSearch(message) {
 
   let completed = null;
   let timedOut = false;
+  const cache = new Map();
 
   for (let depth = 3; depth <= maxDepth; depth++) {
-    const cache = new Map();
     const scores = [];
     try {
       for (const move of candidates) {
@@ -579,7 +796,9 @@ function runSearch(message) {
     nodes,
     elapsedMs: Math.round(performance.now() - started),
     budgetMs,
-    branch
+    branch,
+    transpositionEntries: cache.size,
+    quiescenceDepth: 2
   };
 }
 
