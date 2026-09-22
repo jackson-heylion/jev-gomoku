@@ -1102,12 +1102,14 @@
     const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(WHITE, cfg.vcfDepth, cfg.radius));
     const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(WHITE, cfg.vctDepth, cfg.radius);
     const blackCounterVCF = !winsNow && !ownImmediate && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
+    const blackCounterVCT = !winsNow && !ownImmediate && !blackCounterVCF && cfg.vctDepth > 0
+      && searchVCTPressure(BLACK, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
     let safety = 'SAFE';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
-    else if (blackCounterVCF) safety = 'TACTICALLY_RISKY';
+    else if (blackCounterVCF || blackCounterVCT) safety = 'TACTICALLY_RISKY';
 
     const forcedRole = winsNow ? 'WIN_NOW'
       : forced === 'block' ? 'MUST_DEFEND'
@@ -1126,6 +1128,7 @@
       vcf,
       vct,
       blackCounterVCF,
+      blackCounterVCT,
       facts: {
         forced_role: forcedRole,
         tactical_safety: safety,
@@ -1135,6 +1138,8 @@
         opponent_immediate_winning_points_after_move: countLabel(oppImmediate),
         vcf_status: vcf ? 'FORCED_SEQUENCE_FOUND' : 'NOT_FOUND',
         vct_status: vct ? 'PRESSURE_SEQUENCE_FOUND' : 'NOT_FOUND',
+        opponent_counter_vcf: blackCounterVCF ? 'FOUND' : 'NOT_FOUND',
+        opponent_counter_vct: blackCounterVCT ? 'PRESSURE_FOUND' : 'NOT_FOUND',
         connectivity: connectionLabel(conn.allies),
         centrality: Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7)) <= 3 ? 'CENTRAL' : 'OUTER'
       }
@@ -1165,8 +1170,12 @@
     const immediate = selected.filter(m => m.analysis.winsNow);
     if (immediate.length) selected = immediate;
     else {
-      const safe = selected.filter(m => !['LOSING','UNSAFE'].includes(m.analysis.facts.tactical_safety));
-      if (safe.length) selected = safe;
+      const fullySafe = selected.filter(m => m.analysis.facts.tactical_safety === 'SAFE');
+      if (fullySafe.length) selected = fullySafe;
+      else {
+        const survivable = selected.filter(m => !['LOSING','UNSAFE'].includes(m.analysis.facts.tactical_safety));
+        if (survivable.length) selected = survivable;
+      }
       const proven = selected.filter(m => m.analysis.vcf);
       if (proven.length) selected = proven;
     }
@@ -1207,10 +1216,14 @@
   }
 
   function candidateFactsMap(candidates) {
-    return Object.fromEntries(candidates.map(m => [m.key, {
-      ...m.analysis.facts,
-      local_rank: `RANK_${m.rank}`
-    }]));
+    return Object.fromEntries(candidates.map(m => {
+      const facts = { ...(m.analysis?.facts || {}) };
+      // Jev acts as an independent challenger. Do not reveal Local's rank/grade,
+      // otherwise the semantic judge can simply anchor on the deterministic engine.
+      delete facts.local_engine_grade;
+      delete facts.local_rank;
+      return [m.key, facts];
+    }));
   }
 
   function buildAtomicPayload(context) {
@@ -1259,7 +1272,7 @@
     const pairs = [];
     let n = 0;
     const facts = candidateFactsMap(candidates);
-    const instruction = 'Choose the stronger move for WHITE using only the supplied deterministic semantic facts. Do not reconstruct the board. Priority: immediate win > mandatory defense > proven VCF > tactical safety > forcing initiative > VCT pressure > connectivity. If facts are close, prefer the higher local_engine_grade.';
+    const instruction = 'Choose the stronger move for WHITE using only the supplied deterministic semantic facts. Do not reconstruct the board. Priority: immediate win > mandatory defense > proven VCF > tactical safety > forcing initiative > VCT pressure > connectivity. Judge the moves independently; no Local ranking is provided.';
     for (let i = 0; i < candidates.length; i++) {
       for (let j = i + 1; j < candidates.length; j++) {
         const a = candidates[i].key, b = candidates[j].key;
@@ -1402,6 +1415,83 @@
     };
   }
 
+  function challengerVerificationConfig(mode) {
+    const base = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
+    return {
+      ...base,
+      depth: mode === 'strong' ? Math.max(5, base.depth + 2) : Math.max(7, base.depth + 2),
+      branch: Math.max(8, base.branch + 1),
+      root: 2,
+      semantic: 2,
+      tournament: 2,
+      vcfDepth: base.vcfDepth + 2,
+      vctDepth: base.vctDepth + 1
+    };
+  }
+
+  function safetyRank(analysis) {
+    const safety = analysis?.facts?.tactical_safety;
+    if (analysis?.winsNow) return 6;
+    if (analysis?.vcf) return 5;
+    if (safety === 'SAFE') return 4;
+    if (safety === 'TACTICALLY_RISKY') return 3;
+    if (safety === 'UNSAFE') return 1;
+    if (safety === 'LOSING') return 0;
+    return 2;
+  }
+
+  function deepVerifyChallenger(localMove, jevMove, mode) {
+    if (!localMove || !jevMove || localMove.key === jevMove.key) return null;
+    const cfg = challengerVerificationConfig(mode);
+    const cache = new Map();
+
+    const evaluate = move => {
+      const searchScore = scoreRootMove(move, cfg, cache);
+      const analysis = analyzeAdvancedCandidate(move, null, cfg);
+      return {
+        move: move.key,
+        searchScore,
+        safetyRank: safetyRank(analysis),
+        facts: analysis.facts,
+        winsNow: analysis.winsNow,
+        vcf: analysis.vcf,
+        vct: analysis.vct,
+        blackCounterVCF: analysis.blackCounterVCF,
+        blackCounterVCT: analysis.blackCounterVCT
+      };
+    };
+
+    const local = evaluate(localMove);
+    const challenger = evaluate(jevMove);
+    let winner;
+    let reason;
+
+    if (local.safetyRank !== challenger.safetyRank) {
+      winner = local.safetyRank > challenger.safetyRank ? local : challenger;
+      reason = 'deeper_tactical_safety';
+    } else if (local.searchScore !== challenger.searchScore) {
+      winner = local.searchScore > challenger.searchScore ? local : challenger;
+      reason = 'deeper_alpha_beta';
+    } else {
+      winner = local;
+      reason = 'verification_tie_keep_local';
+    }
+
+    return {
+      config: {
+        depth: cfg.depth,
+        branch: cfg.branch,
+        vcfDepth: cfg.vcfDepth,
+        vctDepth: cfg.vctDepth
+      },
+      local,
+      challenger,
+      winner: winner.move,
+      reason,
+      changedFromLocal: winner.move !== localMove.key
+    };
+  }
+
   async function advancedDecision(mode) {
     const context = buildAdvancedCandidates(mode);
     const candidates = context.candidates;
@@ -1411,6 +1501,7 @@
       const only = candidates[0];
       only.atomicScore = 1;
       only.pairScore = 1;
+      only.jevScore = 1;
       only.localNorm = 1;
       only.finalScore = 1;
       return {
@@ -1430,15 +1521,16 @@
       };
     }
 
-    // TypeSafe questions are independent inside one request. We therefore batch
-    // all atomic judgements and the reverse-order pairwise tournament into one
-    // System One call to reduce rate-limit pressure and duplicated input tokens.
+    const localChoice = candidates[0];
+
+    // Jev sees semantic facts without Local rank/grade. It acts as an independent
+    // challenger rather than another weighted feature that tends to confirm #1.
     const tournament = [...candidates]
       .sort((a,b) => (a.rank ?? 999) - (b.rank ?? 999))
       .slice(0, Math.min(context.cfg.tournament, candidates.length));
     const { payload, pairs } = buildBatchedDecisionPayload(context, tournament);
 
-    updateApiState('busy', 'Jev 正在比较候选落点…');
+    updateApiState('busy', 'Jev 正在独立判断候选落点…');
     const data = await callJev(payload);
 
     for (const m of candidates) {
@@ -1471,21 +1563,39 @@
       if (!Number.isFinite(m.pairScore)) m.pairScore = tournament.includes(m) ? .5 : 0;
       const localNorm = candidates.length === 1 ? 1 : 1 - ((m.rank - 1) / (candidates.length - 1));
       m.localNorm = localNorm;
+      // Keep the legacy fusion score for telemetry only. It no longer decides the move.
       m.finalScore = context.cfg.localWeight * localNorm
         + context.cfg.atomicWeight * (m.atomicScore ?? .5)
         + context.cfg.pairWeight * m.pairScore;
+      m.jevScore = .28 * (m.atomicScore ?? .5) + .72 * (m.pairScore ?? 0);
       if (m.analysis.winsNow) m.finalScore += 10;
       if (m.analysis.vcf) m.finalScore += 1.2;
       if (m.analysis.facts.tactical_safety === 'LOSING') m.finalScore -= 10;
       else if (m.analysis.facts.tactical_safety === 'UNSAFE') m.finalScore -= 4;
     });
 
-    const ranked = [...candidates].sort((a,b) => b.finalScore - a.finalScore);
-    const final = ranked[0];
-    const jevSuggested = [...tournament]
-      .sort((a,b) => (b.pairScore ?? 0) - (a.pairScore ?? 0))[0]?.key || final.key;
-    const probabilities = softmaxProbabilities(ranked);
-    const confidence = probabilities[final.key] ?? .5;
+    const jevSuggestedMove = [...tournament]
+      .sort((a,b) => (b.jevScore ?? 0) - (a.jevScore ?? 0))[0] || localChoice;
+    const jevSuggested = jevSuggestedMove.key;
+
+    let verification = null;
+    let final = localChoice;
+    if (jevSuggested !== localChoice.key) {
+      updateApiState('busy', `Jev 提出 ${jevSuggested}，正在深度复核…`);
+      verification = deepVerifyChallenger(localChoice, jevSuggestedMove, mode);
+      const verified = candidates.find(m => m.key === verification?.winner);
+      if (verified) final = verified;
+    }
+
+    const ranked = [final, ...candidates.filter(m => m.key !== final.key)]
+      .map((m, i) => ({ ...m, rank: i + 1 }));
+    const probabilities = softmaxProbabilities(
+      [...candidates].sort((a,b) => (b.finalScore ?? 0) - (a.finalScore ?? 0))
+    );
+    const confidence = final.key === localChoice.key
+      ? (probabilities[final.key] ?? .5)
+      : Math.max(.5, probabilities[final.key] ?? .5);
+
     const atomicTrace = candidates.map(m => ({
       move: m.key,
       ...compactAnswer(data?.answers?.[`judge_${m.key}`])
@@ -1505,10 +1615,11 @@
     return {
       answer: { choice: final.key, confidence, probabilities },
       finalChoice: final.key,
+      localChoice: localChoice.key,
       jevSuggested,
       mode,
       forced: context.forced,
-      candidates: ranked.map((m,i) => ({ ...m, rank: i + 1 })),
+      candidates: ranked,
       model: data?.model || settings.model,
       usage: data?.usage || null,
       client: data?.__client || null,
@@ -1516,21 +1627,29 @@
         requestShape: {
           atomicQuestions: candidates.length,
           pairwiseQuestions: pairs.length * 2,
-          httpRequests: data?.__client?.cached ? 0 : (data?.__client?.attempts || 1)
+          httpRequests: data?.__client?.cached ? 0 : (data?.__client?.attempts || 1),
+          localRankHiddenFromJev: true
         },
         atomic: atomicTrace,
         pairwise: pairwiseTrace,
-        fusion: {
+        challenger: {
+          localChoice: localChoice.key,
+          jevSuggested,
+          disagreed: jevSuggested !== localChoice.key,
+          verification
+        },
+        fusionTelemetry: {
           weights: {
             local: context.cfg.localWeight,
             atomic: context.cfg.atomicWeight,
             pairwise: context.cfg.pairWeight
           },
-          finalChoice: final.key,
-          jevSuggested
+          note: 'legacy score retained for diagnostics only; challenger verification decides disagreements'
         }
       },
-      stageNote: '单次批量：Atomic + 双向 Pairwise（每回合最多 1 次 Jev 请求）'
+      stageNote: verification
+        ? `Jev Challenger：${jevSuggested} vs Local ${localChoice.key}，深度复核选择 ${final.key}`
+        : 'Jev Challenger 与 Local 一致'
     };
   }
 
