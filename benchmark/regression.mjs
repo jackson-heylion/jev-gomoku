@@ -254,6 +254,26 @@ async function testGrandmasterRealGameThreatTrace() {
   if (!Array.isArray(threat.analyses) || !threat.analyses.length) {
     throw new Error('Real-game threat search returned no candidate analyses');
   }
+
+  const byMove = new Map(threat.analyses.map(item => [item.move, item]));
+  for (const losingMove of ['K9', 'G5']) {
+    const evidence = byMove.get(losingMove);
+    if (!evidence?.forced) {
+      throw new Error('Threat search failed to prove the real-game losing candidate ' + losingMove);
+    }
+    if (evidence.attackerTurns !== 4) {
+      throw new Error('Expected a four-attacker-turn proof for ' + losingMove + ', got ' + evidence.attackerTurns);
+    }
+    if (evidence.line?.[0] !== 'I6' || !evidence.line?.includes('K8')) {
+      throw new Error('Threat proof for ' + losingMove + ' lost the expected I6...K8 forcing line');
+    }
+  }
+
+  for (const survivingMove of ['F9', 'E9']) {
+    if (byMove.get(survivingMove)?.forced) {
+      throw new Error('Threat search incorrectly marked ' + survivingMove + ' as a proven forced loss');
+    }
+  }
 }
 
 /** A single deterministic candidate must never trigger a Jev request. */
