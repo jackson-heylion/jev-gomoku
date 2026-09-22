@@ -32,38 +32,36 @@ function oneHotChoice(choice, keys) {
   };
 }
 
-async function testIndependentChallengerVerification() {
-  let challengerTarget = null;
+async function testJevFinalDecisionAuthority() {
+  let jevTarget = null;
+  let requestCount = 0;
 
   const engine = await loadProductionEngine({
     request: async ({ payload }) => {
-      const facts = payload?.state?.candidate_facts || {};
-      const candidateKeys = Object.keys(facts);
+      requestCount++;
+      const questions = payload?.questions || {};
+      const questionIds = Object.keys(questions);
+      if (questionIds.length !== 1 || questionIds[0] !== 'best_move') {
+        throw new Error('Hybrid must send exactly one best_move question to Jev');
+      }
+
+      const criteria = questions.best_move?.criteria || {};
+      const candidateKeys = Object.keys(criteria);
       if (candidateKeys.length < 2) throw new Error('Need at least two candidates');
 
-      for (const candidate of Object.values(facts)) {
-        if ('local_rank' in candidate || 'local_engine_grade' in candidate) {
-          throw new Error('Local ranking leaked into Jev candidate_facts');
-        }
+      for (const candidate of Object.values(criteria)) {
+        if (!('local_rank' in candidate)) throw new Error('Local rank evidence missing');
+        if (!('local_alpha_beta_score' in candidate)) throw new Error('Local search evidence missing');
+        if (!('deep_search_rank' in candidate)) throw new Error('Deep-search evidence missing');
+        if (!('tactical_safety' in candidate)) throw new Error('Tactical safety evidence missing');
       }
 
-      challengerTarget = candidateKeys[1];
-      const answers = {};
-      for (const [questionId, question] of Object.entries(payload.questions || {})) {
-        const keys = Object.keys(question.criteria || {});
-        if (questionId.startsWith('judge_')) {
-          const move = questionId.slice('judge_'.length);
-          const choice = move === challengerTarget ? 'EXCELLENT' : 'NEUTRAL';
-          answers[questionId] = oneHotChoice(choice, ['EXCELLENT', 'GOOD', 'NEUTRAL', 'RISKY', 'BAD']);
-        } else if (questionId.startsWith('duel_')) {
-          const choice = keys.includes(challengerTarget) ? challengerTarget : keys[0];
-          answers[questionId] = oneHotChoice(choice, keys);
-        }
-      }
-
+      jevTarget = candidateKeys[1];
       return {
         model: 'mock-jev',
-        answers,
+        answers: {
+          best_move: oneHotChoice(jevTarget, candidateKeys)
+        },
         usage: { input_tokens: 1, output_tokens: 1 },
         __client: { attempts: 1, cached: false, transport: 'regression-mock' }
       };
@@ -73,28 +71,40 @@ async function testIndependentChallengerVerification() {
   const position = positionFromSequence(['G7']);
   engine.setPosition(position.board, position.moves, 'jev-latest');
   const result = await engine.hybrid('strong');
-  const challenger = result.decisionTrace?.challenger;
 
-  console.log('challenger regression:', JSON.stringify({
+  console.log('jev-final regression:', JSON.stringify({
     finalChoice: result.finalChoice,
     localChoice: result.localChoice,
     jevSuggested: result.jevSuggested,
-    challenger
+    requestShape: result.decisionTrace?.requestShape,
+    deepSearch: result.decisionTrace?.preJevDeepSearch
   }));
 
-  if (!challengerTarget || !result.jevSuggested) {
-    throw new Error('Mock Jev did not produce a challenger');
+  if (!jevTarget) throw new Error('Mock Jev did not receive candidate choices');
+  if (jevTarget === result.localChoice) throw new Error('Regression target must differ from Local #1');
+  if (result.finalChoice !== jevTarget) {
+    throw new Error('Jev choice was not used as final move: expected ' + jevTarget + ', got ' + result.finalChoice);
   }
-  if (result.jevSuggested === result.localChoice) {
-    throw new Error('Mock Jev did not disagree with Local');
+  if (result.jevSuggested !== jevTarget) {
+    throw new Error('jevSuggested must reflect Jev final choice');
   }
-  if (!challenger?.disagreed || !challenger?.verification) {
-    throw new Error('Local/Jev disagreement did not trigger deep verification');
+  if (requestCount !== 1) {
+    throw new Error('Expected exactly one Jev request, got ' + requestCount);
   }
-  if (result.decisionTrace?.requestShape?.localRankHiddenFromJev !== true) {
-    throw new Error('Trace does not confirm Local rank is hidden from Jev');
+  if (result.decisionTrace?.requestShape?.decisionAuthority !== 'jev_final') {
+    throw new Error('Trace does not record Jev final decision authority');
+  }
+  if (result.decisionTrace?.requestShape?.localEvidenceVisibleToJev !== true) {
+    throw new Error('Trace does not confirm Local evidence is visible to Jev');
+  }
+  if (result.decisionTrace?.finalDecision?.choice !== jevTarget) {
+    throw new Error('Final Jev decision trace is missing or incorrect');
+  }
+  if (!result.decisionTrace?.preJevDeepSearch) {
+    throw new Error('Pre-Jev deep-search evidence is missing');
   }
 }
+
 
 async function testMustBlockOpponentForkCreator() {
   const engine = await loadProductionEngine({
@@ -130,6 +140,6 @@ async function testMustBlockOpponentForkCreator() {
   }
 }
 
-await testIndependentChallengerVerification();
+await testJevFinalDecisionAuthority();
 await testMustBlockOpponentForkCreator();
 console.log('Engine regression tests passed.');
