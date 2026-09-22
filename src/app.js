@@ -291,7 +291,19 @@
     ruleOverlineInput.checked = settings.forbidOverline;
     ruleFourFourInput.checked = settings.forbidFourFour;
     ruleThreeThreeInput.checked = settings.forbidThreeThree;
-    gameConfigSummary.textContent = ruleSummaryText();
+    updatePreGamePreview();
+  }
+
+  function updatePreGamePreview() {
+    const selected = sideOptionButtons.find(button => button.classList.contains('selected'));
+    const side = selected?.dataset.playerColor === 'white' ? WHITE : BLACK;
+    const enabled = [
+      ruleOverlineInput.checked && '长连',
+      ruleFourFourInput.checked && '四四',
+      ruleThreeThreeInput.checked && '三三'
+    ].filter(Boolean);
+    const blackWin = ruleOverlineInput.checked ? '黑棋恰好五连胜' : '黑棋五连及以上胜';
+    gameConfigSummary.textContent = `你执${colorShortZh(side)}${side === BLACK ? '先手' : '后手'} · 黑棋禁手：${enabled.length ? enabled.join(' / ') : '关闭'} · ${blackWin}`;
   }
 
   function readPreGameControls() {
@@ -2476,7 +2488,8 @@
         id,
         task: 'search',
         board: board.map(row => row.slice()),
-        side: WHITE,
+        side: aiColor(),
+        rules: workerRuleConfig(),
         candidates: uniqueMoves.map(move => move.key),
         timeBudgetMs,
         maxDepth,
@@ -2588,7 +2601,8 @@
         id,
         task: 'threat',
         board: board.map(row => row.slice()),
-        side: WHITE,
+        side: aiColor(),
+        rules: workerRuleConfig(),
         candidates: uniqueMoves.map(move => move.key),
         timeBudgetMs,
         maxThreatTurns,
@@ -3024,8 +3038,10 @@
     };
   }
 
-    async function jevTurn() {
-    if (gameOver || current !== WHITE || thinking) return;
+  async function jevTurn() {
+    const side = aiColor();
+    const human = playerColor();
+    if (!gameStarted || gameOver || current !== side || thinking) return;
 
     thinking = true;
     beginThinkingClock();
@@ -3040,7 +3056,7 @@
     try {
       let result;
       if (settings.strengthMode === 'local') {
-        result = localOnlyDecision(settings.strengthMode === 'strong' ? 'strong' : 'expert');
+        result = localOnlyDecision('expert');
       } else if (settings.strengthMode === 'jev') {
         updateApiState('busy', 'Jev 正在思考…');
         const decision = buildPureJevRequest();
@@ -3070,29 +3086,31 @@
           stageNote: '纯 Jev（每回合 1 次请求）'
         };
       } else {
-        result = await advancedDecision(settings.strengthMode || 'expert');
+        result = await advancedDecision(settings.strengthMode || 'grandmaster');
       }
 
       const parsed = parseCoord(result.finalChoice);
-      if (!parsed || board[parsed.r][parsed.c] !== EMPTY) throw new Error(`最终决策产生非法落点：${result.finalChoice}`);
+      if (!parsed || board[parsed.r][parsed.c] !== EMPTY || !isLegalMoveForColor(parsed.r, parsed.c, side)) {
+        throw new Error(`最终决策产生非法落点：${result.finalChoice}`);
+      }
       captureThinkingDuration(result);
       lastJev = result;
       renderJevResult(lastJev);
       const moveSource = result.mode === 'local' || result.fallbackReason || result.stageNote?.includes('0 次 Jev')
         ? '本地战术'
         : 'Jev';
-      place(parsed.r, parsed.c, WHITE, moveSource);
+      place(parsed.r, parsed.c, side, moveSource);
       rememberDecision(result, moves.length);
 
-      if (isWin(parsed.r, parsed.c, WHITE)) {
-        finish(result.mode === 'local' ? '本地引擎赢了' : 'Jev 赢了', WHITE);
+      if (isWin(parsed.r, parsed.c, side)) {
+        finish(result.mode === 'local' ? '本地引擎赢了' : 'Jev 赢了', side);
         return;
       }
       if (moves.length === SIZE * SIZE) {
         finish('平局', EMPTY);
         return;
       }
-      current = BLACK;
+      current = human;
       resetTurnClock();
       updateApiState();
     } catch (err) {
@@ -3100,41 +3118,39 @@
       console.error(err);
 
       const msg = friendlyError(err);
-      const shouldFallback = true;
-
-      if (shouldFallback) {
-        try {
-          const fallback = localOnlyDecision(settings.strengthMode === 'strong' ? 'strong' : 'expert');
-          fallback.fallbackReason = msg;
-          fallback.stageNote = `${fallback.stageNote}；Jev 不可用时自动降级`;
-          const parsed = parseCoord(fallback.finalChoice);
-          if (!parsed || board[parsed.r][parsed.c] !== EMPTY) throw new Error('本地降级产生非法落点');
-          captureThinkingDuration(fallback);
-          lastJev = fallback;
-          renderJevResult(fallback);
-          place(parsed.r, parsed.c, WHITE, '本地引擎(降级)');
-          rememberDecision(fallback, moves.length);
-
-          if (isWin(parsed.r, parsed.c, WHITE)) {
-            finish('本地引擎赢了', WHITE);
-            return;
-          }
-          if (moves.length === SIZE * SIZE) {
-            finish('平局', EMPTY);
-            return;
-          }
-          current = BLACK;
-          resetTurnClock();
-          updateApiState('err', 'Jev 暂不可用 · 本地引擎接管');
-          toast('Jev 暂时不可用，本回合已由本地引擎接管。', 4200);
-          return;
-        } catch (fallbackErr) {
-          console.error('local fallback failed', fallbackErr);
+      try {
+        const fallback = localOnlyDecision('expert');
+        fallback.fallbackReason = msg;
+        fallback.stageNote = `${fallback.stageNote}；Jev 不可用时自动降级`;
+        const parsed = parseCoord(fallback.finalChoice);
+        if (!parsed || board[parsed.r][parsed.c] !== EMPTY || !isLegalMoveForColor(parsed.r, parsed.c, side)) {
+          throw new Error('本地降级产生非法落点');
         }
+        captureThinkingDuration(fallback);
+        lastJev = fallback;
+        renderJevResult(fallback);
+        place(parsed.r, parsed.c, side, '本地引擎(降级)');
+        rememberDecision(fallback, moves.length);
+
+        if (isWin(parsed.r, parsed.c, side)) {
+          finish('本地引擎赢了', side);
+          return;
+        }
+        if (moves.length === SIZE * SIZE) {
+          finish('平局', EMPTY);
+          return;
+        }
+        current = human;
+        resetTurnClock();
+        updateApiState('err', 'Jev 暂不可用 · 本地引擎接管');
+        toast('Jev 暂时不可用，本回合已由本地引擎接管。', 4200);
+        return;
+      } catch (fallbackErr) {
+        console.error('local fallback failed', fallbackErr);
       }
 
       captureThinkingDuration();
-      current = WHITE;
+      current = side;
       updateApiState('err', 'Jev 暂不可用');
       jevInfo.textContent = `Jev 暂不可用：${msg}`;
       retryBtn.style.display = 'inline-block';
@@ -3174,7 +3190,7 @@
     const modeLabel = publicModeLabel(result.mode);
 
     let verdict = '稳健选择';
-    let reason = `综合局面后，白棋选择 ${finalChoice}，优先保持棋形和后续空间。`;
+    let reason = `综合局面后，${colorNameZh(aiColor())}选择 ${finalChoice}，优先保持棋形和后续空间。`;
 
     if (result.forced === 'win' || f.forced_role === 'WIN_NOW' || f.attack_shape === 'IMMEDIATE_WIN') {
       verdict = '直接取胜';
@@ -3199,7 +3215,7 @@
       reason = `${finalChoice} 有进攻价值，但也存在被对手反击的风险。`;
     } else if (f.connectivity === 'VERY_HIGH' || f.connectivity === 'HIGH') {
       verdict = '强化棋形';
-      reason = `${finalChoice} 与现有白棋连接紧密，有利于形成更多后续进攻方向。`;
+      reason = `${finalChoice} 与现有${colorNameZh(aiColor())}连接紧密，有利于形成更多后续进攻方向。`;
     }
 
     let agreement;
@@ -3254,7 +3270,7 @@
           ? `${human.modeLabel} · 后台战术复核`
           : jevParticipated
             ? `${human.modeLabel} · Jev 选择`
-            : '本地战术 · 白棋落在';
+            : `本地战术 · ${colorNameZh(aiColor())}落在`;
     jevVerdict.textContent = human.verdict;
     jevInfo.innerHTML = `<strong>${escapeHtml(human.reason)}</strong><span>${escapeHtml(human.agreement)}</span>`;
 
@@ -3294,15 +3310,32 @@
   }
 
   canvas.addEventListener('click', onBoardClick);
-  document.getElementById('settingsBtn').addEventListener('click', openSettings);
-  document.getElementById('quickSettingsBtn').addEventListener('click', openSettings);
+  document.getElementById('settingsBtn').addEventListener('click', () => openSettings(false));
+  document.getElementById('quickSettingsBtn').addEventListener('click', () => openSettings(false));
   document.getElementById('closeSettingsBtn').addEventListener('click', () => {
     if (testController) testController.abort();
+    if (!gameStarted) {
+      toast('请先确认开局设置并点击“保存并开始”。', 3200);
+      return;
+    }
     settingsModal.classList.remove('show');
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
   levelOptionButtons.forEach(button => {
     button.addEventListener('click', () => renderLevelSelection(button.dataset.mode));
+  });
+  sideOptionButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      sideOptionButtons.forEach(item => {
+        const selected = item === button;
+        item.classList.toggle('selected', selected);
+        item.setAttribute('aria-checked', selected ? 'true' : 'false');
+      });
+      updatePreGamePreview();
+    });
+  });
+  [ruleOverlineInput, ruleFourFourInput, ruleThreeThreeInput].forEach(input => {
+    input.addEventListener('change', updatePreGamePreview);
   });
   testConnectionBtn.addEventListener('click', testConnection);
   document.getElementById('restartBtn').addEventListener('click', restart);
@@ -3316,23 +3349,24 @@
     if (e.target === resultModal) hideResultModal();
   });
   settingsModal.addEventListener('click', e => {
-    if (e.target === settingsModal) {
+    if (e.target === settingsModal && gameStarted) {
       if (testController) testController.abort();
       settingsModal.classList.remove('show');
+    } else if (e.target === settingsModal && !gameStarted) {
+      toast('开局前必须先确认棋色和规则。', 3000);
     }
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (testController) testController.abort();
-      settingsModal.classList.remove('show');
+      if (gameStarted) settingsModal.classList.remove('show');
       hideResultModal();
     }
   });
 
   renderLevelSelection(settings.strengthMode);
-  drawBoard();
-  updateHistory();
-  updateStatus();
-  updateApiState();
+  syncPreGameControls();
+  resetGameState(false);
+  openSettings(true);
   setInterval(refreshTurnClock, 100);
 })();
