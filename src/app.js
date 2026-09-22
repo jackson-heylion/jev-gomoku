@@ -23,13 +23,8 @@
   const toastEl = document.getElementById('toast');
 
   const settingsModal = document.getElementById('settingsModal');
-  const apiKeyInput = document.getElementById('apiKey');
   const modelInput = document.getElementById('model');
   const strengthModeInput = document.getElementById('strengthMode');
-  const accessModeInput = document.getElementById('accessMode');
-  const endpointInput = document.getElementById('endpoint');
-  const accessWarning = document.getElementById('accessWarning');
-  const rememberKeyInput = document.getElementById('rememberKey');
   const testConnectionBtn = document.getElementById('testConnectionBtn');
   const connectionTest = document.getElementById('connectionTest');
   const connectionTestText = document.getElementById('connectionTestText');
@@ -48,130 +43,32 @@
   let gameStartedAt = new Date();
 
   const settings = loadSettings();
-  apiKeyInput.value = settings.apiKey;
   modelInput.value = settings.model;
   strengthModeInput.value = settings.strengthMode;
-  accessModeInput.value = settings.accessMode;
-  endpointInput.value = settings.endpoint;
-  updateAccessModeUI(false);
-  rememberKeyInput.checked = settings.remember;
 
   function makeBoard() {
     return Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
   }
 
-  function isLocalProxyPage() {
-    return /^https?:$/.test(location.protocol) && ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
-  }
-
-  function isGithubPagesPage() {
-    return location.hostname.endsWith('.github.io');
-  }
-
-  function defaultProxyEndpoint() {
-    return isLocalProxyPage() ? `${location.origin}/api/jev` : 'http://127.0.0.1:8787/api/jev';
-  }
-
-  function isKnownLocalProxyEndpoint(value) {
-    try {
-      const u = new URL(value);
-      return ['127.0.0.1', 'localhost', '::1'].includes(u.hostname) && u.pathname === '/api/jev';
-    } catch (_) {
-      return false;
-    }
-  }
-
   function loadSettings() {
-    const localKey = localStorage.getItem('jev_gomoku_api_key') || '';
-    const sessionKey = sessionStorage.getItem('jev_gomoku_api_key') || '';
-    const remember = Boolean(localKey);
-    const savedMode = localStorage.getItem('jev_gomoku_access_mode');
-    const accessMode = savedMode || (isGithubPagesPage() ? 'direct' : 'proxy');
-    const savedEndpoint = localStorage.getItem('jev_gomoku_endpoint');
-    // 通过本地代理页面打开时，自动跟随当前端口，例如代理从 8787 自动切到 8788。
-    // 仅覆盖旧的 localhost/127.0.0.1 本地代理地址；用户配置的自定义代理地址仍会保留。
-    let endpoint;
-    if (accessMode === 'proxy') {
-      endpoint = (!savedEndpoint || isKnownLocalProxyEndpoint(savedEndpoint))
-        ? defaultProxyEndpoint()
-        : savedEndpoint;
-    } else {
-      endpoint = savedEndpoint && !isKnownLocalProxyEndpoint(savedEndpoint)
-        ? savedEndpoint
-        : 'https://api.typesafe.ai/v1/systemone';
-    }
     return {
-      apiKey: localKey || sessionKey,
       model: localStorage.getItem('jev_gomoku_model') || 'jev-latest',
-      strengthMode: localStorage.getItem('jev_gomoku_strength') || (isGithubPagesPage() ? 'local' : 'expert'),
-      accessMode,
-      endpoint,
-      remember
+      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'expert'
     };
   }
 
   function saveSettings() {
     if (testController) testController.abort();
-    settings.apiKey = apiKeyInput.value.trim();
     settings.model = modelInput.value.trim() || 'jev-latest';
-    settings.strengthMode = ['local', 'jev', 'strong', 'expert'].includes(strengthModeInput.value) ? strengthModeInput.value : 'expert';
-    settings.accessMode = accessModeInput.value === 'direct' ? 'direct' : 'proxy';
-    settings.endpoint = endpointInput.value.trim() || (settings.accessMode === 'proxy' ? defaultProxyEndpoint() : 'https://api.typesafe.ai/v1/systemone');
-    settings.remember = rememberKeyInput.checked;
-
+    settings.strengthMode = ['local', 'jev', 'strong', 'expert'].includes(strengthModeInput.value)
+      ? strengthModeInput.value
+      : 'expert';
     localStorage.setItem('jev_gomoku_model', settings.model);
     localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
-    localStorage.setItem('jev_gomoku_access_mode', settings.accessMode);
-    localStorage.setItem('jev_gomoku_endpoint', settings.endpoint);
-
-    if (settings.remember) {
-      localStorage.setItem('jev_gomoku_api_key', settings.apiKey);
-      sessionStorage.removeItem('jev_gomoku_api_key');
-    } else {
-      localStorage.removeItem('jev_gomoku_api_key');
-      if (settings.apiKey) sessionStorage.setItem('jev_gomoku_api_key', settings.apiKey);
-      else sessionStorage.removeItem('jev_gomoku_api_key');
-    }
-
     settingsModal.classList.remove('show');
     updateApiState();
-    toast(settings.apiKey ? 'Jev 设置已保存' : '设置已保存；未填写 API Key 时使用本地引擎');
-    if (current === WHITE && !thinking && !gameOver) {
-      setTimeout(jevTurn, 100);
-    }
-  }
-
-
-  function updateAccessModeUI(changeEndpoint = true) {
-    const mode = accessModeInput.value === 'direct' ? 'direct' : 'proxy';
-    if (changeEndpoint) {
-      const current = endpointInput.value.trim();
-      const isDefaultLike = !current || current === 'https://api.typesafe.ai/v1/systemone' || isKnownLocalProxyEndpoint(current);
-      if (isDefaultLike) {
-        endpointInput.value = mode === 'proxy'
-          ? defaultProxyEndpoint()
-          : 'https://api.typesafe.ai/v1/systemone';
-      }
-    }
-    if (mode === 'proxy') {
-      accessWarning.textContent = `推荐使用本地代理：启动脚本会自动选择可用端口；当前代理地址会自动跟随页面端口${isLocalProxyPage() ? `（${location.origin}）` : ''}。浏览器不再直接跨域请求 TypeSafe。`;
-    } else {
-      accessWarning.textContent = '浏览器直连只有在 TypeSafe API 明确允许当前页面 Origin、Authorization 和 Content-Type 的 CORS 预检时才可用。前端代码无法绕过服务端 CORS。';
-    }
-    clearConnectionTest();
-  }
-
-  async function checkProxyHealth(endpoint, signal) {
-    try {
-      const u = new URL(endpoint);
-      const health = `${u.protocol}//${u.host}/health`;
-      const response = await fetch(health, { method: 'GET', signal, cache: 'no-store' });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json().catch(() => ({}));
-      return data?.ok === true;
-    } catch (_) {
-      return false;
-    }
+    toast(settings.strengthMode === 'local' ? '已切换到本地引擎' : 'Jev 设置已保存');
+    if (current === WHITE && !thinking && !gameOver) setTimeout(jevTurn, 100);
   }
 
   function setConnectionTest(kind, text) {
@@ -185,117 +82,51 @@
   }
 
   async function testConnection() {
-    const apiKey = apiKeyInput.value.trim();
     const model = modelInput.value.trim() || 'jev-latest';
-    const accessMode = accessModeInput.value === 'direct' ? 'direct' : 'proxy';
-    const endpoint = endpointInput.value.trim() || (accessMode === 'proxy' ? defaultProxyEndpoint() : 'https://api.typesafe.ai/v1/systemone');
-
-    if (!apiKey) {
-      setConnectionTest('err', '请先填写 API Key。');
-      apiKeyInput.focus();
-      return;
-    }
-
-    let parsedEndpoint;
-    try {
-      parsedEndpoint = new URL(endpoint);
-      if (!/^https?:$/.test(parsedEndpoint.protocol)) throw new Error('bad protocol');
-    } catch (_) {
-      setConnectionTest('err', 'Endpoint 格式不正确，请填写 http:// 或 https:// 地址。');
-      endpointInput.focus();
-      return;
-    }
-
     if (testController) testController.abort();
     testController = new AbortController();
     const timeout = setTimeout(() => testController?.abort(), 15000);
     testConnectionBtn.disabled = true;
     testConnectionBtn.textContent = '检测中…';
-    setConnectionTest('busy', accessMode === 'proxy'
-      ? '正在检测本地代理，并通过代理验证 Jev API、API Key 与 Model…'
-      : '正在浏览器直连 Jev API，验证 Endpoint、API Key、Model 与 CORS…');
+    setConnectionTest('busy', '正在通过同源 /api/jev 验证服务端 Jev 连接…');
     const started = performance.now();
-
-    if (accessMode === 'proxy') {
-      const healthy = await checkProxyHealth(endpoint, testController.signal);
-      if (!healthy) {
-        clearTimeout(timeout);
-        testController = null;
-        testConnectionBtn.disabled = false;
-        testConnectionBtn.textContent = '检测连接';
-        setConnectionTest('err', `未检测到本地代理。请运行 start-jev.command 或 node jev-proxy.mjs。若代理自动换了端口，请通过它自动打开的页面访问；当前 Endpoint：${endpoint}`);
-        return;
-      }
-    }
-
     const payload = {
-      state: 'TypeSafe Jev API connection test from a Gomoku browser client.',
+      state: 'TypeSafe Jev API connection test from Jev Gomoku.',
       model,
       questions: {
         connection_test: {
           type: 'choice',
           instructions: 'Choose the option named ok. This is only an API connectivity test.',
-          criteria: {
-            ok: 'The connection test is operating normally.',
-            other: 'Any other result.'
-          }
+          criteria: { ok: 'The connection test is operating normally.', other: 'Any other result.' }
         }
       }
     };
 
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetch('/api/jev', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         signal: testController.signal
       });
-
       const elapsed = Math.round(performance.now() - started);
       const raw = await response.text();
       let data = null;
       try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
-
       if (!response.ok) {
-        const detail = data?.detail || data?.message || data?.error || raw || response.statusText || `HTTP ${response.status}`;
-        const detailText = typeof detail === 'string' ? detail : JSON.stringify(detail);
-        throw Object.assign(new Error(detailText), { httpStatus: response.status });
+        const detail = data?.detail || data?.message || data?.error || response.statusText || `HTTP ${response.status}`;
+        throw Object.assign(new Error(typeof detail === 'string' ? detail : JSON.stringify(detail)), { httpStatus: response.status });
       }
-
       const answer = data?.answers?.connection_test;
       if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') {
-        throw new Error('API 已响应，但返回结构不符合预期（缺少 answers.connection_test.choice）。');
+        throw new Error('API 已响应，但返回结构不符合预期。');
       }
-
       const actualModel = data?.model || model;
-      const inTokens = data?.usage?.input_tokens;
-      const outTokens = data?.usage?.output_tokens;
-      const usage = Number.isFinite(inTokens) || Number.isFinite(outTokens)
-        ? ` · Token ${inTokens ?? '?'} in / ${outTokens ?? '?'} out`
-        : '';
-      setConnectionTest('ok', `连接成功 · HTTP ${response.status} · ${elapsed} ms · ${actualModel}${usage}`);
+      setConnectionTest('ok', `连接成功 · HTTP ${response.status} · ${elapsed} ms · ${actualModel}`);
     } catch (err) {
-      if (err?.name === 'AbortError') {
-        setConnectionTest('err', '检测超时（15 秒）或已取消。请检查网络、Endpoint 与 CORS。');
-      } else {
-        const status = err?.httpStatus;
-        let message = friendlyError(err);
-        if (status === 401) message = `API Key 无效或认证失败。${message ? ` ${message}` : ''}`;
-        else if (status === 403) message = `API Key 没有访问该模型或接口的权限。${message ? ` ${message}` : ''}`;
-        else if (status === 404) message = `Endpoint 不存在，请检查 API 地址。${message ? ` ${message}` : ''}`;
-        else if (status === 422 || status === 400) message = `API 已连通，但 Model 或请求参数未通过校验。${message ? ` ${message}` : ''}`;
-        else if (status === 429) message = `API 已连通，但当前被限流或额度不足。${message ? ` ${message}` : ''}`;
-        else if (status >= 500) message = `TypeSafe 服务端返回异常。${message ? ` ${message}` : ''}`;
-        if (!status && /浏览器无法|Failed to fetch|NetworkError|Load failed|CORS/i.test(message)) {
-          message = accessMode === 'proxy'
-            ? `无法连接本地代理。请运行 start-jev.command 或 node jev-proxy.mjs，并使用代理启动后显示/自动打开的地址。当前 Endpoint：${endpoint}`
-            : '浏览器直连被网络或 CORS 阻止。建议切换“本地代理（推荐）”；前端页面本身无法绕过服务端 CORS。';
-        }
-        setConnectionTest('err', `${status ? `HTTP ${status} · ` : ''}${message}`);
-      }
+      setConnectionTest('err', err?.name === 'AbortError'
+        ? '检测超时（15 秒）或已取消。'
+        : `${err?.httpStatus ? `HTTP ${err.httpStatus} · ` : ''}${friendlyError(err)}`);
     } finally {
       clearTimeout(timeout);
       testController = null;
@@ -308,7 +139,7 @@
     apiIndicator.className = 'indicator';
     if (kind === 'busy') apiIndicator.classList.add('busy');
     else if (kind === 'err') apiIndicator.classList.add('err');
-    else if (settings.apiKey) apiIndicator.classList.add('ok');
+    else if (settings.strengthMode !== 'local') apiIndicator.classList.add('ok');
 
     if (text) apiLabel.textContent = text;
     else {
@@ -316,23 +147,18 @@
         : settings.strengthMode === 'jev' ? '纯 Jev'
         : settings.strengthMode === 'strong' ? '强力混合'
         : '大师混合';
-      apiLabel.textContent = settings.apiKey
-        ? `${settings.model} · ${strengthLabel} · ${settings.accessMode === 'proxy' ? '本地代理' : '浏览器直连'}`
-        : '未配置 API Key · 本地引擎可直接玩';
+      apiLabel.textContent = settings.strengthMode === 'local'
+        ? '本地引擎 · 0 次 Jev 请求'
+        : `${settings.model} · ${strengthLabel} · 同源服务端`;
     }
   }
 
   function openSettings() {
-    apiKeyInput.value = settings.apiKey;
     modelInput.value = settings.model;
     strengthModeInput.value = settings.strengthMode || 'expert';
-    accessModeInput.value = settings.accessMode || 'proxy';
-    endpointInput.value = settings.endpoint;
-    rememberKeyInput.checked = settings.remember;
-    updateAccessModeUI(false);
     clearConnectionTest();
     settingsModal.classList.add('show');
-    setTimeout(() => apiKeyInput.focus(), 30);
+    setTimeout(() => modelInput.focus(), 30);
   }
 
   function toast(msg, duration = 2600) {
@@ -534,13 +360,13 @@
     if (gameOver) return;
     const nextNo = moves.length + 1;
     if (thinking) {
-      turnText.innerHTML = `<span class="stone-dot white"></span><span class="thinking">${settings.apiKey && settings.strengthMode !== 'local' ? 'Jev' : '本地引擎'} 正在选择落点</span>`;
+      turnText.innerHTML = `<span class="stone-dot white"></span><span class="thinking">${settings.strengthMode !== 'local' ? 'Jev' : '本地引擎'} 正在选择落点</span>`;
       gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
     } else if (current === BLACK) {
       turnText.innerHTML = `<span class="stone-dot black"></span><span>你的回合</span>`;
       gameMeta.textContent = `第 ${nextNo} 手 · 黑棋`;
     } else {
-      turnText.innerHTML = `<span class="stone-dot white"></span><span>${settings.apiKey && settings.strengthMode !== 'local' ? 'Jev' : '本地引擎'} 的回合</span>`;
+      turnText.innerHTML = `<span class="stone-dot white"></span><span>${settings.strengthMode !== 'local' ? 'Jev' : '本地引擎'} 的回合</span>`;
       gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
     }
     lastMoveText.textContent = moves.length ? `最后落子：${moves[moves.length - 1].coord}` : '尚未落子';
@@ -1405,8 +1231,6 @@
   async function callJev(payload) {
     if (!window.JevClient) throw new Error('JevClient 未加载');
     return await window.JevClient.request({
-      endpoint: settings.endpoint,
-      apiKey: settings.apiKey,
       payload,
       signal: requestController?.signal
     });
@@ -1610,14 +1434,14 @@
     retryBtn.style.display = 'none';
     canvas.classList.add('disabled');
     updateStatus();
-    updateApiState('busy', settings.apiKey && settings.strengthMode !== 'local'
+    updateApiState('busy', settings.strengthMode !== 'local'
       ? '本地引擎：Alpha-Beta + VCF/VCT…'
       : '本地引擎计算中…');
     requestController = new AbortController();
 
     try {
       let result;
-      if (!settings.apiKey || settings.strengthMode === 'local') {
+      if (settings.strengthMode === 'local') {
         result = localOnlyDecision(settings.strengthMode === 'strong' ? 'strong' : 'expert');
       } else if (settings.strengthMode === 'jev') {
         updateApiState('busy', '正在请求纯 Jev…');
@@ -1673,11 +1497,9 @@
       console.error(err);
 
       const msg = friendlyError(err);
-      const retryableFallback = err?.httpStatus === 429
-        || err?.httpStatus === 529
-        || /Failed to fetch|NetworkError|Load failed|CORS|无法连接/i.test(String(err?.message || err || ''));
+      const shouldFallback = true;
 
-      if (retryableFallback) {
+      if (shouldFallback) {
         try {
           const fallback = localOnlyDecision(settings.strengthMode === 'strong' ? 'strong' : 'expert');
           fallback.fallbackReason = msg;
@@ -1756,14 +1578,10 @@
 
   function friendlyError(err) {
     const msg = String(err?.message || err || '未知错误');
-    if (err?.httpStatus === 429) return 'Jev 请求过于频繁（HTTP 429）。客户端已按 Retry-After / 指数退避自动重试，仍未恢复。';
-    if (err?.httpStatus === 529) return 'TypeSafe 暂时过载（HTTP 529）。客户端已指数退避重试，仍未恢复。';
-    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
-      if (settings.accessMode === 'proxy') {
-        return `无法连接本地 Jev 代理。请运行 start-jev.command 或 node jev-proxy.mjs，并使用代理启动后显示/自动打开的端口。当前 Endpoint：${settings.endpoint}`;
-      }
-      return '浏览器直连 Jev API 被网络或 CORS 阻止。建议在 Jev 设置中切换为“本地代理（推荐）”。';
-    }
+    if (err?.httpStatus === 429) return 'Jev 请求过于频繁（HTTP 429）。服务端已按 Retry-After / 指数退避重试，仍未恢复。';
+    if (err?.httpStatus === 529) return 'TypeSafe 暂时过载（HTTP 529）。服务端已按 Retry-After / 指数退避重试，仍未恢复。';
+    if (err?.httpStatus === 503 && /not configured|未配置/i.test(msg)) return '服务端未配置 JEV_API_KEY。';
+    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return '无法访问同源 /api/jev；本回合将使用本地引擎。';
     if (msg.length > 220) return msg.slice(0, 220) + '…';
     return msg;
   }
@@ -1781,16 +1599,10 @@
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
   testConnectionBtn.addEventListener('click', testConnection);
-  accessModeInput.addEventListener('change', () => updateAccessModeUI(true));
   document.getElementById('restartBtn').addEventListener('click', restart);
   document.getElementById('undoBtn').addEventListener('click', undo);
   retryBtn.addEventListener('click', jevTurn);
   copyRecordBtn.addEventListener('click', copyGameRecord);
-  document.getElementById('toggleKeyBtn').addEventListener('click', (e) => {
-    const show = apiKeyInput.type === 'password';
-    apiKeyInput.type = show ? 'text' : 'password';
-    e.currentTarget.textContent = show ? '隐藏' : '显示';
-  });
   settingsModal.addEventListener('click', e => {
     if (e.target === settingsModal) {
       if (testController) testController.abort();
@@ -1808,5 +1620,4 @@
   updateHistory();
   updateStatus();
   updateApiState();
-  if (!settings.apiKey && !isGithubPagesPage()) setTimeout(openSettings, 350);
 })();
