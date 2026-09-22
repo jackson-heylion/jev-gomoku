@@ -301,14 +301,16 @@ function runSearch(message) {
   }
 
   if (!completed) {
-    const scores = candidates.map(move => {
-      board[move.r][move.c] = rootSide;
-      const win = isWin(move.r, move.c, rootSide);
-      const score = win ? MATE_SCORE * 10 : evaluateStatic();
-      board[move.r][move.c] = EMPTY;
-      return { move: move.key, score };
-    }).sort((a, b) => b.score - a.score);
-    completed = { depth: 1, scores };
+    // The deadline may already have expired. Do not start another expensive
+    // evaluation after timeout; keep the caller's first candidate as the safe fallback.
+    completed = {
+      depth: 0,
+      scores: candidates.map((move, index) => ({
+        move: move.key,
+        score: index === 0 ? 0 : -index
+      }))
+    };
+    timedOut = true;
   }
 
   return {
