@@ -392,3 +392,30 @@
       .result-actions { display: grid; grid-template-columns: 1fr 1fr; }
       .result-actions .primary { grid-column: 1 / -1; }
     }
+
+
+    /* Public release polish */
+    .opponent-card {
+      background:
+        linear-gradient(180deg, rgba(88,166,255,.045), transparent 58%),
+        rgba(21, 27, 35, .92);
+    }
+    .compact-btn {
+      min-height: 30px;
+      padding: 6px 9px;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .settings-note {
+      margin: 2px 0 15px;
+      padding: 10px 11px;
+      border: 1px solid rgba(88,166,255,.20);
+      border-radius: 10px;
+      background: rgba(88,166,255,.06);
+      color: #b9c8d8;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .opponent-card .runtime-hint {
+      margin-bottom: 1px;
+    }
