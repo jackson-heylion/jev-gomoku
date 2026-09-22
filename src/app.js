@@ -1318,18 +1318,70 @@
   const ENGINE_PRESETS = {
     strong: {
       depth: 3, root: 10, branch: 7, semantic: 5, tournament: 3, radius: 2,
-      vcfDepth: 3, vctDepth: 1, localWeight: .66, pairWeight: .24, atomicWeight: .10
+      vcfDepth: 3, vctDepth: 1, localTimeMs: 900,
+      localWeight: .66, pairWeight: .24, atomicWeight: .10
     },
     expert: {
       depth: 5, root: 14, branch: 7, semantic: 6, tournament: 4, radius: 2,
-      vcfDepth: 4, vctDepth: 2, localWeight: .62, pairWeight: .27, atomicWeight: .11
+      vcfDepth: 4, vctDepth: 2, localTimeMs: 1800,
+      localWeight: .62, pairWeight: .27, atomicWeight: .11
     },
     grandmaster: {
       depth: 4, root: 12, branch: 7, semantic: 6, tournament: 3, radius: 2,
-      vcfDepth: 4, vctDepth: 2, localWeight: .62, pairWeight: .27, atomicWeight: .11
+      vcfDepth: 4, vctDepth: 2, localTimeMs: 1200,
+      localWeight: .62, pairWeight: .27, atomicWeight: .11
     }
   };
   const MATE_SCORE = 1e14;
+  let activeLocalSearch = null;
+
+  function beginLocalSearchBudget(cfg) {
+    const startedAt = performance.now();
+    const budgetMs = Math.max(250, Number(cfg.localTimeMs) || 1200);
+    const runtime = {
+      startedAt,
+      budgetMs,
+      deadline: startedAt + budgetMs,
+      phaseDeadline: startedAt + Math.max(150, budgetMs * .70),
+      timedOut: false,
+      rootTimedOut: false,
+      checks: 0,
+      depthReached: 0,
+      targetDepth: cfg.depth
+    };
+    activeLocalSearch = runtime;
+    return runtime;
+  }
+
+  function localSearchExpired() {
+    const runtime = activeLocalSearch;
+    if (!runtime) return false;
+    runtime.checks++;
+    if (performance.now() < Math.min(runtime.phaseDeadline, runtime.deadline)) return false;
+    runtime.timedOut = true;
+    return true;
+  }
+
+  function enterLocalTacticalPhase(runtime) {
+    if (!runtime) return;
+    runtime.phaseDeadline = runtime.deadline;
+  }
+
+  function finishLocalSearchBudget(runtime) {
+    if (!runtime) return null;
+    const elapsedMs = Math.round(performance.now() - runtime.startedAt);
+    const result = {
+      budgetMs: runtime.budgetMs,
+      elapsedMs,
+      timedOut: runtime.timedOut || elapsedMs >= runtime.budgetMs,
+      rootTimedOut: runtime.rootTimedOut,
+      depthReached: runtime.depthReached,
+      targetDepth: runtime.targetDepth,
+      checks: runtime.checks
+    };
+    if (activeLocalSearch === runtime) activeLocalSearch = null;
+    return result;
+  }
 
   function otherColor(color) { return color === WHITE ? BLACK : WHITE; }
 
@@ -1445,7 +1497,7 @@
   }
 
   function alphaBeta(depth, alpha, beta, toMove, cfg, cache) {
-    if (depth <= 0) return evaluateStatic();
+    if (depth <= 0 || localSearchExpired()) return evaluateStatic();
     const key = boardCacheKey(toMove, depth);
     if (cache.has(key)) return cache.get(key);
 
@@ -1462,6 +1514,7 @@
 
     let value = toMove === aiColor() ? -Infinity : Infinity;
     for (const m of candidates) {
+      if (localSearchExpired()) break;
       board[m.r][m.c] = toMove;
       let child;
       if (isWin(m.r, m.c, toMove)) {
@@ -1505,6 +1558,7 @@
     const movesFound = [];
     const candidates = orderedMoves(color, limit, radius);
     for (const m of candidates) {
+      if (localSearchExpired()) break;
       board[m.r][m.c] = color;
       const wins = isWin(m.r, m.c, color) ? 2 : immediateWins(color, radius).length;
       const defenderImmediate = wins >= 2 ? immediateWins(otherColor(color), radius).length : 0;
@@ -1522,6 +1576,7 @@
   function forcingExtensions(color, limit = 8, radius = 2) {
     const out = [];
     for (const m of orderedMoves(color, limit * 2, radius)) {
+      if (localSearchExpired()) break;
       board[m.r][m.c] = color;
       const n = isWin(m.r, m.c, color) ? 2 : immediateWins(color, radius).length;
       board[m.r][m.c] = EMPTY;
@@ -1535,7 +1590,7 @@
   // forced single-point blocks, so a positive result is much stronger than a
   // heuristic static score.
   function searchVCF(attacker, turns, radius = 2, memo = new Map()) {
-    if (turns <= 0) return false;
+    if (turns <= 0 || localSearchExpired()) return false;
     const defender = otherColor(attacker);
     if (immediateWins(attacker, radius).length) return true;
     if (immediateWins(defender, radius).length) return false;
@@ -1544,6 +1599,7 @@
 
     const candidates = orderedMoves(attacker, 8, radius);
     for (const m of candidates) {
+      if (localSearchExpired()) break;
       board[m.r][m.c] = attacker;
       if (isWin(m.r, m.c, attacker)) {
         board[m.r][m.c] = EMPTY;
@@ -1587,7 +1643,7 @@
   // Because Gomoku VCT defense can be broad, this is intentionally exposed to
   // Jev as VCT_PRESSURE_FOUND rather than as a mathematical proof.
   function searchVCTPressure(attacker, turns, radius = 2, memo = new Map()) {
-    if (turns <= 0) return false;
+    if (turns <= 0 || localSearchExpired()) return false;
     if (searchVCF(attacker, Math.min(2, turns), radius, new Map())) return true;
     const defender = otherColor(attacker);
     if (immediateWins(defender, radius).length) return false;
@@ -1596,6 +1652,7 @@
 
     const candidates = orderedMoves(attacker, 7, radius);
     for (const m of candidates) {
+      if (localSearchExpired()) break;
       board[m.r][m.c] = attacker;
       if (isWin(m.r, m.c, attacker)) {
         board[m.r][m.c] = EMPTY;
@@ -1627,6 +1684,7 @@
 
       let allHold = defenses.length > 0;
       for (const d of defenses) {
+        if (localSearchExpired()) { allHold = false; break; }
         if (board[d.r][d.c] !== EMPTY || !isLegalMoveForColor(d.r, d.c, defender)) continue;
         board[d.r][d.c] = defender;
         const survives = !isWin(d.r, d.c, defender) && searchVCTPressure(attacker, turns - 1, radius, memo);
@@ -1669,6 +1727,7 @@
     defenses = defenses.slice(0, 4);
     let allHold = defenses.length > 0;
     for (const d of defenses) {
+      if (localSearchExpired()) { allHold = false; break; }
       if (board[d.r][d.c] !== EMPTY || !isLegalMoveForColor(d.r, d.c, defender)) continue;
       board[d.r][d.c] = defender;
       const survives = !isWin(d.r, d.c, defender) && searchVCTPressure(attacker, turns - 1, radius, new Map());
@@ -1768,12 +1827,52 @@
     };
   }
 
+  function scoreRootsWithinLocalBudget(roots, cfg, runtime) {
+    const side = aiColor();
+    let completed = roots.map(move => ({
+      ...move,
+      searchScore: quickMoveScore(move, side)
+    }));
+    let depthReached = 0;
+
+    const startDepth = Math.min(cfg.depth, 3);
+    for (let depth = startDepth; depth <= cfg.depth; depth++) {
+      if (localSearchExpired()) {
+        runtime.rootTimedOut = true;
+        break;
+      }
+
+      const depthCfg = { ...cfg, depth };
+      const cache = new Map();
+      const iteration = [];
+      let complete = true;
+      for (const move of roots) {
+        if (localSearchExpired()) {
+          complete = false;
+          runtime.rootTimedOut = true;
+          break;
+        }
+        iteration.push({
+          ...move,
+          searchScore: scoreRootMove(move, depthCfg, cache)
+        });
+      }
+      if (!complete) break;
+      completed = iteration;
+      depthReached = depth;
+      runtime.depthReached = depth;
+    }
+
+    if (!depthReached && cfg.depth < 3) runtime.depthReached = cfg.depth;
+    return completed.sort((a, b) => b.searchScore - a.searchScore);
+  }
+
   function advancedEngineConfig(mode) {
     const base = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
-    if ((mode === 'expert' || mode === 'grandmaster') && moves.length < 8) {
-      // The opening has the widest search tree and very little tactical
-      // information. Keep it shallow on the UI thread; Jev still owns the
-      // final move decision.
+    if ((mode === 'expert' || mode === 'grandmaster') && moves.length < 4) {
+      // Only the first four plies use the shallow opening profile. From ply 5
+      // onward Expert/Grandmaster restore their full local search settings;
+      // the local wall-clock budget below prevents pathological UI stalls.
       return {
         ...base,
         depth: 3,
@@ -1790,55 +1889,70 @@
 
   function buildAdvancedCandidates(mode) {
     const cfg = advancedEngineConfig(mode);
-    const side = aiColor();
-    const opponent = otherColor(side);
-    const ownWins = immediateWins(side, cfg.radius);
-    const opponentWins = immediateWins(opponent, cfg.radius);
-    let forced = null;
-    let roots;
-    if (ownWins.length) {
-      forced = 'win';
-      roots = ownWins;
-    } else if (opponentWins.length) {
-      forced = 'block';
-      roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
-    } else {
-      const opponentForks = moves.length >= 16
-        ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
-        : { count: 0, points: [], moves: [] };
-      if (opponentForks.count === 1) {
-        forced = 'block_fork';
-        roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
+    const runtime = beginLocalSearchBudget(cfg);
+    let result;
+
+    try {
+      const side = aiColor();
+      const opponent = otherColor(side);
+      // Immediate win / mandatory block detection is deliberately not skipped on
+      // timeout; legality and one-ply tactics remain deterministic safety rails.
+      const ownWins = immediateWins(side, cfg.radius);
+      const opponentWins = immediateWins(opponent, cfg.radius);
+      let forced = null;
+      let roots;
+      if (ownWins.length) {
+        forced = 'win';
+        roots = ownWins;
+      } else if (opponentWins.length) {
+        forced = 'block';
+        roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
       } else {
-        roots = orderedMoves(side, cfg.root, cfg.radius);
+        const opponentForks = moves.length >= 16 && !localSearchExpired()
+          ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
+          : { count: 0, points: [], moves: [] };
+        if (opponentForks.count === 1) {
+          forced = 'block_fork';
+          roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
+        } else {
+          roots = orderedMoves(side, cfg.root, cfg.radius);
+        }
       }
-    }
 
-    const cache = new Map();
-    const scored = roots.map(m => ({ ...m, searchScore: scoreRootMove(m, cfg, cache) }))
-      .sort((a,b) => b.searchScore - a.searchScore);
+      let scored = scoreRootsWithinLocalBudget(roots, cfg, runtime);
+      enterLocalTacticalPhase(runtime);
 
-    let selected = scored.slice(0, Math.min(cfg.semantic, scored.length));
-    selected.forEach((m, i) => {
-      m.rank = i + 1;
-      m.analysis = analyzeAdvancedCandidate(m, forced, cfg);
-    });
+      let selected = scored.slice(0, Math.min(cfg.semantic, scored.length));
+      selected.forEach((m, i) => {
+        m.rank = i + 1;
+        m.analysis = analyzeAdvancedCandidate(m, forced, cfg);
+      });
 
-    // Hard tactical filters override every probabilistic judgement.
-    const immediate = selected.filter(m => m.analysis.winsNow);
-    if (immediate.length) selected = immediate;
-    else {
-      const fullySafe = selected.filter(m => m.analysis.facts.tactical_safety === 'SAFE');
-      if (fullySafe.length) selected = fullySafe;
+      // Hard tactical filters override every probabilistic judgement. Even when
+      // deeper VCF/VCT work times out, immediate win/block facts remain exact.
+      const immediate = selected.filter(m => m.analysis.winsNow);
+      if (immediate.length) selected = immediate;
       else {
-        const survivable = selected.filter(m => !['LOSING','UNSAFE'].includes(m.analysis.facts.tactical_safety));
-        if (survivable.length) selected = survivable;
+        const fullySafe = selected.filter(m => m.analysis.facts.tactical_safety === 'SAFE');
+        if (fullySafe.length) selected = fullySafe;
+        else {
+          const survivable = selected.filter(m => !['LOSING','UNSAFE'].includes(m.analysis.facts.tactical_safety));
+          if (survivable.length) selected = survivable;
+        }
+        const proven = selected.filter(m => m.analysis.vcf);
+        if (proven.length) selected = proven;
       }
-      const proven = selected.filter(m => m.analysis.vcf);
-      if (proven.length) selected = proven;
+      selected.forEach((m,i) => {
+        m.rank = i + 1;
+        m.analysis.facts.local_engine_grade = i === 0 ? 'TOP_CHOICE' : i === 1 ? 'STRONG' : i <= 3 ? 'SOLID' : 'SECONDARY';
+      });
+      result = { mode, cfg, forced, candidates: selected };
+    } finally {
+      const localSearch = finishLocalSearchBudget(runtime);
+      if (result) result.localSearch = localSearch;
     }
-    selected.forEach((m,i) => { m.rank = i + 1; m.analysis.facts.local_engine_grade = i === 0 ? 'TOP_CHOICE' : i === 1 ? 'STRONG' : i <= 3 ? 'SOLID' : 'SECONDARY'; });
-    return { mode, cfg, forced, candidates: selected };
+
+    return result;
   }
 
   function buildPureJevRequest() {
@@ -2292,6 +2406,7 @@
         local: {
           engineMode,
           forced: context.forced,
+          searchBudget: context.localSearch,
           ranked: ranked.slice(0, 8).map(m => ({
             move: m.key,
             rank: m.rank,
@@ -2301,7 +2416,7 @@
           }))
         }
       },
-      stageNote: '本地 Alpha-Beta + VCF/VCT（0 次 Jev 请求）'
+      stageNote: `本地 Alpha-Beta + VCF/VCT（0 次 Jev 请求；${context.localSearch?.timedOut ? `达到 ${context.localSearch.budgetMs}ms 时间上限，使用已完成搜索结果` : `本地耗时 ${context.localSearch?.elapsedMs ?? 0}ms`})`
     };
   }
 
@@ -2683,7 +2798,12 @@
           candidateCount: candidates.length,
           httpRequests: 0,
           decisionAuthority: reason,
-          parallelEvidence: true
+          parallelEvidence: true,
+          localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
+          localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
+          localSearchTimedOut: Boolean(context.localSearch?.timedOut),
+          localSearchDepthReached: context.localSearch?.depthReached ?? null,
+          localSearchTargetDepth: context.localSearch?.targetDepth ?? context.cfg.depth
         },
         preJevDeepSearch: deepAnalysis ? {
           status: deepAnalysis.status || null,
@@ -2812,7 +2932,12 @@
           localEvidenceVisibleToJev: true,
           threatEvidenceVisibleToJev: true,
           decisionAuthority: 'jev_on_disagreement',
-          parallelEvidence: true
+          parallelEvidence: true,
+          localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
+          localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
+          localSearchTimedOut: Boolean(context.localSearch?.timedOut),
+          localSearchDepthReached: context.localSearch?.depthReached ?? null,
+          localSearchTargetDepth: context.localSearch?.targetDepth ?? context.cfg.depth
         },
         preJevDeepSearch: deepAnalysis ? {
           status: deepAnalysis.status || null,
@@ -2999,6 +3124,11 @@
           localEvidenceVisibleToJev: true,
           decisionAuthority: 'jev_final',
           localOpeningAdaptive: Boolean(context.cfg.openingAdaptive),
+          localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
+          localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
+          localSearchTimedOut: Boolean(context.localSearch?.timedOut),
+          localSearchDepthReached: context.localSearch?.depthReached ?? null,
+          localSearchTargetDepth: context.localSearch?.targetDepth ?? context.cfg.depth,
           deepSearchPolicy: deepAnalysis?.status === 'skipped_opening'
             ? 'skip_opening'
             : 'pre_jev_worker'
