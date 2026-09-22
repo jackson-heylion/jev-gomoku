@@ -413,6 +413,16 @@
     const p = pointFromEvent(e);
     if (!p || board[p.r][p.c] !== EMPTY) return;
 
+    const forbidden = blackForbiddenInfo(p.r, p.c);
+    if (forbidden.forbidden) {
+      const label = forbidden.type === 'OVERLINE' ? '长连'
+        : forbidden.type === 'FOUR_FOUR' ? '四四'
+        : forbidden.type === 'THREE_THREE' ? '三三'
+        : '禁手';
+      toast(`${coord(p.r, p.c)} 是黑棋${label}禁手，请选择其他落点。`, 3200);
+      return;
+    }
+
     place(p.r, p.c, BLACK, '你');
     if (isWin(p.r, p.c, BLACK)) {
       finish('你赢了', BLACK);
@@ -428,18 +438,211 @@
     setTimeout(jevTurn, 220);
   }
 
-  function isWin(r, c, color) {
-    const dirs = [[1,0],[0,1],[1,1],[1,-1]];
-    return dirs.some(([dr,dc]) => {
-      let n = 1;
-      for (const s of [-1, 1]) {
-        let rr = r + dr*s, cc = c + dc*s;
-        while (rr >= 0 && rr < SIZE && cc >= 0 && cc < SIZE && board[rr][cc] === color) {
-          n++; rr += dr*s; cc += dc*s;
-        }
+  const RENJU_DIRS = [[1,0],[0,1],[1,1],[1,-1]];
+  const RENJU_MAX_RECURSION = 4;
+
+  function inBounds(r, c) {
+    return r >= 0 && r < SIZE && c >= 0 && c < SIZE;
+  }
+
+  function lineLength(r, c, color, dr, dc) {
+    let n = 1;
+    for (const sign of [-1, 1]) {
+      let rr = r + dr * sign;
+      let cc = c + dc * sign;
+      while (inBounds(rr, cc) && board[rr][cc] === color) {
+        n++;
+        rr += dr * sign;
+        cc += dc * sign;
       }
-      return n >= 5;
+    }
+    return n;
+  }
+
+  function hasExactFiveAt(r, c, color) {
+    return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, color, dr, dc) === 5);
+  }
+
+  function hasOverlineAt(r, c, color) {
+    return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, color, dr, dc) >= 6);
+  }
+
+  function isWin(r, c, color) {
+    if (color === BLACK) return hasExactFiveAt(r, c, BLACK);
+    return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, WHITE, dr, dc) >= 5);
+  }
+
+  function contiguousRunCells(r, c, color, dr, dc) {
+    const negative = [];
+    let rr = r - dr;
+    let cc = c - dc;
+    while (inBounds(rr, cc) && board[rr][cc] === color) {
+      negative.push([rr, cc]);
+      rr -= dr;
+      cc -= dc;
+    }
+    negative.reverse();
+
+    const positive = [];
+    rr = r + dr;
+    cc = c + dc;
+    while (inBounds(rr, cc) && board[rr][cc] === color) {
+      positive.push([rr, cc]);
+      rr += dr;
+      cc += dc;
+    }
+    return [...negative, [r, c], ...positive];
+  }
+
+  function collectBlackFoursThrough(r, c) {
+    const fours = new Map();
+    RENJU_DIRS.forEach(([dr, dc], dirIndex) => {
+      for (let start = -4; start <= 0; start++) {
+        const cells = [];
+        let valid = true;
+        for (let k = 0; k < 5; k++) {
+          const rr = r + (start + k) * dr;
+          const cc = c + (start + k) * dc;
+          if (!inBounds(rr, cc)) {
+            valid = false;
+            break;
+          }
+          cells.push([rr, cc]);
+        }
+        if (!valid) continue;
+
+        const blackCells = [];
+        const emptyCells = [];
+        let blocked = false;
+        for (const [rr, cc] of cells) {
+          if (board[rr][cc] === BLACK) blackCells.push([rr, cc]);
+          else if (board[rr][cc] === EMPTY) emptyCells.push([rr, cc]);
+          else {
+            blocked = true;
+            break;
+          }
+        }
+        if (blocked || blackCells.length !== 4 || emptyCells.length !== 1) continue;
+
+        const [er, ec] = emptyCells[0];
+        board[er][ec] = BLACK;
+        const makesExactFive = lineLength(er, ec, BLACK, dr, dc) === 5;
+        board[er][ec] = EMPTY;
+        if (!makesExactFive) continue;
+
+        const stoneKey = blackCells
+          .map(([rr, cc]) => rr * SIZE + cc)
+          .sort((a, b) => a - b)
+          .join('-');
+        fours.set(`${dirIndex}:${stoneKey}`, {
+          direction: dirIndex,
+          stones: blackCells,
+          winningPoint: [er, ec]
+        });
+      }
     });
+    return [...fours.values()];
+  }
+
+  function straightFourCreatedByExtension(originR, originC, extR, extC, dr, dc) {
+    const run = contiguousRunCells(extR, extC, BLACK, dr, dc);
+    if (run.length !== 4) return null;
+    if (!run.some(([rr, cc]) => rr === originR && cc === originC)) return null;
+
+    const first = run[0];
+    const last = run[run.length - 1];
+    const left = [first[0] - dr, first[1] - dc];
+    const right = [last[0] + dr, last[1] + dc];
+    if (!inBounds(left[0], left[1]) || !inBounds(right[0], right[1])) return null;
+    if (board[left[0]][left[1]] !== EMPTY || board[right[0]][right[1]] !== EMPTY) return null;
+
+    for (const [rr, cc] of [left, right]) {
+      board[rr][cc] = BLACK;
+      const exact = lineLength(rr, cc, BLACK, dr, dc) === 5;
+      board[rr][cc] = EMPTY;
+      if (!exact) return null;
+    }
+    return run;
+  }
+
+  function collectRealBlackThreesThrough(r, c, depth) {
+    const threes = new Map();
+    RENJU_DIRS.forEach(([dr, dc], dirIndex) => {
+      for (let offset = -4; offset <= 4; offset++) {
+        if (!offset) continue;
+        const er = r + offset * dr;
+        const ec = c + offset * dc;
+        if (!inBounds(er, ec) || board[er][ec] !== EMPTY) continue;
+
+        board[er][ec] = BLACK;
+        const makesFive = hasExactFiveAt(er, ec, BLACK);
+        const run = makesFive ? null : straightFourCreatedByExtension(r, c, er, ec, dr, dc);
+        let extensionLegal = Boolean(run);
+        if (extensionLegal) {
+          const extensionRestriction = blackForbiddenInfoPlaced(er, ec, depth + 1);
+          extensionLegal = !extensionRestriction.forbidden;
+        }
+
+        if (extensionLegal && run) {
+          const existing = run.filter(([rr, cc]) => !(rr === er && cc === ec));
+          if (existing.length === 3 && existing.some(([rr, cc]) => rr === r && cc === c)) {
+            const stoneKey = existing
+              .map(([rr, cc]) => rr * SIZE + cc)
+              .sort((a, b) => a - b)
+              .join('-');
+            threes.set(`${dirIndex}:${stoneKey}`, {
+              direction: dirIndex,
+              stones: existing,
+              extension: [er, ec]
+            });
+          }
+        }
+        board[er][ec] = EMPTY;
+      }
+    });
+    return [...threes.values()];
+  }
+
+  function blackForbiddenInfoPlaced(r, c, depth = 0) {
+    // Under RIF rules an exact five wins immediately, even if the same move
+    // would otherwise also create a double-three or double-four.
+    if (hasExactFiveAt(r, c, BLACK)) {
+      return { forbidden: false, type: null, winningFive: true, fourCount: 0, threeCount: 0 };
+    }
+    if (hasOverlineAt(r, c, BLACK)) {
+      return { forbidden: true, type: 'OVERLINE', winningFive: false, fourCount: 0, threeCount: 0 };
+    }
+
+    const fours = collectBlackFoursThrough(r, c);
+    if (fours.length >= 2) {
+      return { forbidden: true, type: 'FOUR_FOUR', winningFive: false, fourCount: fours.length, threeCount: 0 };
+    }
+
+    if (depth >= RENJU_MAX_RECURSION) {
+      return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: 0 };
+    }
+
+    const threes = collectRealBlackThreesThrough(r, c, depth);
+    if (threes.length >= 2) {
+      return { forbidden: true, type: 'THREE_THREE', winningFive: false, fourCount: fours.length, threeCount: threes.length };
+    }
+    return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: threes.length };
+  }
+
+  function blackForbiddenInfo(r, c) {
+    if (!inBounds(r, c) || board[r][c] !== EMPTY) {
+      return { forbidden: true, type: 'OCCUPIED_OR_INVALID', winningFive: false, fourCount: 0, threeCount: 0 };
+    }
+    board[r][c] = BLACK;
+    const result = blackForbiddenInfoPlaced(r, c, 0);
+    board[r][c] = EMPTY;
+    return result;
+  }
+
+  function isLegalMoveForColor(r, c, color) {
+    if (!inBounds(r, c) || board[r][c] !== EMPTY) return false;
+    if (color !== BLACK) return true;
+    return !blackForbiddenInfo(r, c).forbidden;
   }
 
   function hideResultModal() {
@@ -809,11 +1012,11 @@
     }));
   }
 
-  function legalMoves() {
+  function legalMoves(color = WHITE) {
     const result = [];
     for (let r = 0; r < SIZE; r++) {
       for (let c = 0; c < SIZE; c++) {
-        if (board[r][c] === EMPTY) result.push({ r, c, key: coord(r, c) });
+        if (isLegalMoveForColor(r, c, color)) result.push({ r, c, key: coord(r, c) });
       }
     }
     return result;
@@ -914,7 +1117,9 @@
   }
 
   function immediateWins(color, radius = 2) {
-    return nearbyMoves(radius).filter(m => wouldWin(m.r, m.c, color));
+    return nearbyMoves(radius)
+      .filter(m => isLegalMoveForColor(m.r, m.c, color))
+      .filter(m => wouldWin(m.r, m.c, color));
   }
 
   function localConnectivity(r, c, color) {
@@ -948,12 +1153,14 @@
   function orderedMoves(color, limit, radius = 2) {
     const wins = immediateWins(color, radius);
     if (wins.length) return wins.map(m => ({ ...m, quick: MATE_SCORE })).slice(0, limit);
-    const blocks = immediateWins(otherColor(color), radius);
+    const blocks = immediateWins(otherColor(color), radius)
+      .filter(m => isLegalMoveForColor(m.r, m.c, color));
     if (blocks.length) {
       return blocks.map(m => ({ ...m, quick: quickMoveScore(m, color) }))
         .sort((a,b) => b.quick - a.quick).slice(0, limit);
     }
     return nearbyMoves(radius)
+      .filter(m => isLegalMoveForColor(m.r, m.c, color))
       .map(m => ({ ...m, quick: quickMoveScore(m, color) }))
       .sort((a, b) => b.quick - a.quick)
       .slice(0, limit);
@@ -1343,7 +1550,7 @@
           opponent_is: 'BLACK (X)',
           side_to_move: 'WHITE',
           coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom; H8 is center.',
-          rules: 'Choose one empty intersection. Five or more consecutive stones horizontally, vertically, or diagonally wins.',
+          rules: 'Renju forbidden-move rules are enabled. BLACK may not play overline, double-four, or real double-three; an exact black five wins. WHITE has no forbidden moves and wins with five or more in a row.',
           last_move: last,
           board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
           board_rows: boardRows()
@@ -1527,6 +1734,7 @@
           depth_reached: deepAnalysis?.depthReached ?? null,
           timed_out: Boolean(deepAnalysis?.timedOut)
         },
+        rules: 'Renju forbidden-move rules are enabled: BLACK cannot play overline, double-four, or real double-three; exact black five wins. WHITE has no forbidden moves and wins with five or more.',
         decision_policy: [
           'You are the FINAL decision maker. Choose exactly one supplied candidate.',
           'Never ignore an immediate win, mandatory defense, or proven VCF sequence.',
