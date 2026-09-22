@@ -111,13 +111,22 @@
   <div class="modal-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="modal">
       <h2 id="settingsTitle">对局设置</h2>
-      <p class="desc">选择对局等级。想体验完整 Jev 判断，建议从“等级 3 · Jev 大师”开始。</p>
+      <p class="desc">选择对局等级。等级 3 保持稳定体验；等级 4 增加强制威胁搜索，并只在多路证据分歧时调用 Jev。</p>
 
       <input id="model" type="hidden" value="jev-latest" />
 
       <input id="strengthMode" type="hidden" value="expert" />
 
       <div class="level-picker" role="radiogroup" aria-label="对局等级">
+        <button class="level-option" type="button" data-mode="grandmaster" role="radio" aria-checked="false">
+          <span class="level-option-head">
+            <span class="level-option-title">等级 4 · Jev 宗师</span>
+            <span class="level-option-tag experiment">战术增强</span>
+            <span class="level-option-current">✓ 当前选择</span>
+          </span>
+          <span class="level-option-desc">Alpha-Beta 深搜与 Threat-space Search 并行；证据一致时直接落子，分歧时才交给 Jev 裁决。</span>
+        </button>
+
         <button class="level-option" type="button" data-mode="expert" role="radio" aria-checked="false">
           <span class="level-option-head">
             <span class="level-option-title">等级 3 · Jev 大师</span>
