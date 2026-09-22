@@ -6,10 +6,11 @@
  * `src/app.js`), so the benchmark board enforces exactly the same rules the
  * page enforces:
  *
- *   - BLACK may not play overline / double-four / real double-three.
- *   - A false three is not a forbidden move.
- *   - BLACK wins with an exact five only; an overline is forbidden, never a win.
- *   - WHITE wins with five or more in a row, and has no forbidden moves.
+ *   - BLACK overline / double-four / real double-three restrictions come from
+ *     the production engine's per-game configuration.
+ *   - A false three is not a forbidden move when three-three is enabled.
+ *   - With overline prohibition enabled BLACK wins by exact five; when disabled
+ *     BLACK wins with five or more. WHITE always wins with five or more.
  */
 
 export const SIZE = 15;
