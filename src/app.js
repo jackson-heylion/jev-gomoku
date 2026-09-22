@@ -169,7 +169,6 @@
   }
 
   async function testConnection() {
-    const model = modelInput.value.trim() || 'jev-latest';
     if (testController) testController.abort();
     testController = new AbortController();
     const timeout = setTimeout(() => testController?.abort(), 15000);
@@ -177,38 +176,27 @@
     testConnectionBtn.textContent = '检查中…';
     setConnectionTest('busy', '正在检查 Jev 服务…');
     const started = performance.now();
-    const payload = {
-      state: 'TypeSafe Jev API connection test from Jev Gomoku.',
-      model,
-      questions: {
-        connection_test: {
-          type: 'choice',
-          instructions: 'Choose the option named ok. This is only an API connectivity test.',
-          criteria: { ok: 'The connection test is operating normally.', other: 'Any other result.' }
-        }
-      }
-    };
 
     try {
-      const response = await fetch('/api/jev', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      // Health checks must never spend Jev tokens. The server already exposes
+      // whether the upstream API key is configured, so keep this probe local.
+      const response = await fetch('/health', {
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
         signal: testController.signal
       });
       const elapsed = Math.round(performance.now() - started);
       const raw = await response.text();
       let data = null;
       try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
-      if (!response.ok) {
+      if (!response.ok || data?.ok !== true) {
         const detail = data?.detail || data?.message || data?.error || response.statusText || `HTTP ${response.status}`;
         throw Object.assign(new Error(typeof detail === 'string' ? detail : JSON.stringify(detail)), { httpStatus: response.status });
       }
-      const answer = data?.answers?.connection_test;
-      if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') {
-        throw new Error('Jev 服务响应异常，请稍后重试。');
+      if (!data.jevConfigured) {
+        throw Object.assign(new Error('Jev 服务暂未配置。'), { httpStatus: 503 });
       }
-      setConnectionTest('ok', `Jev 在线 · ${elapsed} ms`);
+      setConnectionTest('ok', `Jev 服务已配置 · ${elapsed} ms`);
     } catch (err) {
       setConnectionTest('err', err?.name === 'AbortError'
         ? '检查超时，请稍后重试。'
@@ -1734,6 +1722,36 @@
     };
   }
 
+  function compactEvidence(value) {
+    return Object.fromEntries(
+      Object.entries(value || {}).filter(([, item]) => item !== null && item !== undefined)
+    );
+  }
+
+  function factorCommonCandidateEvidence(criteria) {
+    const keys = Object.keys(criteria || {});
+    if (keys.length < 2) return { common: {}, criteria };
+
+    const first = criteria[keys[0]] || {};
+    const common = {};
+    for (const [field, value] of Object.entries(first)) {
+      if (keys.every(key => Object.prototype.hasOwnProperty.call(criteria[key] || {}, field)
+        && criteria[key][field] === value)) {
+        common[field] = value;
+      }
+    }
+
+    if (!Object.keys(common).length) return { common, criteria };
+
+    const compactCriteria = Object.fromEntries(keys.map(key => {
+      const candidate = criteria[key] || {};
+      return [key, Object.fromEntries(
+        Object.entries(candidate).filter(([field]) => !Object.prototype.hasOwnProperty.call(common, field))
+      )];
+    }));
+    return { common, criteria: compactCriteria };
+  }
+
   function buildFinalJevPayload(context, candidates, deepAnalysis) {
     const deepRows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
     const deepByMove = new Map(deepRows.map((item, index) => [
@@ -1748,12 +1766,11 @@
     for (const move of candidates) {
       const deep = deepByMove.get(move.key) || null;
       const facts = move.analysis?.facts || {};
-      criteria[move.key] = {
+      criteria[move.key] = compactEvidence({
         local_rank: move.rank ?? null,
         local_alpha_beta_score: Number.isFinite(move.searchScore) ? Number(move.searchScore.toFixed(2)) : null,
         deep_search_rank: deep?.rank ?? null,
         deep_search_score: Number.isFinite(deep?.score) ? Number(deep.score.toFixed(2)) : null,
-        deep_search_depth: deepAnalysis?.depthReached ?? null,
         forced_role: facts.forced_role || 'NORMAL',
         tactical_safety: facts.tactical_safety || 'UNKNOWN',
         attack_shape: facts.attack_shape || 'POSITIONAL',
@@ -1767,8 +1784,10 @@
         opponent_counter_vct: facts.opponent_counter_vct || 'NOT_FOUND',
         connectivity: facts.connectivity || 'LOW',
         centrality: facts.centrality || 'OUTER'
-      };
+      });
     }
+
+    const factoredEvidence = factorCommonCandidateEvidence(criteria);
 
     return {
       state: {
@@ -1780,12 +1799,15 @@
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         board_rows: boardRows(),
         local_engine_role: 'The local engine generated and tactically filtered the candidate set. Its ranks and search scores are evidence, not commands.',
-        deep_search: {
+        deep_search: compactEvidence({
           source: deepAnalysis?.source || 'unavailable',
           status: deepAnalysis?.status || 'unavailable',
           depth_reached: deepAnalysis?.depthReached ?? null,
           timed_out: Boolean(deepAnalysis?.timedOut)
-        },
+        }),
+        ...(Object.keys(factoredEvidence.common).length
+          ? { common_candidate_evidence: factoredEvidence.common }
+          : {}),
         rules: 'Renju forbidden-move rules are enabled: BLACK cannot play overline, double-four, or real double-three; exact black five wins. WHITE has no forbidden moves and wins with five or more.',
         decision_policy: [
           'You are the FINAL decision maker. Choose exactly one supplied candidate.',
@@ -1799,8 +1821,8 @@
       questions: {
         best_move: {
           type: 'choice',
-          instructions: 'Make the final move decision for WHITE. Inspect the full board and all candidate evidence, then choose exactly one candidate. You have final selection authority within this already-filtered candidate set.',
-          criteria
+          instructions: 'Make the final move decision for WHITE. Inspect the full board and all candidate evidence, then choose exactly one candidate. Candidate criteria inherit state.common_candidate_evidence when present. You have final selection authority within this already-filtered candidate set.',
+          criteria: factoredEvidence.criteria
         }
       }
     };
