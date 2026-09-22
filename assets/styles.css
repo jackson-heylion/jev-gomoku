@@ -419,3 +419,109 @@
     .opponent-card .runtime-hint {
       margin-bottom: 1px;
     }
+
+
+    /* Jev presence */
+    .jev-profile {
+      display: grid;
+      grid-template-columns: 44px 1fr auto;
+      align-items: center;
+      gap: 11px;
+      margin-bottom: 12px;
+    }
+    .jev-avatar {
+      display: grid;
+      width: 44px;
+      height: 44px;
+      place-items: center;
+      border: 1px solid rgba(88,166,255,.38);
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 30% 25%, rgba(126,231,135,.22), transparent 42%),
+        linear-gradient(135deg, rgba(31,111,235,.92), rgba(35,134,54,.92));
+      box-shadow: 0 10px 30px rgba(31,111,235,.14);
+      color: #fff;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -.04em;
+    }
+    .jev-profile-copy {
+      min-width: 0;
+    }
+    .jev-name {
+      color: #f1f6fb;
+      font-size: 16px;
+      font-weight: 760;
+      line-height: 1.1;
+    }
+    .jev-tagline {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .jev-live {
+      border: 1px solid rgba(126,231,135,.28);
+      border-radius: 999px;
+      background: rgba(35,134,54,.09);
+      color: #a7e9ae;
+      padding: 5px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .jev-live.busy {
+      border-color: rgba(210,153,34,.32);
+      background: rgba(210,153,34,.08);
+      color: #ead295;
+    }
+    .jev-live.fallback {
+      border-color: rgba(255,123,114,.30);
+      background: rgba(248,81,73,.08);
+      color: #ffb8b2;
+    }
+    .jev-live.off {
+      border-color: #303a47;
+      background: #111820;
+      color: #8492a2;
+    }
+    .jev-card {
+      position: relative;
+      overflow: hidden;
+      border-color: rgba(88,166,255,.30);
+      background:
+        radial-gradient(420px 180px at 100% 0%, rgba(88,166,255,.08), transparent 60%),
+        rgba(21,27,35,.94);
+    }
+    .jev-card::before {
+      content: "JEV";
+      position: absolute;
+      top: 10px;
+      right: 14px;
+      color: rgba(88,166,255,.08);
+      font-size: 42px;
+      font-weight: 900;
+      letter-spacing: .08em;
+      pointer-events: none;
+    }
+    .jev-card > * {
+      position: relative;
+      z-index: 1;
+    }
+    .jev-card .section-title {
+      color: #d9e9fb;
+    }
+    .settings-note strong {
+      color: #dbeaff;
+      font-weight: 700;
+    }
+
+    @media (max-width: 620px) {
+      .jev-profile {
+        grid-template-columns: 40px 1fr auto;
+      }
+      .jev-avatar {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+      }
+    }
