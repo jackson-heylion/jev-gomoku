@@ -1622,3 +1622,188 @@
       questions[`judge_${m.key}`] = {
         type: 'choice',
         instructions: `Judge candidate ${m.key} for WHITE using only candidate_facts.${m.key}. Do not reconstruct the board, count stones, or perform arithmetic. Deterministic code already handled geometry and tactical search.`,
+        criteria: {
+          EXCELLENT: 'The supplied facts indicate a strategically preferred move with strong initiative and tactical safety.',
+          GOOD: 'The move is sound and useful, but not clearly dominant.',
+          NEUTRAL: 'The move is playable but offers limited forcing value.',
+          RISKY: 'The move has meaningful strategic or tactical concerns.',
+          BAD: 'The supplied facts indicate this move should be avoided.'
+        }
+      };
+    }
+    return {
+      state: {
+        task: 'Gomoku candidate evaluation after deterministic tactical analysis.',
+        side: 'WHITE',
+        instruction: 'Treat supplied facts as ground truth. Do not infer board geometry. Priority: WIN_NOW > MUST_DEFEND > VCF_FORCED_SEQUENCE > tactical safety > forcing initiative > VCT pressure > connectivity.',
+        candidate_facts: candidateFactsMap(context.candidates)
+      },
+      model: settings.model || 'jev-latest',
+      questions
+    };
+  }
+
+  function atomicScore(answer) {
+    const weights = { EXCELLENT: 1, GOOD: .78, NEUTRAL: .5, RISKY: .22, BAD: 0 };
+    const probs = answer?.probabilities;
+    if (probs && typeof probs === 'object') {
+      let total = 0, mass = 0;
+      for (const [k,w] of Object.entries(weights)) {
+        const p = Number(probs[k] || 0);
+        total += p * w; mass += p;
+      }
+      if (mass > 0) return total / mass;
+    }
+    return weights[String(answer?.choice || '').toUpperCase()] ?? .5;
+  }
+
+  function buildPairwisePayload(candidates) {
+    const questions = {};
+    const pairs = [];
+    let n = 0;
+    const facts = candidateFactsMap(candidates);
+    const instruction = 'Choose the stronger move for WHITE using only the supplied deterministic semantic facts. Do not reconstruct the board. Priority: immediate win > mandatory defense > proven VCF > tactical safety > forcing initiative > VCT pressure > connectivity. If facts are close, prefer the higher local_engine_grade.';
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const a = candidates[i].key, b = candidates[j].key;
+        const id = n++;
+        questions[`duel_${id}_ab`] = { type: 'choice', instructions: instruction, criteria: { [a]: facts[a], [b]: facts[b] } };
+        questions[`duel_${id}_ba`] = { type: 'choice', instructions: instruction, criteria: { [b]: facts[b], [a]: facts[a] } };
+        pairs.push({ id, a, b });
+      }
+    }
+    return {
+      payload: {
+        state: {
+          task: 'Pairwise Gomoku move tournament.',
+          side: 'WHITE',
+          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias.',
+          candidate_facts: facts
+        },
+        model: settings.model || 'jev-latest',
+        questions
+      },
+      pairs
+    };
+  }
+
+  function probabilityFor(answer, key) {
+    const p = Number(answer?.probabilities?.[key]);
+    if (Number.isFinite(p)) return Math.max(0, Math.min(1, p));
+    return String(answer?.choice || '').toUpperCase() === key ? 1 : 0;
+  }
+
+  function sumUsage(...items) {
+    let input = 0, output = 0, has = false;
+    for (const u of items) {
+      if (!u) continue;
+      if (Number.isFinite(u.input_tokens)) { input += u.input_tokens; has = true; }
+      if (Number.isFinite(u.output_tokens)) { output += u.output_tokens; has = true; }
+    }
+    return has ? { input_tokens: input, output_tokens: output } : null;
+  }
+
+  async function callJev(payload) {
+    const response = await fetch(settings.endpoint, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: requestController.signal
+    });
+    const raw = await response.text();
+    let data = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+    if (!response.ok) {
+      const detail = data?.detail || data?.message || data?.error || raw || `HTTP ${response.status}`;
+      const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      err.httpStatus = response.status;
+      throw err;
+    }
+    return data || {};
+  }
+
+  function softmaxProbabilities(candidates, field = 'finalScore') {
+    if (!candidates.length) return {};
+    const values = candidates.map(m => Number(m[field] || 0));
+    const max = Math.max(...values);
+    const exps = values.map(v => Math.exp((v - max) / .13));
+    const sum = exps.reduce((a,b) => a+b, 0) || 1;
+    return Object.fromEntries(candidates.map((m,i) => [m.key, exps[i] / sum]));
+  }
+
+  async function advancedDecision(mode) {
+    const context = buildAdvancedCandidates(mode);
+    const candidates = context.candidates;
+    if (!candidates.length) throw new Error('本地引擎没有生成合法候选点');
+
+    // A single deterministic forced move should not be weakened by an LLM call.
+    if (candidates.length === 1) {
+      const only = candidates[0];
+      only.atomicScore = 1; only.pairScore = 1; only.finalScore = 1;
+      return {
+        answer: { choice: only.key, confidence: 1, probabilities: { [only.key]: 1 } },
+        finalChoice: only.key,
+        jevSuggested: only.key,
+        mode,
+        forced: context.forced,
+        candidates,
+        model: `${settings.model || 'jev-latest'} + local-forced`,
+        usage: null,
+        stageNote: '本地强制手'
+      };
+    }
+
+    updateApiState('busy', 'Jev 第 1/2 阶段：语义判断…');
+    const atomicData = await callJev(buildAtomicPayload(context));
+    for (const m of candidates) {
+      m.atomicScore = atomicScore(atomicData?.answers?.[`judge_${m.key}`]);
+      const localNorm = candidates.length === 1 ? 1 : 1 - ((m.rank - 1) / (candidates.length - 1));
+      m.preScore = localNorm * .84 + m.atomicScore * .16;
+    }
+
+    const tournament = [...candidates]
+      .sort((a,b) => b.preScore - a.preScore)
+      .slice(0, Math.min(context.cfg.tournament, candidates.length));
+
+    let pairData = null;
+    let pairStageFailed = false;
+    if (tournament.length >= 2) {
+      updateApiState('busy', 'Jev 第 2/2 阶段：双向 Pairwise 对决…');
+      const { payload, pairs } = buildPairwisePayload(tournament);
+      try {
+        pairData = await callJev(payload);
+        const points = new Map(tournament.map(m => [m.key, 0]));
+        const maxPoints = 2 * (tournament.length - 1);
+        for (const pair of pairs) {
+          for (const suffix of ['ab','ba']) {
+            const ans = pairData?.answers?.[`duel_${pair.id}_${suffix}`];
+            points.set(pair.a, points.get(pair.a) + probabilityFor(ans, pair.a));
+            points.set(pair.b, points.get(pair.b) + probabilityFor(ans, pair.b));
+          }
+        }
+        tournament.forEach(m => { m.pairScore = maxPoints > 0 ? points.get(m.key) / maxPoints : .5; });
+      } catch (err) {
+        console.warn('Pairwise stage failed, falling back to local + atomic.', err);
+        pairStageFailed = true;
+        tournament.forEach(m => { m.pairScore = .5; });
+      }
+    } else {
+      tournament.forEach(m => { m.pairScore = 1; });
+    }
+
+    candidates.forEach(m => {
+      if (!Number.isFinite(m.pairScore)) m.pairScore = tournament.includes(m) ? .5 : 0;
+      const localNorm = candidates.length === 1 ? 1 : 1 - ((m.rank - 1) / (candidates.length - 1));
+      m.localNorm = localNorm;
+      m.finalScore = context.cfg.localWeight * localNorm + context.cfg.atomicWeight * (m.atomicScore ?? .5) + context.cfg.pairWeight * m.pairScore;
+      if (m.analysis.winsNow) m.finalScore += 10;
+      if (m.analysis.vcf) m.finalScore += 1.2;
+      if (m.analysis.facts.tactical_safety === 'LOSING') m.finalScore -= 10;
+      else if (m.analysis.facts.tactical_safety === 'UNSAFE') m.finalScore -= 4;
+    });
+
+    const ranked = [...candidates].sort((a,b) => b.finalScore - a.finalScore);
+    const final = ranked[0];
+    const jevSuggested = [...tournament].sort((a,b) => (b.pairScore ?? 0) - (a.pairScore ?? 0))[0]?.key || final.key;
+    const probabilities = softmaxProbabilities(ranked);
+    const confidence = probabilities[final.key]
