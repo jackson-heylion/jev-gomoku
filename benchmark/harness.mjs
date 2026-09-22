@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { createBrowserWorkerClass } from './worker-shim.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -136,6 +137,11 @@ function makeLocalStorage() {
   };
 }
 
+/**
+ * The benchmark only ever asks the production engine questions that the page
+ * itself asks. Every helper below delegates to production code; nothing
+ * re-implements search, tactical analysis or Renju rules.
+ */
 function injectBenchmarkHook(source) {
   const marker = '\n})();';
   const index = source.lastIndexOf(marker);
@@ -144,10 +150,10 @@ function injectBenchmarkHook(source) {
   const hook = [
     '',
     '  globalThis.__JEV_GOMOKU_BENCH__ = {',
-    '    setPosition(nextBoard, nextMoves, model) {',
+    '    setPosition(nextBoard, nextMoves, model, side) {',
     '      board = nextBoard.map(row => row.slice());',
     '      moves = (nextMoves || []).map(move => ({ ...move }));',
-    '      current = WHITE;',
+    '      current = side === BLACK || side === 1 ? BLACK : WHITE;',
     '      gameOver = false;',
     '      thinking = false;',
     '      requestController = null;',
@@ -157,14 +163,127 @@ function injectBenchmarkHook(source) {
     "      settings.model = model || 'jev-latest';",
     "      settings.strengthMode = 'expert';",
     '    },',
+    '    position() {',
+    '      return {',
+    '        board: board.map(row => row.slice()),',
+    '        moves: moves.map(move => ({ ...move })),',
+    '        toMove: current',
+    '      };',
+    '    },',
+    // --- decision entry points (the real product paths) ---------------------
     "    local(mode) { return localOnlyDecision(mode || 'expert'); },",
-    "    hybrid(mode) { return advancedDecision(mode || 'expert'); },",
-    "    verifyMoves(localKey, challengerKey, mode) {",
-    "      const local = parseCoord(localKey);",
-    "      const challenger = parseCoord(challengerKey);",
-    "      if (!local || !challenger) throw new Error('Invalid verification coordinate');",
-    "      return deepVerifyChallenger({ ...local, key: localKey }, { ...challenger, key: challengerKey }, mode || 'expert');",
-    "    },",
+    "    jevFinal(mode) { return advancedDecision(mode || 'expert'); },",
+    '    async jevBlind() {',
+    '      const decision = buildPureJevRequest();',
+    '      const data = await callJev(decision.payload);',
+    '      const answer = data && data.answers ? data.answers.best_move : null;',
+    "      if (!answer || typeof answer.choice !== 'string') throw new Error('Jev response missing answers.best_move.choice');",
+    '      const finalChoice = answer.choice.toUpperCase();',
+    '      const candidateKeys = new Set(decision.candidates.map(move => move.key));',
+    "      if (!candidateKeys.has(finalChoice)) throw new Error('Jev returned illegal candidate: ' + answer.choice);",
+    '      return {',
+    '        answer,',
+    '        finalChoice,',
+    '        localChoice: null,',
+    '        jevSuggested: finalChoice,',
+    "        mode: 'jev-blind',",
+    '        forced: null,',
+    '        candidates: decision.candidates,',
+    '        model: data.model || settings.model,',
+    '        usage: data.usage || null,',
+    '        client: data.__client || null,',
+    '        decisionTrace: { requestShape: { decisionAuthority: \'jev_blind\', candidateCount: decision.candidates.length } },',
+    "        stageNote: 'Jev 直接读取棋盘（诊断用基线，候选集为全部合法点）'",
+    '      };',
+    '    },',
+    "    candidates(mode) { return buildAdvancedCandidates(mode || 'expert'); },",
+    // --- referee support: Renju rules straight from production --------------
+    '    judge(key, color) {',
+    '      const point = parseCoord(key);',
+    "      if (!point) throw new Error('Invalid coordinate: ' + key);",
+    '      const target = color === BLACK || color === \'black\' ? BLACK : WHITE;',
+    '      const empty = board[point.r][point.c] === EMPTY;',
+    '      const info = target === BLACK',
+    '        ? blackForbiddenInfo(point.r, point.c)',
+    '        : { forbidden: !empty, type: empty ? null : \'OCCUPIED\', winningFive: false };',
+    '      let winsNow = false;',
+    '      let overline = false;',
+    '      let exactFive = false;',
+    '      if (empty) {',
+    '        board[point.r][point.c] = target;',
+    '        winsNow = isWin(point.r, point.c, target);',
+    '        overline = hasOverlineAt(point.r, point.c, target);',
+    '        exactFive = hasExactFiveAt(point.r, point.c, target);',
+    '        board[point.r][point.c] = EMPTY;',
+    '      }',
+    '      return {',
+    '        key: coord(point.r, point.c),',
+    "        color: target === BLACK ? 'black' : 'white',",
+    '        empty,',
+    '        forbidden: Boolean(info.forbidden),',
+    '        forbiddenType: info.type || null,',
+    '        winningFive: Boolean(info.winningFive),',
+    '        winsNow,',
+    '        overline,',
+    '        exactFive,',
+    '        legal: empty && !info.forbidden',
+    '      };',
+    '    },',
+    "    forbidden(key) {",
+    "      const point = parseCoord(key);",
+    "      if (!point) throw new Error('Invalid forbidden-test coordinate');",
+    "      return blackForbiddenInfo(point.r, point.c);",
+    '    },',
+    "    legalBlackMoves() { return legalMoves(BLACK).map(move => move.key); },",
+    "    orderedBlack(limit) { return orderedMoves(BLACK, limit || 64, 2).map(move => move.key); },",
+    '    immediateWinsFor(color) {',
+    '      const target = color === BLACK || color === \'black\' ? BLACK : WHITE;',
+    '      return immediateWins(target, 2).map(move => move.key);',
+    '    },',
+    // --- offline oracle: deeper deterministic comparison, never used in game
+    '    arbitrate(aKey, bKey, options) {',
+    '      const opts = options || {};',
+    '      const preset = ENGINE_PRESETS[opts.mode === \'strong\' ? \'strong\' : \'expert\'];',
+    '      const cfg = {',
+    '        ...preset,',
+    '        depth: Number.isFinite(opts.depth) ? opts.depth : preset.depth + 2,',
+    '        branch: Number.isFinite(opts.branch) ? opts.branch : 6,',
+    '        vcfDepth: Number.isFinite(opts.vcfDepth) ? opts.vcfDepth : preset.vcfDepth,',
+    '        vctDepth: Number.isFinite(opts.vctDepth) ? opts.vctDepth : preset.vctDepth',
+    '      };',
+    '      const cache = new Map();',
+    '      const evaluate = key => {',
+    '        const point = parseCoord(key);',
+    "        if (!point) throw new Error('Invalid arbitration coordinate: ' + key);",
+    '        const move = { ...point, key };',
+    '        const analysis = analyzeAdvancedCandidate(move, null, cfg);',
+    '        return {',
+    '          move,',
+    '          searchScore: scoreRootMove(move, cfg, cache),',
+    '          safetyRank: safetyRank(analysis),',
+    '          winsNow: analysis.winsNow,',
+    '          vcf: analysis.vcf,',
+    '          vct: analysis.vct,',
+    '          facts: analysis.facts',
+    '        };',
+    '      };',
+    '      const first = evaluate(aKey);',
+    '      const second = evaluate(bKey);',
+    '      let verdict;',
+    '      if (first.safetyRank !== second.safetyRank) {',
+    '        verdict = first.safetyRank > second.safetyRank ? \'a\' : \'b\';',
+    '      } else if (first.searchScore !== second.searchScore) {',
+    '        verdict = first.searchScore > second.searchScore ? \'a\' : \'b\';',
+    '      } else {',
+    '        verdict = \'tie\';',
+    '      }',
+    '      return {',
+    '        config: { depth: cfg.depth, branch: cfg.branch, vcfDepth: cfg.vcfDepth, vctDepth: cfg.vctDepth },',
+    '        a: { move: aKey, searchScore: first.searchScore, safetyRank: first.safetyRank, winsNow: first.winsNow, vcf: first.vcf },',
+    '        b: { move: bKey, searchScore: second.searchScore, safetyRank: second.safetyRank, winsNow: second.winsNow, vcf: second.vcf },',
+    '        verdict',
+    '      };',
+    '    },',
     "    deepRank(mode) {",
     "      const engineMode = mode || 'expert';",
     "      const context = buildAdvancedCandidates(engineMode);",
@@ -178,36 +297,8 @@ function injectBenchmarkHook(source) {
     "        facts: { ...(move.analysis?.facts || {}) }",
     "      })).sort((a, b) => b.deepScore - a.deepScore);",
     "    },",
-    '    async blind() {',
-    '      const decision = buildPureJevRequest();',
-    '      const data = await callJev(decision.payload);',
-    '      const answer = data && data.answers ? data.answers.best_move : null;',
-    "      if (!answer || typeof answer.choice !== 'string') throw new Error('Jev response missing answers.best_move.choice');",
-    '      const finalChoice = answer.choice.toUpperCase();',
-    '      const candidateKeys = new Set(decision.candidates.map(move => move.key));',
-    "      if (!candidateKeys.has(finalChoice)) throw new Error('Jev returned illegal candidate: ' + answer.choice);",
-    '      return {',
-    '        answer,',
-    '        finalChoice,',
-    '        jevSuggested: finalChoice,',
-    "        mode: 'jev',",
-    '        forced: null,',
-    '        candidates: decision.candidates,',
-    '        model: data.model || settings.model,',
-    '        usage: data.usage || null,',
-    '        client: data.__client || null,',
-    '        decisionTrace: { pureJev: compactAnswer(answer) },',
-    "        stageNote: 'Jev Blind benchmark'",
-    '      };',
-    '    },',
-    '    candidates(mode) { return buildAdvancedCandidates(mode || \'expert\'); },',
-    "    forbidden(key) {",
-    "      const point = parseCoord(key);",
-    "      if (!point) throw new Error('Invalid forbidden-test coordinate');",
-    "      return blackForbiddenInfo(point.r, point.c);",
-    "    },",
-    "    legalBlackMoves() { return legalMoves(BLACK).map(move => move.key); },",
-    "    orderedBlack(limit) { return orderedMoves(BLACK, limit || 64, 2).map(move => move.key); },",
+    // These two helpers exist for the "undo after game over" regression: they
+    // drive the page's own turn state instead of re-implementing it.
     "    setTurnState(color, ended) { current = color; gameOver = Boolean(ended); },",
     "    undoTurn() {",
     "      undo();",
@@ -225,7 +316,19 @@ function injectBenchmarkHook(source) {
   return source.slice(0, index) + hook + source.slice(index);
 }
 
-export async function loadProductionEngine({ request, appPath } = {}) {
+/**
+ * Load the real production engine (`src/app.js`) inside a DOM-less VM sandbox.
+ *
+ * @param {object} options
+ * @param {Function} options.request  Jev request function (or a mock).
+ * @param {string}   [options.appPath]
+ * @param {'thread'|'sync'} [options.deepWorker='thread']
+ *   'thread' injects a browser-like Worker backed by node:worker_threads, so the
+ *   time-budgeted `public/deep-worker.js` path is exercised exactly like the
+ *   page does. 'sync' omits Worker and uses the engine's own synchronous
+ *   fallback (slower, unbounded, not what production runs).
+ */
+export async function loadProductionEngine({ request, appPath, deepWorker = 'thread' } = {}) {
   if (typeof request !== 'function') throw new Error('loadProductionEngine requires a Jev request function');
 
   const resolvedAppPath = appPath || path.join(ROOT, 'src', 'app.js');
@@ -257,6 +360,11 @@ export async function loadProductionEngine({ request, appPath } = {}) {
     }
   };
 
+  const deepWorkerMode = deepWorker === 'sync' ? 'sync' : 'thread';
+  if (deepWorkerMode === 'thread') {
+    sandbox.Worker = createBrowserWorkerClass();
+  }
+
   const context = vm.createContext(sandbox);
   vm.runInContext(transformed, context, {
     filename: resolvedAppPath,
@@ -264,8 +372,12 @@ export async function loadProductionEngine({ request, appPath } = {}) {
   });
 
   const engine = context.__JEV_GOMOKU_BENCH__;
-  if (!engine || typeof engine.local !== 'function' || typeof engine.hybrid !== 'function') {
+  if (!engine
+    || typeof engine.local !== 'function'
+    || typeof engine.jevFinal !== 'function'
+    || typeof engine.judge !== 'function') {
     throw new Error('Benchmark hook was not initialized from src/app.js');
   }
+  engine.deepWorkerMode = deepWorkerMode;
   return engine;
 }

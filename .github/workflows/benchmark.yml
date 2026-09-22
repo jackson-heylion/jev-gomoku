@@ -1,18 +1,22 @@
-name: Three-engine Benchmark
+name: Jev Final-Decision Benchmark
 
 on:
   workflow_dispatch:
     inputs:
       seeds:
-        description: Opening seed count (1-12)
+        description: Opening count (1-12). 6 already takes a long time.
         required: true
-        default: '3'
-      max_moves:
+        default: '4'
+      max_plies:
         description: Max plies per game
         required: true
         default: '60'
+      arms:
+        description: Arms under test (white seat)
+        required: true
+        default: local,jev-final
       mode:
-        description: Local/Hybrid search mode
+        description: Engine preset
         required: true
         type: choice
         options:
@@ -23,6 +27,10 @@ on:
         description: Jev model
         required: true
         default: jev-latest
+      arbitration_depth:
+        description: Offline oracle depth used to adjudicate Jev overrides
+        required: true
+        default: '7'
 
 permissions:
   contents: read
@@ -30,7 +38,7 @@ permissions:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v6
 
@@ -44,7 +52,10 @@ jobs:
       - name: Verify benchmark harness
         run: npm run benchmark:smoke
 
-      - name: Run Local / Jev Blind / Hybrid benchmark
+      - name: Run engine regressions
+        run: npm run benchmark:regression
+
+      - name: Run Jev final-decision benchmark
         env:
           JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
           BENCHMARK_CONFIRM: '1'
@@ -52,9 +63,11 @@ jobs:
           test -n "$JEV_API_KEY" || (echo "Missing repository secret JEV_API_KEY" && exit 1)
           npm run benchmark -- \
             --seeds "${{ inputs.seeds }}" \
-            --max-moves "${{ inputs.max_moves }}" \
+            --max-plies "${{ inputs.max_plies }}" \
+            --arms "${{ inputs.arms }}" \
             --mode "${{ inputs.mode }}" \
-            --model "${{ inputs.model }}"
+            --model "${{ inputs.model }}" \
+            --arbitration-depth "${{ inputs.arbitration_depth }}"
 
       - name: Upload benchmark report
         uses: actions/upload-artifact@v4

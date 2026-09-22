@@ -1,40 +1,43 @@
+/**
+ * Engine regression suite.
+ *
+ * These tests pin down the behaviour the benchmark depends on:
+ *   - Jev is the FINAL decision maker inside the filtered candidate set.
+ *   - A single deterministic candidate is played with 0 Jev calls.
+ *   - The shipped opening / deep-search performance protection is real.
+ *   - Renju rules are identical for the engine, the referee and the game loop.
+ *
+ * Run with: npm run benchmark:regression
+ */
+
 import { loadProductionEngine } from './harness.mjs';
-
-const SIZE = 15;
-const BLACK = 1;
-const COLS = 'ABCDEFGHIJKLMNO'.split('');
-
-function parseCoord(value) {
-  const match = String(value).trim().toUpperCase().match(/^([A-O])(1[0-5]|[1-9])$/);
-  if (!match) throw new Error('Invalid coordinate: ' + value);
-  return { c: COLS.indexOf(match[1]), r: Number(match[2]) - 1 };
-}
+import { BLACK, EMPTY, SIZE, WHITE, Referee, coord, parseCoord } from './referee.mjs';
 
 function positionFromSequence(sequence) {
-  const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
+  const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
   const moves = [];
   let color = BLACK;
   for (const key of sequence) {
-    const { r, c } = parseCoord(key);
-    board[r][c] = color;
-    moves.push({ r, c, color, coord: key, source: 'regression' });
-    color = color === 1 ? 2 : 1;
+    const point = parseCoord(key);
+    board[point.r][point.c] = color;
+    moves.push({ r: point.r, c: point.c, color, coord: key, source: 'regression' });
+    color = color === BLACK ? WHITE : BLACK;
   }
   return { board, moves };
 }
 
 function positionFromStones({ black = [], white = [] }) {
-  const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
+  const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
   const moves = [];
   for (const key of black) {
-    const { r, c } = parseCoord(key);
-    board[r][c] = BLACK;
-    moves.push({ r, c, color: BLACK, coord: key, source: 'renju-regression' });
+    const point = parseCoord(key);
+    board[point.r][point.c] = BLACK;
+    moves.push({ r: point.r, c: point.c, color: BLACK, coord: key, source: 'regression' });
   }
   for (const key of white) {
-    const { r, c } = parseCoord(key);
-    board[r][c] = 2;
-    moves.push({ r, c, color: 2, coord: key, source: 'renju-regression' });
+    const point = parseCoord(key);
+    board[point.r][point.c] = WHITE;
+    moves.push({ r: point.r, c: point.c, color: WHITE, coord: key, source: 'regression' });
   }
   return { board, moves };
 }
@@ -48,6 +51,10 @@ function oneHotChoice(choice, keys) {
   };
 }
 
+/**
+ * Jev owns the final move: it receives one `best_move` question with Local
+ * evidence, and its answer is what the engine plays.
+ */
 async function testJevFinalDecisionAuthority() {
   let jevTarget = null;
   let requestCount = 0;
@@ -58,7 +65,7 @@ async function testJevFinalDecisionAuthority() {
       const questions = payload?.questions || {};
       const questionIds = Object.keys(questions);
       if (questionIds.length !== 1 || questionIds[0] !== 'best_move') {
-        throw new Error('Hybrid must send exactly one best_move question to Jev');
+        throw new Error('jev-final must send exactly one best_move question to Jev');
       }
 
       const criteria = questions.best_move?.criteria || {};
@@ -75,9 +82,7 @@ async function testJevFinalDecisionAuthority() {
       jevTarget = candidateKeys[1];
       return {
         model: 'mock-jev',
-        answers: {
-          best_move: oneHotChoice(jevTarget, candidateKeys)
-        },
+        answers: { best_move: oneHotChoice(jevTarget, candidateKeys) },
         usage: { input_tokens: 1, output_tokens: 1 },
         __client: { attempts: 1, cached: false, transport: 'regression-mock' }
       };
@@ -86,7 +91,7 @@ async function testJevFinalDecisionAuthority() {
 
   const position = positionFromSequence(['G7']);
   engine.setPosition(position.board, position.moves, 'jev-latest');
-  const result = await engine.hybrid('expert');
+  const result = await engine.jevFinal('expert');
 
   console.log('jev-final regression:', JSON.stringify({
     finalChoice: result.finalChoice,
@@ -102,11 +107,9 @@ async function testJevFinalDecisionAuthority() {
     throw new Error('Jev choice was not used as final move: expected ' + jevTarget + ', got ' + result.finalChoice);
   }
   if (result.jevSuggested !== jevTarget) {
-    throw new Error('jevSuggested must reflect Jev final choice');
+    throw new Error('jevSuggested must reflect the Jev final choice');
   }
-  if (requestCount !== 1) {
-    throw new Error('Expected exactly one Jev request, got ' + requestCount);
-  }
+  if (requestCount !== 1) throw new Error('Expected exactly one Jev request, got ' + requestCount);
   if (result.decisionTrace?.requestShape?.decisionAuthority !== 'jev_final') {
     throw new Error('Trace does not record Jev final decision authority');
   }
@@ -130,7 +133,46 @@ async function testJevFinalDecisionAuthority() {
   }
 }
 
+/** A single deterministic candidate must never trigger a Jev request. */
+async function testSingleCandidateShortCircuit() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async () => {
+      requestCount++;
+      throw new Error('A forced single candidate must not call Jev');
+    }
+  });
 
+  // BLACK has A8-D8 and wins by completing the five at E8, so WHITE has exactly
+  // one legal defence.
+  const position = positionFromStones({
+    black: ['A8', 'B8', 'C8', 'D8'],
+    white: ['H8', 'I9']
+  });
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const result = await engine.jevFinal('expert');
+  console.log('single-candidate regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    candidateCount: result.candidates?.length,
+    forced: result.forced,
+    requestShape: result.decisionTrace?.requestShape
+  }));
+
+  if (requestCount !== 0) throw new Error('Forced single candidate called Jev ' + requestCount + ' time(s)');
+  if (result.finalChoice !== 'E8') throw new Error('Expected the only mandatory defence E8, got ' + result.finalChoice);
+  if (result.candidates.length !== 1) {
+    throw new Error('Expected a single candidate, got ' + result.candidates.length);
+  }
+  if (result.decisionTrace?.requestShape?.decisionAuthority !== 'single_candidate') {
+    throw new Error('Trace must mark the single-candidate shortcut');
+  }
+  if (result.decisionTrace?.requestShape?.httpRequests !== 0) {
+    throw new Error('Single-candidate shortcut must record zero HTTP requests');
+  }
+}
+
+/** Local must still find a mandatory fork defence without any Jev call. */
 async function testMustBlockOpponentForkCreator() {
   const engine = await loadProductionEngine({
     request: async () => {
@@ -225,6 +267,7 @@ async function testUndoAfterGameOver() {
   console.log('undo regression: terminal-white=2 plies, terminal-black=1 ply, normal=2 plies');
 }
 
+/** Black forbidden rules, straight from production. */
 async function testRenjuForbiddenMoves() {
   const engine = await loadProductionEngine({
     request: async () => {
@@ -278,11 +321,7 @@ async function testRenjuForbiddenMoves() {
   for (const item of cases) {
     engine.setPosition(item.position.board, item.position.moves, 'jev-latest');
     const result = engine.forbidden(item.move);
-    console.log('renju regression:', JSON.stringify({
-      name: item.name,
-      move: item.move,
-      result
-    }));
+    console.log('renju regression:', JSON.stringify({ name: item.name, move: item.move, result }));
 
     if (result.forbidden !== item.forbidden) {
       throw new Error(item.name + ': expected forbidden=' + item.forbidden + ', got ' + result.forbidden);
@@ -302,8 +341,140 @@ async function testRenjuForbiddenMoves() {
   }
 }
 
+/**
+ * The benchmark game engine must enforce exactly the same rules as production:
+ * the referee delegates every legality/win question to `src/app.js`.
+ */
+async function testRefereeRuleParity() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Referee regression must not call Jev');
+    }
+  });
+  const referee = new Referee(engine, { model: 'jev-latest', maxPlies: 40 });
+
+  // 1. Black overline: illegal, never a win.
+  const overline = positionFromStones({ black: ['A8', 'B8', 'C8', 'D8', 'F8'] });
+  referee.reset([]);
+  referee.board = overline.board;
+  referee.moves = overline.moves;
+  referee.toMove = BLACK;
+  const overlineVerdict = referee.inspect('E8', BLACK);
+  console.log('referee overline:', JSON.stringify(overlineVerdict));
+  if (overlineVerdict.legal) throw new Error('Referee accepted a black overline');
+  if (overlineVerdict.forbiddenType !== 'OVERLINE') throw new Error('Referee did not report OVERLINE');
+  if (overlineVerdict.winsNow) throw new Error('Referee counted a black overline as a win');
+
+  // 2. Black exact five: legal and winning.
+  const exactFive = positionFromStones({ black: ['D8', 'E8', 'F8', 'G8'], white: ['H6'] });
+  referee.board = exactFive.board;
+  referee.moves = exactFive.moves;
+  referee.toMove = BLACK;
+  const fiveVerdict = referee.inspect('H8', BLACK);
+  console.log('referee exact five:', JSON.stringify(fiveVerdict));
+  if (!fiveVerdict.legal || !fiveVerdict.winsNow || !fiveVerdict.exactFive) {
+    throw new Error('Referee must accept a black exact five as a win');
+  }
+
+  referee.board = exactFive.board.map(row => row.slice());
+  referee.moves = exactFive.moves.map(move => ({ ...move }));
+  referee.toMove = BLACK;
+  referee.commit('H8', BLACK, fiveVerdict);
+  if (referee.result !== 'B' || referee.winReason !== 'exact_five') {
+    throw new Error('Referee did not record the black exact-five win: ' + referee.result + '/' + referee.winReason);
+  }
+
+  // 3. White overline: legal and winning.
+  const whiteOverline = positionFromStones({ white: ['A8', 'B8', 'C8', 'D8', 'F8'], black: ['A1', 'A2'] });
+  referee.board = whiteOverline.board;
+  referee.moves = whiteOverline.moves;
+  referee.toMove = WHITE;
+  const whiteVerdict = referee.inspect('E8', WHITE);
+  if (!whiteVerdict.legal || !whiteVerdict.winsNow) {
+    throw new Error('Referee must accept a white overline as a win');
+  }
+
+  // 4. Occupied points are rejected.
+  referee.board = exactFive.board;
+  referee.moves = exactFive.moves;
+  const occupied = referee.inspect('D8', BLACK);
+  if (occupied.legal || occupied.reason !== 'occupied') {
+    throw new Error('Referee must reject an occupied point');
+  }
+
+  // 5. A double-three is rejected for BLACK but fine for WHITE.
+  const doubleThree = positionFromStones({ black: ['F8', 'G8', 'H6', 'H7'] });
+  referee.board = doubleThree.board;
+  referee.moves = doubleThree.moves;
+  const blackThree = referee.inspect('H8', BLACK);
+  const whiteThree = referee.inspect('H8', WHITE);
+  if (blackThree.legal || blackThree.forbiddenType !== 'THREE_THREE') {
+    throw new Error('Referee must reject a black double-three');
+  }
+  if (!whiteThree.legal) throw new Error('WHITE has no forbidden moves; H8 must be legal for white');
+}
+
+/** The offline oracle used to grade Jev's overrides must be deterministic and honest. */
+async function testArbitrationOracle() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Arbitration regression must not call Jev');
+    }
+  });
+
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const local = engine.local('expert');
+  const first = local.candidates[0].key;
+  const second = local.candidates[1]?.key;
+  if (!second) throw new Error('Arbitration regression needs at least two candidates');
+
+  const result = engine.arbitrate(first, second, { mode: 'expert', depth: 5, branch: 4 });
+  console.log('arbitration regression:', JSON.stringify(result));
+
+  if (result.config.depth !== 5 || result.config.branch !== 4) {
+    throw new Error('Arbitration must honour the requested depth/branch');
+  }
+  if (!['a', 'b', 'tie'].includes(result.verdict)) {
+    throw new Error('Unexpected arbitration verdict: ' + result.verdict);
+  }
+  for (const side of ['a', 'b']) {
+    if (!Number.isFinite(result[side].searchScore)) {
+      throw new Error('Arbitration must produce a finite search score for ' + side);
+    }
+    if (!Number.isFinite(result[side].safetyRank)) {
+      throw new Error('Arbitration must produce a tactical safety rank for ' + side);
+    }
+  }
+
+  const repeat = engine.arbitrate(second, first, { mode: 'expert', depth: 5, branch: 4 });
+  if (repeat.a.searchScore !== result.b.searchScore || repeat.b.searchScore !== result.a.searchScore) {
+    throw new Error('Arbitration must be symmetric under argument order');
+  }
+}
+
+/** The referee must derive its coordinates and board from the shared helpers. */
+function testCoordinateHelpers() {
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const key = coord(r, c);
+      const parsed = parseCoord(key);
+      if (!parsed || parsed.r !== r || parsed.c !== c) {
+        throw new Error('Coordinate round-trip failed for ' + key);
+      }
+    }
+  }
+  if (parseCoord('P1') || parseCoord('A0') || parseCoord('A16')) {
+    throw new Error('Out-of-board coordinates must not parse');
+  }
+}
+
+await testCoordinateHelpers();
+await testSingleCandidateShortCircuit();
 await testJevFinalDecisionAuthority();
+await testArbitrationOracle();
 await testMustBlockOpponentForkCreator();
 await testRenjuForbiddenMoves();
 await testUndoAfterGameOver();
+await testRefereeRuleParity();
 console.log('Engine regression tests passed.');
