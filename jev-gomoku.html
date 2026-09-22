@@ -102,27 +102,52 @@
 
       <input id="model" type="hidden" value="jev-latest" />
 
-      <div class="field">
-        <label for="strengthMode">对局等级</label>
-        <select id="strengthMode">
-          <option value="expert">等级 3 · Jev 大师（推荐）</option>
-          <option value="strong">等级 2 · Jev 快速</option>
-          <option value="jev">实验 · Jev 直觉</option>
-          <option value="local">本地 · 本地引擎</option>
-        </select>
-      </div>
+      <input id="strengthMode" type="hidden" value="expert" />
 
-      <div class="level-guide" aria-label="对局等级说明">
-        <div class="level-guide-item featured"><b>等级 3 · Jev 大师</b><span>棋力优先。更深的本地搜索后，再交给 Jev 判断候选，最推荐。</span></div>
-        <div class="level-guide-item"><b>等级 2 · Jev 快速</b><span>速度优先。搜索更浅一些，仍会让 Jev 参与候选判断。</span></div>
-        <div class="level-guide-item"><b>实验 · Jev 直觉</b><span>更直接地让 Jev 从合法落点里选择，Jev 感更强，但不代表棋力更强。</span></div>
-        <div class="level-guide-item muted"><b>本地 · 本地引擎</b><span>完全不调用 Jev，只使用传统搜索和战术判断。</span></div>
+      <div class="level-picker" role="radiogroup" aria-label="对局等级">
+        <button class="level-option" type="button" data-mode="expert" role="radio" aria-checked="false">
+          <span class="level-option-head">
+            <span class="level-option-title">等级 3 · Jev 大师</span>
+            <span class="level-option-tag recommended">推荐</span>
+            <span class="level-option-current">✓ 当前选择</span>
+          </span>
+          <span class="level-option-desc">棋力优先。更深的本地搜索后，再交给 Jev 判断候选。</span>
+        </button>
+
+        <button class="level-option" type="button" data-mode="strong" role="radio" aria-checked="false">
+          <span class="level-option-head">
+            <span class="level-option-title">等级 2 · Jev 快速</span>
+            <span class="level-option-tag">更快</span>
+            <span class="level-option-current">✓ 当前选择</span>
+          </span>
+          <span class="level-option-desc">速度优先。搜索更浅一些，仍会让 Jev 参与候选判断。</span>
+        </button>
+
+        <button class="level-option" type="button" data-mode="jev" role="radio" aria-checked="false">
+          <span class="level-option-head">
+            <span class="level-option-title">实验 · Jev 直觉</span>
+            <span class="level-option-tag experiment">实验</span>
+            <span class="level-option-current">✓ 当前选择</span>
+          </span>
+          <span class="level-option-desc">更直接让 Jev 从合法落点里选择，Jev 感更强，但不代表棋力更强。</span>
+        </button>
+
+        <button class="level-option" type="button" data-mode="local" role="radio" aria-checked="false">
+          <span class="level-option-head">
+            <span class="level-option-title">本地 · 本地引擎</span>
+            <span class="level-option-tag local">不使用 Jev</span>
+            <span class="level-option-current">✓ 当前选择</span>
+          </span>
+          <span class="level-option-desc">完全不调用 Jev，只使用传统搜索和战术判断。</span>
+        </button>
       </div>
 
       <div class="connection-test" id="connectionTest" role="status" aria-live="polite">
         <span class="test-dot"></span>
         <div class="test-detail" id="connectionTestText"></div>
       </div>
+
+      <div class="selection-summary">当前选择：<strong id="currentLevelSummary">等级 3 · Jev 大师</strong></div>
 
       <div class="modal-actions">
         <button class="btn test-btn" id="testConnectionBtn" type="button">检查 Jev 状态</button>
