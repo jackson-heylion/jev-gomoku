@@ -722,15 +722,28 @@
     drawBoard(); updateHistory(); updateStatus(); updateApiState();
   }
 
+  function undoPlyCount() {
+    if (!moves.length) return 0;
+
+    // During a finished game, current is intentionally not advanced after the
+    // winning move. Derive the rollback from the actual last stone instead of
+    // the stale side-to-move value.
+    if (gameOver) {
+      const lastMove = moves[moves.length - 1];
+      return Math.min(lastMove?.color === WHITE ? 2 : 1, moves.length);
+    }
+
+    return Math.min(current === BLACK ? 2 : 1, moves.length);
+  }
+
   function undo() {
     if (thinking) { toast('Jev 正在思考，暂时不能悔棋'); return; }
     if (!moves.length) return;
+
+    const remove = undoPlyCount();
     if (gameOver) gameOver = false;
     hideResultModal();
     gameResult = null;
-
-    let remove = current === BLACK ? 2 : 1;
-    remove = Math.min(remove, moves.length);
     for (let i = 0; i < remove; i++) {
       const m = moves.pop();
       board[m.r][m.c] = EMPTY;
