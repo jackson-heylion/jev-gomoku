@@ -11,6 +11,8 @@ const UPSTREAM = 'https://api.typesafe.ai/v1/systemone';
 const REQUESTED_PORT = process.env.JEV_PROXY_PORT ? Number(process.env.JEV_PROXY_PORT) : null;
 const PORTS = REQUESTED_PORT ? [REQUESTED_PORT] : Array.from({ length: 11 }, (_, i) => 8787 + i);
 const MAX_BODY = 2 * 1024 * 1024;
+const MAX_ATTEMPTS = 3;
+const RETRYABLE = new Set([429, 529]);
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -23,12 +25,13 @@ const MIME = {
   '.ico': 'image/x-icon'
 };
 
-function json(res, status, value) {
+function json(res, status, value, extraHeaders = {}) {
   const body = JSON.stringify(value);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Content-Length': Buffer.byteLength(body)
+    'Content-Length': Buffer.byteLength(body),
+    ...extraHeaders
   });
   res.end(body);
 }
@@ -61,29 +64,65 @@ function safePath(urlPath) {
 
 async function serveStatic(req, res) {
   const path = safePath(req.url || '/');
-  if (!path) {
-    json(res, 400, { error: 'Bad path' });
-    return;
-  }
+  if (!path) return json(res, 400, { error: 'Bad path' });
   try {
     const body = await readFile(path);
     res.writeHead(200, {
       'Content-Type': MIME[extname(path)] || 'application/octet-stream',
       'Cache-Control': 'no-store'
     });
-    res.end(body);
+    if (req.method === 'HEAD') res.end();
+    else res.end(body);
   } catch {
     json(res, 404, { error: 'Not Found' });
   }
 }
 
+function retryDelayMs(response, attempt) {
+  const header = response.headers.get('retry-after');
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(15000, seconds * 1000);
+    const when = Date.parse(header);
+    if (Number.isFinite(when)) return Math.max(0, Math.min(15000, when - Date.now()));
+  }
+  return Math.min(8000, 650 * (2 ** attempt));
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function callTypeSafe(payload, apiKey) {
+  let lastResponse;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const response = await fetch(UPSTREAM, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    lastResponse = response;
+    if (!RETRYABLE.has(response.status) || attempt === MAX_ATTEMPTS - 1) return response;
+    await sleep(retryDelayMs(response, attempt));
+  }
+  return lastResponse;
+}
+
 async function proxyJev(req, res) {
   try {
-    const auth = String(req.headers.authorization || '').trim();
-    if (!/^Bearer\s+.+/.test(auth)) {
-      json(res, 401, { error: 'Missing Bearer API key' });
+    const apiKey = String(process.env.JEV_API_KEY || '').trim();
+    if (!apiKey) {
+      json(res, 503, { error: 'Jev service not configured' });
       return;
     }
+    if (!String(req.headers['content-type'] || '').toLowerCase().includes('application/json')) {
+      json(res, 415, { error: 'Content-Type must be application/json' });
+      return;
+    }
+
     const body = await readBody(req);
     let payload;
     try {
@@ -93,39 +132,45 @@ async function proxyJev(req, res) {
       return;
     }
 
-    const upstream = await fetch(UPSTREAM, {
-      method: 'POST',
-      headers: {
-        'Authorization': auth,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    const upstream = await callTypeSafe(payload, apiKey);
+    const retryAfter = upstream.headers.get('retry-after');
+    if (!upstream.ok) {
+      json(
+        res,
+        upstream.status,
+        { error: 'TypeSafe request failed', status: upstream.status },
+        retryAfter ? { 'Retry-After': retryAfter } : {}
+      );
+      return;
+    }
 
     const raw = Buffer.from(await upstream.arrayBuffer());
-    const headers = {
-      'Content-Type': upstream.headers.get('content-type') || 'application/json; charset=utf-8',
+    res.writeHead(upstream.status, {
+      'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
       'Content-Length': raw.length
-    };
-    const retryAfter = upstream.headers.get('retry-after');
-    if (retryAfter) headers['Retry-After'] = retryAfter;
-    res.writeHead(upstream.status, headers);
+    });
     res.end(raw);
   } catch (err) {
     json(res, err?.status || 502, {
-      error: err?.status === 413 ? 'Request body too large' : 'Proxy request failed',
-      detail: err?.message || String(err)
+      error: err?.status === 413 ? 'Request body too large' : 'TypeSafe request failed'
     });
   }
 }
 
 async function handle(req, res) {
   if (req.method === 'GET' && req.url === '/health') {
-    json(res, 200, { ok: true, service: 'jev-gomoku-proxy' });
+    json(res, 200, {
+      ok: true,
+      jevConfigured: Boolean(String(process.env.JEV_API_KEY || '').trim())
+    });
     return;
   }
-  if (req.method === 'POST' && req.url === '/api/jev') {
+  if (req.url === '/api/jev') {
+    if (req.method !== 'POST') {
+      json(res, 405, { error: 'Method Not Allowed' }, { Allow: 'POST' });
+      return;
+    }
     await proxyJev(req, res);
     return;
   }
@@ -168,7 +213,7 @@ function openBrowser(url) {
 
 const port = await choosePort();
 const server = http.createServer((req, res) => {
-  handle(req, res).catch(err => json(res, 500, { error: err?.message || String(err) }));
+  handle(req, res).catch(() => json(res, 500, { error: 'Internal Server Error' }));
 });
 
 server.listen(port, HOST, () => {
@@ -176,6 +221,7 @@ server.listen(port, HOST, () => {
   console.log('Jev 五子棋本地代理已启动');
   console.log(`页面：${url}`);
   console.log(`代理：${url}api/jev`);
+  console.log(process.env.JEV_API_KEY ? 'Jev Secret：已从 JEV_API_KEY 加载' : 'Jev Secret：未配置，将自动使用本地引擎降级');
   console.log('按 Ctrl+C 退出。');
   openBrowser(url);
 });
