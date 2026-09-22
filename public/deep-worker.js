@@ -75,7 +75,7 @@ function undoMove(move, color) {
 }
 
 function cachePut(cache, key, entry) {
-  if (cache.size < TT_MAX_ENTRIES) cache.set(key, entry);
+  if (cache.has(key) || cache.size < TT_MAX_ENTRIES) cache.set(key, entry);
 }
 
 function otherColor(color) {
@@ -513,8 +513,7 @@ function quickMoveScore(move, color) {
     const base = evaluateStatic();
     const signedBase = color === rootSide ? base : -base;
     const conn = localConnectivity(move.r, move.c, color);
-    const shape = threatPatternProfilePlaced(move.r, move.c, color);
-    score = signedBase + conn.allies * 18 + conn.enemies * 5 + shape.score;
+    score = signedBase + conn.allies * 18 + conn.enemies * 5;
   }
   undoMove(move, color);
   return score;
@@ -621,9 +620,18 @@ function threatQuiescence(alpha, beta, toMove, remaining, branch, radius) {
   return value;
 }
 
-function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
+function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache, lastMove = null) {
   assertTime();
-  if (depth <= 0) return threatQuiescence(alpha, beta, toMove, 2, branch, radius);
+  if (depth <= 0) {
+    if (lastMove) {
+      const lastMover = otherColor(toMove);
+      const volatile = threatPatternProfilePlaced(lastMove.r, lastMove.c, lastMover);
+      if (volatile.winningPoints > 0 || volatile.fourDirections > 0 || volatile.openThreeDirections > 0) {
+        return threatQuiescence(alpha, beta, toMove, 2, branch, radius);
+      }
+    }
+    return evaluateStatic();
+  }
 
   const cacheKey = boardKey(toMove);
   const alphaStart = alpha;
@@ -661,7 +669,7 @@ function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
     if (isWin(move.r, move.c, toMove)) {
       child = maximizing ? MATE_SCORE + depth : -MATE_SCORE - depth;
     } else {
-      child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), branch, radius, cache);
+      child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), branch, radius, cache, move);
     }
     undoMove(move, toMove);
 
@@ -691,7 +699,7 @@ function evaluateRootCandidate(move, depth, branch, radius, cache) {
   if (isWin(move.r, move.c, rootSide)) {
     score = MATE_SCORE * 10;
   } else {
-    score = alphaBeta(depth - 1, -Infinity, Infinity, opponentSide, branch, radius, cache);
+    score = alphaBeta(depth - 1, -Infinity, Infinity, opponentSide, branch, radius, cache, move);
     score += evaluateStatic() * .035;
   }
   undoMove(move, rootSide);
