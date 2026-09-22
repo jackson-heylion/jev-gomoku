@@ -103,6 +103,53 @@ async function testLostGameHorizonGuard() {
 
 }
 
+async function diagnoseHistoricalTurningPoint() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Historical deep-rank diagnostic must not call Jev');
+    }
+  });
+
+  const full = [
+    'G7', 'H8',
+    'H6', 'F8',
+    'I7', 'G8',
+    'I8', 'E8',
+    'D8', 'H9',
+    'I6', 'I5',
+    'H7', 'F7',
+    'J7', 'K7',
+    'I10', 'I9',
+    'G6', 'E6'
+  ];
+
+  const whiteTurns = [
+    { beforePly: 9, actual: 'H9' },
+    { beforePly: 11, actual: 'I5' },
+    { beforePly: 13, actual: 'F7' },
+    { beforePly: 15, actual: 'K7' },
+    { beforePly: 17, actual: 'I9' },
+    { beforePly: 19, actual: 'E6' }
+  ];
+
+  for (const turn of whiteTurns) {
+    const position = positionFromSequence(full.slice(0, turn.beforePly));
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+    const ranked = engine.deepRank('expert');
+    console.log('historical deep-rank:', JSON.stringify({
+      whitePly: turn.beforePly + 1,
+      actual: turn.actual,
+      best: ranked[0]?.move || null,
+      ranked: ranked.slice(0, 6).map(item => ({
+        move: item.move,
+        shallowScore: item.shallowScore,
+        deepScore: item.deepScore,
+        safety: item.safety
+      }))
+    }));
+  }
+}
+
 async function testIndependentChallengerVerification() {
   let challengerTarget = null;
 
@@ -174,5 +221,6 @@ async function testIndependentChallengerVerification() {
 }
 
 await testLostGameHorizonGuard();
+await diagnoseHistoricalTurningPoint();
 await testIndependentChallengerVerification();
 console.log('Engine regression tests passed.');
