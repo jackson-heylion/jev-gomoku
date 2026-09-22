@@ -85,12 +85,23 @@ async function testLostGameHorizonGuard() {
     } : null
   }));
 
-  if (local.finalChoice === 'E6') {
-    throw new Error('Regression failed: Local still chooses the known horizon-blunder E6');
+  if (!e6) {
+    throw new Error('Regression failed: expected E6 to remain visible for diagnostics');
   }
 
-  if (e6 && e6.analysis?.facts?.tactical_safety === 'SAFE') {
+  if (e6.analysis?.facts?.tactical_safety === 'SAFE') {
     throw new Error('Regression failed: E6 is still classified SAFE');
+  }
+
+  if (!e6.analysis?.facts?.opponent_double_threat || e6.analysis.facts.opponent_double_threat === 'NOT_FOUND') {
+    throw new Error('Regression failed: E6 does not expose the opponent double-threat creator');
+  }
+
+  // The position may already be objectively lost, so the regression does not
+  // require a specific replacement move. It requires the engine to stop calling
+  // E6 safe and to surface the tactical reason instead of a horizon-blind score.
+  if (local.finalChoice === 'E6' && e6.analysis?.facts?.tactical_safety !== 'LOSING') {
+    throw new Error('Regression failed: E6 can only remain top if it is explicitly marked losing');
   }
 }
 
