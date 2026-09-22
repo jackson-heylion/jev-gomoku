@@ -8,6 +8,9 @@
   const canvas = document.getElementById('board');
   const ctx = canvas.getContext('2d');
   const turnText = document.getElementById('turnText');
+  const turnHint = document.getElementById('turnHint');
+  const turnClockLabel = document.getElementById('turnClockLabel');
+  const turnClockValue = document.getElementById('turnClockValue');
   const gameMeta = document.getElementById('gameMeta');
   const lastMoveText = document.getElementById('lastMoveText');
   const historyEl = document.getElementById('history');
@@ -16,6 +19,7 @@
   const levelBadge = document.getElementById('levelBadge');
   const levelSummary = document.getElementById('levelSummary');
   const jevLiveState = document.getElementById('jevLiveState');
+  const lastThinkDuration = document.getElementById('lastThinkDuration');
   const jevMove = document.getElementById('jevMove');
   const jevDecisionLabel = document.getElementById('jevDecisionLabel');
   const jevVerdict = document.getElementById('jevVerdict');
@@ -58,6 +62,9 @@
   let testController = null;
   let gameResult = null;
   let gameStartedAt = new Date();
+  let turnStartedAt = performance.now();
+  let thinkingStartedAt = null;
+  let lastThinkMs = null;
 
   const settings = loadSettings();
   modelInput.value = settings.model;
@@ -65,6 +72,69 @@
 
   function makeBoard() {
     return Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  }
+
+  function formatElapsed(ms) {
+    const seconds = Math.max(0, Number(ms) || 0) / 1000;
+    if (seconds < 60) return `${seconds.toFixed(1)} 秒`;
+    const minutes = Math.floor(seconds / 60);
+    const remain = Math.floor(seconds % 60);
+    return `${minutes} 分 ${String(remain).padStart(2, '0')} 秒`;
+  }
+
+  function formatElapsedCompact(ms) {
+    const seconds = Math.max(0, Number(ms) || 0) / 1000;
+    return seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+  }
+
+  function resetTurnClock() {
+    turnStartedAt = performance.now();
+    refreshTurnClock();
+  }
+
+  function beginThinkingClock() {
+    thinkingStartedAt = performance.now();
+    turnStartedAt = thinkingStartedAt;
+    refreshTurnClock();
+  }
+
+  function captureThinkingDuration(result = null) {
+    if (thinkingStartedAt == null) return lastThinkMs;
+    const elapsed = Math.max(0, performance.now() - thinkingStartedAt);
+    lastThinkMs = elapsed;
+    if (result && typeof result === 'object') result.thinkDurationMs = Math.round(elapsed);
+    lastThinkDuration.textContent = formatElapsed(elapsed);
+    return elapsed;
+  }
+
+  function refreshTurnClock() {
+    if (gameOver) {
+      turnClockLabel.textContent = '对局状态';
+      turnClockValue.textContent = '已结束';
+      return;
+    }
+
+    const now = performance.now();
+    if (thinking) {
+      const started = thinkingStartedAt ?? turnStartedAt;
+      const elapsed = Math.max(0, now - started);
+      const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
+      turnClockLabel.textContent = `${actor} 已思考`;
+      turnClockValue.textContent = formatElapsed(elapsed);
+      if (settings.strengthMode !== 'local') {
+        jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
+      }
+      return;
+    }
+
+    if (current === BLACK) {
+      turnClockLabel.textContent = '你已思考';
+      turnClockValue.textContent = formatElapsed(now - turnStartedAt);
+      return;
+    }
+
+    turnClockLabel.textContent = settings.strengthMode !== 'local' ? '等待 Jev' : '等待本地引擎';
+    turnClockValue.textContent = formatElapsed(now - turnStartedAt);
   }
 
   function loadSettings() {
@@ -353,6 +423,7 @@
       return;
     }
     current = WHITE;
+    resetTurnClock();
     updateStatus();
     setTimeout(jevTurn, 220);
   }
@@ -395,6 +466,7 @@
     gameResult = { text, winner, endedAt: new Date() };
     gameOver = true;
     thinking = false;
+    thinkingStartedAt = null;
     canvas.classList.remove('disabled');
     const cls = winner === BLACK ? 'black' : 'white';
     turnText.innerHTML = winner === EMPTY
@@ -416,6 +488,10 @@
     jevDecisionLog = [];
     gameResult = null;
     gameStartedAt = new Date();
+    turnStartedAt = performance.now();
+    thinkingStartedAt = null;
+    lastThinkMs = null;
+    lastThinkDuration.textContent = '—';
     hideResultModal();
     canvas.classList.remove('disabled');
     jevMove.textContent = '—';
@@ -445,6 +521,10 @@
     }
     jevDecisionLog = jevDecisionLog.filter(item => item.moveNo <= moves.length);
     current = BLACK;
+    turnStartedAt = performance.now();
+    thinkingStartedAt = null;
+    lastThinkMs = null;
+    lastThinkDuration.textContent = '—';
     lastJev = null;
     jevMove.textContent = '—';
     jevDecisionLabel.textContent = '已悔棋';
@@ -462,16 +542,22 @@
     if (gameOver) return;
     const nextNo = moves.length + 1;
     if (thinking) {
-      turnText.innerHTML = `<span class="stone-dot white"></span><span class="thinking">${settings.strengthMode !== 'local' ? 'Jev' : '本地引擎'} 正在选择落点</span>`;
+      const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
+      turnText.innerHTML = `<span class="stone-dot white"></span><span class="thinking">${actor} 正在思考</span>`;
+      turnHint.textContent = '正在分析局面，请稍候';
       gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
     } else if (current === BLACK) {
-      turnText.innerHTML = `<span class="stone-dot black"></span><span>你的回合</span>`;
+      turnText.innerHTML = '<span class="stone-dot black"></span><span>轮到你了</span>';
+      turnHint.textContent = '点击棋盘交叉点落下一枚黑棋';
       gameMeta.textContent = `第 ${nextNo} 手 · 黑棋`;
     } else {
-      turnText.innerHTML = `<span class="stone-dot white"></span><span>${settings.strengthMode !== 'local' ? 'Jev' : '本地引擎'} 的回合</span>`;
+      const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
+      turnText.innerHTML = `<span class="stone-dot white"></span><span>${actor} 的回合</span>`;
+      turnHint.textContent = `${actor} 即将开始思考`;
       gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
     }
     lastMoveText.textContent = moves.length ? `最后落子：${moves[moves.length - 1].coord}` : '尚未落子';
+    refreshTurnClock();
   }
 
   function updateHistory() {
@@ -526,6 +612,7 @@
       usage: result?.usage ? { ...result.usage } : null,
       client: result?.client ? { ...result.client } : null,
       fallbackReason: result?.fallbackReason || null,
+      thinkDurationMs: Number.isFinite(result?.thinkDurationMs) ? result.thinkDurationMs : null,
       probabilities,
       candidates,
       trace: result?.decisionTrace ? JSON.parse(JSON.stringify(result.decisionTrace)) : null
@@ -560,6 +647,7 @@
     if (d.confidence != null) lines.push(`  最终置信度：${(d.confidence * 100).toFixed(1)}%`);
     if (d.usage) lines.push(`  Token：${d.usage.input_tokens ?? '?'} in / ${d.usage.output_tokens ?? '?'} out`);
     if (d.client) lines.push(`  API：${d.client.cached ? '命中会话缓存' : `${d.client.attempts || 1} 次请求`}`);
+    if (d.thinkDurationMs != null) lines.push(`  本手思考：${formatElapsed(d.thinkDurationMs)}`);
     if (d.fallbackReason) lines.push(`  降级原因：${d.fallbackReason}`);
     if (d.probabilities.length) {
       lines.push(`  候选概率：${d.probabilities.map(p => `${p.move} ${(p.probability * 100).toFixed(1)}%`).join('；')}`);
@@ -1815,6 +1903,7 @@
     if (gameOver || current !== WHITE || thinking) return;
 
     thinking = true;
+    beginThinkingClock();
     retryBtn.style.display = 'none';
     canvas.classList.add('disabled');
     updateStatus();
@@ -1861,6 +1950,7 @@
 
       const parsed = parseCoord(result.finalChoice);
       if (!parsed || board[parsed.r][parsed.c] !== EMPTY) throw new Error(`最终决策产生非法落点：${result.finalChoice}`);
+      captureThinkingDuration(result);
       lastJev = result;
       renderJevResult(lastJev);
       const moveSource = result.mode === 'local' || result.fallbackReason || result.stageNote?.includes('0 次 Jev')
@@ -1878,6 +1968,7 @@
         return;
       }
       current = BLACK;
+      resetTurnClock();
       updateApiState();
     } catch (err) {
       if (err?.name === 'AbortError') return;
@@ -1893,6 +1984,7 @@
           fallback.stageNote = `${fallback.stageNote}；Jev 不可用时自动降级`;
           const parsed = parseCoord(fallback.finalChoice);
           if (!parsed || board[parsed.r][parsed.c] !== EMPTY) throw new Error('本地降级产生非法落点');
+          captureThinkingDuration(fallback);
           lastJev = fallback;
           renderJevResult(fallback);
           place(parsed.r, parsed.c, WHITE, '本地引擎(降级)');
@@ -1907,6 +1999,7 @@
             return;
           }
           current = BLACK;
+          resetTurnClock();
           updateApiState('err', 'Jev 暂不可用 · 本地引擎接管');
           toast('Jev 暂时不可用，本回合已由本地引擎接管。', 4200);
           return;
@@ -1915,6 +2008,7 @@
         }
       }
 
+      captureThinkingDuration();
       current = WHITE;
       updateApiState('err', 'Jev 暂不可用');
       jevInfo.textContent = `Jev 暂不可用：${msg}`;
@@ -1922,6 +2016,7 @@
       toast('Jev 暂不可用，请重试。', 4200);
     } finally {
       thinking = false;
+      thinkingStartedAt = null;
       requestController = null;
       canvas.classList.remove('disabled');
       updateStatus();
@@ -2103,4 +2198,5 @@
   updateHistory();
   updateStatus();
   updateApiState();
+  setInterval(refreshTurnClock, 100);
 })();
