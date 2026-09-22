@@ -620,14 +620,35 @@ function threatQuiescence(alpha, beta, toMove, remaining, branch, radius) {
   return value;
 }
 
+function mayContainForcingPattern(move, color) {
+  if (!move) return false;
+  for (const [dr, dc] of RENJU_DIRS) {
+    let own = 0;
+    for (let offset = -4; offset <= 4; offset++) {
+      if (!offset) continue;
+      const rr = move.r + dr * offset;
+      const cc = move.c + dc * offset;
+      if (!inBounds(rr, cc)) continue;
+      if (board[rr][cc] === color) own++;
+    }
+    if (own >= 2) return true;
+  }
+  return false;
+}
+
 function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache, lastMove = null) {
   assertTime();
   if (depth <= 0) {
     if (lastMove) {
       const lastMover = otherColor(toMove);
-      const volatile = threatPatternProfilePlaced(lastMove.r, lastMove.c, lastMover);
-      if (volatile.winningPoints > 0 || volatile.fourDirections > 0 || volatile.openThreeDirections > 0) {
-        return threatQuiescence(alpha, beta, toMove, 2, branch, radius);
+      if (mayContainForcingPattern(lastMove, lastMover)) {
+        const volatile = threatPatternProfilePlaced(lastMove.r, lastMove.c, lastMover);
+        if (volatile.winningPoints > 0 || volatile.fourDirections > 0) {
+          return threatQuiescence(alpha, beta, toMove, 2, branch, radius);
+        }
+        if (volatile.openThreeDirections > 0) {
+          return threatQuiescence(alpha, beta, toMove, 1, branch, radius);
+        }
       }
     }
     return evaluateStatic();
