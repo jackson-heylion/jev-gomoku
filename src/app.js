@@ -14,13 +14,25 @@
   const apiIndicator = document.getElementById('apiIndicator');
   const apiLabel = document.getElementById('apiLabel');
   const jevMove = document.getElementById('jevMove');
+  const jevDecisionLabel = document.getElementById('jevDecisionLabel');
+  const jevVerdict = document.getElementById('jevVerdict');
   const jevInfo = document.getElementById('jevInfo');
   const confidenceBar = document.getElementById('confidenceBar');
   const confidenceText = document.getElementById('confidenceText');
+  const alternativesTitle = document.getElementById('alternativesTitle');
   const alternatives = document.getElementById('alternatives');
   const retryBtn = document.getElementById('retryBtn');
   const copyRecordBtn = document.getElementById('copyRecordBtn');
   const toastEl = document.getElementById('toast');
+
+  const resultModal = document.getElementById('resultModal');
+  const resultIcon = document.getElementById('resultIcon');
+  const resultTitle = document.getElementById('resultTitle');
+  const resultDesc = document.getElementById('resultDesc');
+  const resultStats = document.getElementById('resultStats');
+  const resultCloseBtn = document.getElementById('resultCloseBtn');
+  const resultCopyBtn = document.getElementById('resultCopyBtn');
+  const resultRestartBtn = document.getElementById('resultRestartBtn');
 
   const settingsModal = document.getElementById('settingsModal');
   const modelInput = document.getElementById('model');
@@ -297,6 +309,29 @@
     });
   }
 
+  function hideResultModal() {
+    resultModal.classList.remove('show');
+  }
+
+  function showResultModal(text, winner) {
+    const modeLabel = settings.strengthMode === 'local' ? '本地引擎'
+      : settings.strengthMode === 'jev' ? '纯 Jev'
+      : settings.strengthMode === 'strong' ? '强力混合'
+      : '大师混合';
+
+    resultTitle.textContent = text;
+    resultIcon.textContent = winner === BLACK ? '●' : winner === WHITE ? '○' : '＝';
+    resultIcon.className = `result-icon ${winner === BLACK ? 'player-win' : winner === WHITE ? 'ai-win' : 'draw'}`;
+    resultDesc.textContent = winner === BLACK
+      ? '你执黑完成五连，本局获胜。'
+      : winner === WHITE
+        ? '白棋完成五连，本局结束。'
+        : '棋盘已下满，双方均未形成五连。';
+    resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel}`;
+    resultCopyBtn.textContent = '复制棋谱';
+    resultModal.classList.add('show');
+  }
+
   function finish(text, winner) {
     gameResult = { text, winner, endedAt: new Date() };
     gameOver = true;
@@ -307,7 +342,7 @@
       ? `<span>对局结束：${text}</span>`
       : `<span class="stone-dot ${cls}"></span><span>对局结束：${text}</span>`;
     gameMeta.textContent = `共 ${moves.length} 手`;
-    toast(text, 3500);
+    showResultModal(text, winner);
   }
 
   function restart() {
@@ -322,12 +357,16 @@
     jevDecisionLog = [];
     gameResult = null;
     gameStartedAt = new Date();
+    hideResultModal();
     canvas.classList.remove('disabled');
     jevMove.textContent = '—';
-    jevInfo.textContent = '等待 Jev 落子';
+    jevDecisionLabel.textContent = '等待白棋判断';
+    jevVerdict.textContent = '等待';
+    jevInfo.textContent = '落子后，这里会用容易理解的文字说明为什么选择这一手。';
     confidenceBar.style.width = '0%';
     confidenceText.textContent = '—';
-    alternatives.innerHTML = '';
+    alternativesTitle.textContent = '其他考虑';
+    alternatives.innerHTML = '<div class="empty">暂无备选落点。</div>';
     retryBtn.style.display = 'none';
     drawBoard(); updateHistory(); updateStatus(); updateApiState();
   }
@@ -336,6 +375,7 @@
     if (thinking) { toast('Jev 正在思考，暂时不能悔棋'); return; }
     if (!moves.length) return;
     if (gameOver) gameOver = false;
+    hideResultModal();
     gameResult = null;
 
     let remove = current === BLACK ? 2 : 1;
@@ -348,10 +388,13 @@
     current = BLACK;
     lastJev = null;
     jevMove.textContent = '—';
-    jevInfo.textContent = '已悔棋，等待下一次 Jev 判断';
+    jevDecisionLabel.textContent = '已悔棋';
+    jevVerdict.textContent = '等待';
+    jevInfo.textContent = '等待下一次白棋判断。';
     confidenceBar.style.width = '0%';
     confidenceText.textContent = '—';
-    alternatives.innerHTML = '';
+    alternativesTitle.textContent = '其他考虑';
+    alternatives.innerHTML = '<div class="empty">暂无备选落点。</div>';
     retryBtn.style.display = 'none';
     drawBoard(); updateHistory(); updateStatus();
   }
@@ -571,9 +614,14 @@
       ta.remove();
     }
     const old = copyRecordBtn.textContent;
+    const resultOld = resultCopyBtn.textContent;
     copyRecordBtn.textContent = '已复制';
+    resultCopyBtn.textContent = '已复制';
     toast(`已复制 ${moves.length} 手棋谱`);
-    setTimeout(() => { copyRecordBtn.textContent = old; }, 1200);
+    setTimeout(() => {
+      copyRecordBtn.textContent = old;
+      resultCopyBtn.textContent = resultOld;
+    }, 1200);
   }
 
   function boardRows() {
@@ -1547,33 +1595,101 @@
     return { c: COLS.indexOf(m[1]), r: Number(m[2]) - 1 };
   }
 
-  function renderJevResult(result) {
-    const a = result.answer;
-    const confidence = Number.isFinite(a.confidence) ? a.confidence : null;
-    const finalChoice = result.finalChoice || a.choice;
-    jevMove.textContent = finalChoice;
-    const tokens = result.usage ? `${result.usage.input_tokens ?? '?'} in / ${result.usage.output_tokens ?? '?'} out` : 'usage n/a';
+  function humanCandidateLabel(candidate) {
+    const f = candidate?.analysis?.facts || {};
+    if (f.forced_role === 'WIN_NOW' || f.attack_shape === 'IMMEDIATE_WIN') return '可以直接取胜';
+    if (f.forced_role === 'MUST_DEFEND') return '必须先挡住对手';
+    if (f.vcf_status === 'FORCED_SEQUENCE_FOUND') return '有连续冲四杀棋';
+    if (f.vct_status === 'PRESSURE_SEQUENCE_FOUND') return '有持续进攻机会';
+    if (f.attack_shape === 'FOUR_PLUS_FOLLOWUP') return '能形成强制后续';
+    if (f.attack_shape === 'MULTIPLE_OPEN_THREE_PRESSURE') return '能制造多重威胁';
+    if (f.attack_shape === 'OPEN_THREE_PRESSURE') return '能继续主动进攻';
+    if (f.tactical_safety === 'TACTICALLY_RISKY') return '有进攻，但要提防反击';
+    if (f.connectivity === 'VERY_HIGH' || f.connectivity === 'HIGH') return '和现有棋形连接紧密';
+    return '位置稳健';
+  }
+
+  function buildHumanDecision(result, finalChoice) {
+    const candidate = (result.candidates || []).find(m => m.key === finalChoice) || null;
+    const f = candidate?.analysis?.facts || {};
     const modeLabel = result.mode === 'local' ? '本地引擎'
       : result.mode === 'jev' ? '纯 Jev'
       : result.mode === 'strong' ? '强力混合'
       : '大师混合';
-    const suggestion = result.jevSuggested && result.jevSuggested !== finalChoice ? ` · Jev 原建议 ${result.jevSuggested}` : '';
-    const forced = result.forced === 'win' ? ' · 必胜点' : result.forced === 'block' ? ' · 强制防守' : '';
-    jevInfo.textContent = `${modeLabel}${forced}${suggestion} · ${result.stageNote || 'Jev'} · ${result.model} · ${tokens}`;
+
+    let verdict = '稳健选择';
+    let reason = `综合局面后，白棋选择 ${finalChoice}，优先保持棋形和后续空间。`;
+
+    if (result.forced === 'win' || f.forced_role === 'WIN_NOW' || f.attack_shape === 'IMMEDIATE_WIN') {
+      verdict = '直接取胜';
+      reason = `${finalChoice} 可以立即形成五连，这是当前最明确的取胜点。`;
+    } else if (result.forced === 'block' || f.forced_role === 'MUST_DEFEND') {
+      verdict = '必须防守';
+      reason = `对手已经形成下一手取胜威胁，${finalChoice} 是当前必须优先封住的点。`;
+    } else if (f.vcf_status === 'FORCED_SEQUENCE_FOUND') {
+      verdict = '发现杀棋';
+      reason = `从 ${finalChoice} 开始，本地搜索发现连续冲四的强制进攻路线，可以持续逼迫对手应对。`;
+    } else if (f.attack_shape === 'FOUR_PLUS_FOLLOWUP') {
+      verdict = '强制进攻';
+      reason = `${finalChoice} 能形成“四”或紧接着的强制手，比单纯占位更有主动权。`;
+    } else if (f.attack_shape === 'MULTIPLE_OPEN_THREE_PRESSURE') {
+      verdict = '制造多重威胁';
+      reason = `${finalChoice} 能同时制造多处进攻压力，让对手更难一次防住。`;
+    } else if (f.attack_shape === 'OPEN_THREE_PRESSURE' || f.vct_status === 'PRESSURE_SEQUENCE_FOUND') {
+      verdict = '主动施压';
+      reason = `${finalChoice} 可以延续进攻，并保留后续做活三、做四的机会。`;
+    } else if (f.tactical_safety === 'TACTICALLY_RISKY') {
+      verdict = '谨慎进攻';
+      reason = `${finalChoice} 有进攻价值，但也存在被对手反击的风险。`;
+    } else if (f.connectivity === 'VERY_HIGH' || f.connectivity === 'HIGH') {
+      verdict = '强化棋形';
+      reason = `${finalChoice} 与现有白棋连接紧密，有利于形成更多后续进攻方向。`;
+    }
+
+    let agreement;
+    if (result.mode === 'local' || result.stageNote?.includes('0 次 Jev')) {
+      agreement = '这是本地确定性战术判断，本回合不需要调用 Jev。';
+    } else if (result.mode === 'jev') {
+      agreement = '这一手由 Jev 直接从合法落点中选择。';
+    } else if (result.jevSuggested && result.jevSuggested !== finalChoice) {
+      agreement = `Jev 更偏向 ${result.jevSuggested}，但综合本地搜索后最终仍选择 ${finalChoice}。`;
+    } else {
+      agreement = 'Jev 与本地首选一致。';
+    }
+
+    return { verdict, reason, agreement, modeLabel };
+  }
+
+  function renderJevResult(result) {
+    const a = result.answer;
+    const confidence = Number.isFinite(a.confidence) ? a.confidence : null;
+    const finalChoice = result.finalChoice || a.choice;
+    const human = buildHumanDecision(result, finalChoice);
+
+    jevMove.textContent = finalChoice;
+    jevDecisionLabel.textContent = `${human.modeLabel} · 白棋落在`;
+    jevVerdict.textContent = human.verdict;
+    jevInfo.innerHTML = `<strong>${escapeHtml(human.reason)}</strong><span>${escapeHtml(human.agreement)}</span>`;
+
     confidenceBar.style.width = confidence == null ? '0%' : `${Math.max(0, Math.min(100, confidence * 100))}%`;
     confidenceText.textContent = confidence == null ? '—' : `${Math.round(confidence * 100)}%`;
 
     const probs = a.probabilities && typeof a.probabilities === 'object'
-      ? Object.entries(a.probabilities).sort((x, y) => Number(y[1]) - Number(x[1])).slice(0, 5)
+      ? Object.entries(a.probabilities)
+          .sort((x, y) => Number(y[1]) - Number(x[1]))
+          .filter(([key]) => key !== finalChoice)
+          .slice(0, 3)
       : [];
-    const rankMap = new Map((result.candidates || []).map(m => [m.key, m.rank]));
 
-    alternatives.innerHTML = probs.map(([key, p]) => {
-      const pct = Math.max(0, Math.min(100, Number(p) * 100));
-      const rank = rankMap.get(key);
-      const label = rank ? `${key} · #${rank}` : key;
-      return `<div class="alt"><strong>${escapeHtml(label)}</strong><div class="mini"><i style="width:${pct}%"></i></div><em>${pct.toFixed(pct >= 10 ? 0 : 1)}%</em></div>`;
-    }).join('');
+    const candidateMap = new Map((result.candidates || []).map(m => [m.key, m]));
+    alternativesTitle.textContent = '其他考虑';
+    alternatives.innerHTML = probs.length
+      ? probs.map(([key, p]) => {
+          const pct = Math.max(0, Math.min(100, Number(p) * 100));
+          const hint = humanCandidateLabel(candidateMap.get(key));
+          return `<div class="alt"><div class="alt-copy"><strong>${escapeHtml(key)}</strong><span>${escapeHtml(hint)}</span></div><div class="mini"><i style="width:${pct}%"></i></div><em>${pct.toFixed(pct >= 10 ? 0 : 1)}%</em></div>`;
+        }).join('')
+      : '<div class="empty">这一手无需比较其他落点。</div>';
   }
 
   function friendlyError(err) {
@@ -1603,6 +1719,12 @@
   document.getElementById('undoBtn').addEventListener('click', undo);
   retryBtn.addEventListener('click', jevTurn);
   copyRecordBtn.addEventListener('click', copyGameRecord);
+  resultCopyBtn.addEventListener('click', copyGameRecord);
+  resultCloseBtn.addEventListener('click', hideResultModal);
+  resultRestartBtn.addEventListener('click', restart);
+  resultModal.addEventListener('click', e => {
+    if (e.target === resultModal) hideResultModal();
+  });
   settingsModal.addEventListener('click', e => {
     if (e.target === settingsModal) {
       if (testController) testController.abort();
@@ -1613,6 +1735,7 @@
     if (e.key === 'Escape') {
       if (testController) testController.abort();
       settingsModal.classList.remove('show');
+      hideResultModal();
     }
   });
 
