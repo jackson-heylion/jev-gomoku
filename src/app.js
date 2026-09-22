@@ -603,6 +603,21 @@
     return [...threes.values()];
   }
 
+  function potentialBlackThreeDirections(r, c) {
+    let directions = 0;
+    for (const [dr, dc] of RENJU_DIRS) {
+      let nearbyBlack = 0;
+      for (let offset = -4; offset <= 4; offset++) {
+        if (!offset) continue;
+        const rr = r + offset * dr;
+        const cc = c + offset * dc;
+        if (inBounds(rr, cc) && board[rr][cc] === BLACK) nearbyBlack++;
+      }
+      if (nearbyBlack >= 2) directions++;
+    }
+    return directions;
+  }
+
   function blackForbiddenInfoPlaced(r, c, depth = 0) {
     // Under RIF rules an exact five wins immediately, even if the same move
     // would otherwise also create a double-three or double-four.
@@ -618,7 +633,7 @@
       return { forbidden: true, type: 'FOUR_FOUR', winningFive: false, fourCount: fours.length, threeCount: 0 };
     }
 
-    if (depth >= RENJU_MAX_RECURSION) {
+    if (depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
       return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: 0 };
     }
 
