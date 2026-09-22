@@ -575,6 +575,7 @@
           f.initiative && `initiative=${f.initiative}`,
           f.vcf_status && `VCF=${f.vcf_status}`,
           f.vct_status && `VCT=${f.vct_status}`,
+          f.opponent_double_threat && `oppDouble=${f.opponent_double_threat}`,
           f.opponent_counter_vcf && `oppVCF=${f.opponent_counter_vcf}`,
           f.opponent_counter_vct && `oppVCT=${f.opponent_counter_vct}`,
           f.connectivity && `connectivity=${f.connectivity}`,
@@ -909,6 +910,36 @@
     return score;
   }
 
+  function findDoubleThreatCreators(color, radius = 2, maxResults = 3) {
+    const defender = otherColor(color);
+    const result = [];
+
+    // This intentionally scans every nearby legal move instead of relying on
+    // orderedMoves(). A low-ranked move can still create an open four / double
+    // immediate win and is too important to prune by heuristic ordering.
+    for (const m of nearbyMoves(radius)) {
+      board[m.r][m.c] = color;
+
+      const winsNow = isWin(m.r, m.c, color);
+      const defenderCanWinNow = !winsNow && immediateWins(defender, radius).length > 0;
+      const winningReplies = winsNow || defenderCanWinNow
+        ? []
+        : immediateWins(color, radius);
+
+      board[m.r][m.c] = EMPTY;
+
+      if (!winsNow && !defenderCanWinNow && winningReplies.length >= 2) {
+        result.push({
+          move: m.key,
+          winningReplies: winningReplies.map(reply => reply.key)
+        });
+        if (result.length >= maxResults) break;
+      }
+    }
+
+    return result;
+  }
+
   function countForkCreators(color, limit = 10, radius = 2) {
     let count = 0;
     const points = [];
@@ -1111,13 +1142,18 @@
     const conn = localConnectivity(move.r, move.c, WHITE);
     const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(WHITE, cfg.vcfDepth, cfg.radius));
     const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(WHITE, cfg.vctDepth, cfg.radius);
-    const blackCounterVCF = !winsNow && !ownImmediate && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
-    const blackCounterVCT = !winsNow && !ownImmediate && !blackCounterVCF && cfg.vctDepth > 0
+    const blackDoubleThreatCreators = !winsNow && !ownImmediate
+      ? findDoubleThreatCreators(BLACK, cfg.radius, 3)
+      : [];
+    const blackCounterVCF = !winsNow && !ownImmediate && blackDoubleThreatCreators.length === 0
+      && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
+    const blackCounterVCT = !winsNow && !ownImmediate && blackDoubleThreatCreators.length === 0
+      && !blackCounterVCF && cfg.vctDepth > 0
       && searchVCTPressure(BLACK, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
     let safety = 'SAFE';
-    if (oppImmediate >= 2) safety = 'LOSING';
+    if (oppImmediate >= 2 || blackDoubleThreatCreators.length > 0) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
     else if (blackCounterVCF || blackCounterVCT) safety = 'TACTICALLY_RISKY';
 
@@ -1137,6 +1173,7 @@
       forkCreators: forks.count,
       vcf,
       vct,
+      blackDoubleThreatCreators,
       blackCounterVCF,
       blackCounterVCT,
       facts: {
@@ -1148,6 +1185,9 @@
         opponent_immediate_winning_points_after_move: countLabel(oppImmediate),
         vcf_status: vcf ? 'FORCED_SEQUENCE_FOUND' : 'NOT_FOUND',
         vct_status: vct ? 'PRESSURE_SEQUENCE_FOUND' : 'NOT_FOUND',
+        opponent_double_threat: blackDoubleThreatCreators.length
+          ? blackDoubleThreatCreators.map(item => `${item.move}->${item.winningReplies.join('/')}`).join(',')
+          : 'NOT_FOUND',
         opponent_counter_vcf: blackCounterVCF ? 'FOUND' : 'NOT_FOUND',
         opponent_counter_vct: blackCounterVCT ? 'PRESSURE_FOUND' : 'NOT_FOUND',
         connectivity: connectionLabel(conn.allies),
