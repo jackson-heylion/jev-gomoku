@@ -220,4 +220,196 @@
       width: 100%;
       border: 1px solid #303a47;
       background: #0f151d;
-      color: var(--
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 11px;
+      outline: none;
+    }
+    input:focus, select:focus { border-color: #58a6ff; box-shadow: 0 0 0 3px rgba(88,166,255,.10); }
+    .check { display: flex; align-items: center; gap: 8px; color: #b7c2ce; font-size: 12px; margin: 8px 0 12px; }
+    .warning { border: 1px solid #4d3e21; background: #211b0e; color: #d7c69f; border-radius: 10px; padding: 9px 10px; font-size: 11px; line-height: 1.55; margin-bottom: 15px; }
+    .connection-test {
+      display: none;
+      align-items: flex-start;
+      gap: 9px;
+      margin: -3px 0 15px;
+      padding: 10px 11px;
+      border: 1px solid #303a47;
+      border-radius: 10px;
+      background: #101720;
+      color: #b7c2ce;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+    .connection-test.show { display: flex; }
+    .connection-test.ok { border-color: rgba(126,231,135,.34); background: rgba(35,134,54,.10); color: #c9f3d0; }
+    .connection-test.err { border-color: rgba(255,123,114,.34); background: rgba(248,81,73,.09); color: #ffc1bc; }
+    .connection-test.busy { border-color: rgba(210,153,34,.34); background: rgba(210,153,34,.08); color: #e9d39a; }
+    .test-dot { width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: #6e7681; flex: 0 0 auto; }
+    .connection-test.ok .test-dot { background: var(--accent); }
+    .connection-test.err .test-dot { background: var(--danger); }
+    .connection-test.busy .test-dot {
+      background: transparent;
+      border: 2px solid rgba(210,153,34,.28);
+      border-top-color: #d29922;
+      animation: spin .8s linear infinite;
+    }
+    .test-detail { min-width: 0; word-break: break-word; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+    .modal-actions .test-btn { margin-right: auto; }
+
+    .toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 12px);
+      z-index: 30;
+      background: #202833; border: 1px solid #394554; color: #e8eef5;
+      padding: 9px 12px; border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.35);
+      font-size: 12px; opacity: 0; pointer-events: none; transition: .2s ease;
+      max-width: min(90vw, 680px); text-align: center;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    .thinking::after {
+      content: "";
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid rgba(255,255,255,.18);
+      border-top-color: #fff;
+      border-radius: 50%;
+      margin-left: 7px;
+      vertical-align: -2px;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .side { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .history-card { grid-column: 1 / -1; }
+    }
+    @media (max-width: 620px) {
+      .app { width: min(100% - 16px, 1180px); padding-top: 12px; }
+      .topbar { align-items: flex-start; }
+      .brand p { display: none; }
+      .actions .btn .wide { display: none; }
+      .board-card { padding: 10px; }
+      .board-wrap { padding: 6px; }
+      .side { grid-template-columns: 1fr; }
+      .history-card { grid-column: auto; }
+      .hint { flex-direction: column; gap: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">J</div>
+        <div>
+          <h1>Jev 五子棋</h1>
+          <p>15×15 · 你执黑先手 · Alpha-Beta + VCF/VCT 威胁搜索 + Jev 双阶段判断</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="undoBtn" type="button">悔棋</button>
+        <button class="btn" id="restartBtn" type="button">重开</button>
+        <button class="btn primary" id="settingsBtn" type="button"><span class="wide">Jev </span>设置</button>
+      </div>
+    </header>
+
+    <section class="layout">
+      <div class="card board-card">
+        <div class="statusbar">
+          <div class="turn" id="turnText"><span class="stone-dot black"></span><span>你的回合</span></div>
+          <div class="meta" id="gameMeta">第 1 手 · 黑棋</div>
+        </div>
+        <div class="board-wrap">
+          <canvas id="board" width="760" height="760" aria-label="15乘15五子棋棋盘"></canvas>
+        </div>
+        <div class="hint">
+          <span>点击交叉点落子。横、竖、斜任一方向连续 5 子即胜。</span>
+          <span id="lastMoveText">尚未落子</span>
+        </div>
+      </div>
+
+      <aside class="side">
+        <section class="card">
+          <h2 class="section-title">Jev API</h2>
+          <div class="api-state">
+            <div class="api-state-left">
+              <span class="indicator" id="apiIndicator"></span>
+              <span class="api-label" id="apiLabel">未配置 API Key</span>
+            </div>
+            <button class="btn" id="quickSettingsBtn" type="button" style="padding:6px 9px;min-height:30px;font-size:11px">配置</button>
+          </div>
+        </section>
+
+        <section class="card jev-card">
+          <h2 class="section-title">Jev 上一步判断</h2>
+          <div class="big" id="jevMove">—</div>
+          <div class="sub" id="jevInfo">等待 Jev 落子</div>
+          <button class="btn" id="retryBtn" type="button" style="display:none;margin-top:10px;padding:6px 9px;min-height:30px;font-size:11px">重试 Jev 落子</button>
+          <div class="confidence-row">
+            <span>Confidence</span>
+            <div class="bar"><i id="confidenceBar"></i></div>
+            <b id="confidenceText" style="font-size:11px;min-width:36px;text-align:right">—</b>
+          </div>
+          <div class="alternatives" id="alternatives"></div>
+        </section>
+
+        <section class="card history-card">
+          <div class="section-head">
+            <h2 class="section-title">棋谱</h2>
+            <button class="btn copy-btn" id="copyRecordBtn" type="button">复制棋谱</button>
+          </div>
+          <div class="history" id="history"><div class="empty">对局开始后，这里会记录每一步坐标。</div></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <div class="modal-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal">
+      <h2 id="settingsTitle">Jev 设置</h2>
+      <p class="desc">按 TypeSafe 官方 HTTP API 调用 Jev。浏览器直连可能被 CORS 拦截，推荐使用随包提供的本地代理。</p>
+
+      <div class="field">
+        <label for="apiKey">Jev / TypeSafe API Key</label>
+        <div class="input-row">
+          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 API Key" />
+          <button class="btn" id="toggleKeyBtn" type="button">显示</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="model">Model</label>
+        <input id="model" type="text" value="jev-latest" spellcheck="false" />
+      </div>
+
+      <div class="field">
+        <label for="strengthMode">棋力模式</label>
+        <select id="strengthMode">
+          <option value="expert">大师混合（推荐：Alpha-Beta 5 层 + VCF/VCT + Jev 双阶段）</option>
+          <option value="strong">强力混合（Alpha-Beta 3 层 + 威胁搜索 + Jev 双阶段）</option>
+          <option value="jev">纯 Jev（实验：所有合法点直接交给 Jev）</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="accessMode">访问方式</label>
+        <select id="accessMode">
+          <option value="proxy">本地代理（推荐，解决浏览器 CORS）</option>
+          <option value="direct">浏览器直连 TypeSafe API</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="endpoint">API Endpoint</label>
+        <input id="endpoint" type="text" value="http://127.0.0.1:8787/api/jev" spellcheck="false" />
+      </div>
+
+      <label class="check"><input id="rememberKey" type="checkbox" /> 在此浏览器中记住 API Key（localStorage）</label>
+      <div class="warning" id="accessWarning">推荐使用本地代理：浏览器只访问 127.0.0.1，再由本地 Node 服务请求 TypeSafe，可避开第三方 API 的 CORS 限制。API Key 仍由当前页面配置，只转发给 TypeSafe，不写入代理日志。</div>
+
+      <div class="connection-test" id="connectionTest" role="status" aria-live="polite">
+        <span class="test-dot"></span>
+ 
