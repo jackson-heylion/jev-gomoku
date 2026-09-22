@@ -23,7 +23,7 @@ FINAL MOVE
 
 - 候选数 > 1 时，每个白棋回合最多调用 Jev **1 次**。
 - 候选唯一（强制必胜/必防/唯一防 fork）时 **0 次** Jev 调用，直接落子。
-- Local 主线程搜索增加墙钟时间预算：Strong 900ms、Expert 1800ms、Grandmaster 1200ms；根搜索采用迭代加深，超时保留最后一轮完整结果，再继续必要的一手战术安全检查。
+- Local 主线程搜索增加墙钟时间预算：Strong 900ms、Expert 2200ms、Grandmaster 2400ms；根搜索采用迭代加深，超时保留最后一轮完整结果，再继续必要的一手战术安全检查。
 - 开局性能保护：仅 `moves.length < 4` 使用较浅的 Local 搜索；从第 5 个落子位置开始 Expert/Grandmaster 恢复完整本地参数。额外 Deep Worker 仍按原策略在前 10 手跳过。
 - Jev 返回非法落点或调用失败时，自动降级由 Local 接管本回合。
 
