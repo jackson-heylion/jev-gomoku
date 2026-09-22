@@ -1345,6 +1345,7 @@
       phaseDeadline: startedAt + Math.max(150, budgetMs * .70),
       timedOut: false,
       rootTimedOut: false,
+      phase: 'root',
       checks: 0,
       depthReached: 0,
       targetDepth: cfg.depth
@@ -1357,13 +1358,21 @@
     const runtime = activeLocalSearch;
     if (!runtime) return false;
     runtime.checks++;
-    if (performance.now() < Math.min(runtime.phaseDeadline, runtime.deadline)) return false;
-    runtime.timedOut = true;
-    return true;
+    const now = performance.now();
+    if (now >= runtime.deadline) {
+      runtime.timedOut = true;
+      return true;
+    }
+    if (now >= runtime.phaseDeadline) {
+      if (runtime.phase === 'root') runtime.rootTimedOut = true;
+      return true;
+    }
+    return false;
   }
 
   function enterLocalTacticalPhase(runtime) {
     if (!runtime) return;
+    runtime.phase = 'tactical';
     runtime.phaseDeadline = runtime.deadline;
   }
 
@@ -1513,8 +1522,10 @@
     if (!candidates.length) return evaluateStatic();
 
     let value = toMove === aiColor() ? -Infinity : Infinity;
+    let explored = 0;
     for (const m of candidates) {
       if (localSearchExpired()) break;
+      explored++;
       board[m.r][m.c] = toMove;
       let child;
       if (isWin(m.r, m.c, toMove)) {
@@ -1533,6 +1544,7 @@
       }
       if (beta <= alpha) break;
     }
+    if (!explored) return evaluateStatic();
     cache.set(key, value);
     return value;
   }
