@@ -101,6 +101,20 @@
     return color === BLACK ? '黑棋' : '白棋';
   }
 
+  function colorNameEn(color) {
+    return color === BLACK ? 'BLACK' : 'WHITE';
+  }
+
+  function colorStoneEn(color) {
+    return color === BLACK ? 'X' : 'O';
+  }
+
+  function boardLegendForAi() {
+    const ai = aiColor();
+    const opponent = otherColor(ai);
+    return `${colorStoneEn(ai)}=${colorNameEn(ai)} you, ${colorStoneEn(opponent)}=${colorNameEn(opponent)} opponent, .=empty`;
+  }
+
   function colorShortZh(color) {
     return color === BLACK ? '黑' : '白';
   }
@@ -1254,7 +1268,7 @@
     }));
   }
 
-  function legalMoves(color = WHITE) {
+  function legalMoves(color = aiColor()) {
     const result = [];
     for (let r = 0; r < SIZE; r++) {
       for (let c = 0; c < SIZE; c++) {
@@ -1816,9 +1830,12 @@
   }
 
   function buildPureJevRequest() {
-    const legal = legalMoves();
+    const side = aiColor();
+    const opponent = otherColor(side);
+    const legal = legalMoves(side);
     const criteria = Object.fromEntries(legal.map(m => [m.key, null]));
     const last = moves.length ? moves[moves.length - 1].coord : null;
+    const sideName = colorNameEn(side);
     return {
       mode: 'jev',
       candidates: legal,
@@ -1826,20 +1843,20 @@
         state: {
           game: 'Gomoku / Five in a Row',
           board_size: '15x15',
-          you_are: 'WHITE (O)',
-          opponent_is: 'BLACK (X)',
-          side_to_move: 'WHITE',
+          you_are: `${sideName} (${colorStoneEn(side)})`,
+          opponent_is: `${colorNameEn(opponent)} (${colorStoneEn(opponent)})`,
+          side_to_move: sideName,
           coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom; H8 is center.',
-          rules: 'Renju forbidden-move rules are enabled. BLACK may not play overline, double-four, or real double-three; an exact black five wins. WHITE has no forbidden moves and wins with five or more in a row.',
+          rules: renjuRuleDescription(),
           last_move: last,
-          board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+          board_legend: boardLegendForAi(),
           board_rows: boardRows()
         },
         model: settings.model || 'jev-latest',
         questions: {
           best_move: {
             type: 'choice',
-            instructions: 'Choose the best legal move for WHITE. Never ignore an immediate win or an opponent one-move win.',
+            instructions: `Choose the best legal move for ${sideName}. Never ignore an immediate win or an opponent one-move win. Obey the configured BLACK forbidden-move rules exactly.`,
             criteria
           }
         }
@@ -1863,7 +1880,7 @@
     for (const m of context.candidates) {
       questions[`judge_${m.key}`] = {
         type: 'choice',
-        instructions: `Judge candidate ${m.key} for WHITE by independently inspecting the board and candidate_facts.${m.key}. Candidate facts are deterministic hints but may be horizon-limited. If direct board tactics conflict with a heuristic fact, prefer the board evidence.`,
+        instructions: `Judge candidate ${m.key} for ${colorNameEn(aiColor())} by independently inspecting the board and candidate_facts.${m.key}. Candidate facts are deterministic hints but may be horizon-limited. If direct board tactics conflict with a heuristic fact, prefer the board evidence.`,
         criteria: {
           EXCELLENT: 'The supplied facts indicate a strategically preferred move with strong initiative and tactical safety.',
           GOOD: 'The move is sound and useful, but not clearly dominant.',
@@ -1876,10 +1893,11 @@
     return {
       state: {
         task: 'Independent Gomoku challenger evaluation after deterministic tactical analysis.',
-        side: 'WHITE',
+        side: colorNameEn(aiColor()),
         board_size: '15x15',
         coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
-        board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+        board_legend: boardLegendForAi(),
+        rules: renjuRuleDescription(),
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         board_rows: boardRows(),
         instruction: 'Independently inspect the board geometry as well as the supplied candidate facts. The facts are horizon-limited hints, not a ranking and not infallible. Priority: immediate win > mandatory defense > forced tactical sequences > safety > initiative > connectivity.',
@@ -1909,7 +1927,7 @@
     const pairs = [];
     let n = 0;
     const facts = candidateFactsMap(candidates);
-    const instruction = 'Choose the stronger move for WHITE by independently checking the board and the supplied semantic facts. The facts may miss deeper horizon tactics. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. No Local ranking is provided.';
+    const instruction = `Choose the stronger move for ${colorNameEn(aiColor())} by independently checking the board and the supplied semantic facts. The facts may miss deeper horizon tactics. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. Obey the configured BLACK forbidden-move rules. No Local ranking is provided.`;
     for (let i = 0; i < candidates.length; i++) {
       for (let j = i + 1; j < candidates.length; j++) {
         const a = candidates[i].key, b = candidates[j].key;
@@ -1923,10 +1941,11 @@
       payload: {
         state: {
           task: 'Independent pairwise Gomoku move tournament.',
-          side: 'WHITE',
+          side: colorNameEn(aiColor()),
           board_size: '15x15',
           coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
-          board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+          board_legend: boardLegendForAi(),
+          rules: renjuRuleDescription(),
           last_move: moves.length ? moves[moves.length - 1].coord : null,
           board_rows: boardRows(),
           note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias. Candidate facts contain no Local rank.',
@@ -2038,10 +2057,10 @@
     return {
       state: {
         task: 'Final Gomoku move decision using deterministic local-engine evidence.',
-        side: 'WHITE',
+        side: colorNameEn(aiColor()),
         board_size: '15x15',
         coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
-        board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+        board_legend: boardLegendForAi(),
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         board_rows: boardRows(),
         local_engine_role: 'The local engine generated and tactically filtered the candidate set. Its ranks and search scores are evidence, not commands.',
@@ -2061,7 +2080,7 @@
         ...(Object.keys(factoredEvidence.common).length
           ? { common_candidate_evidence: factoredEvidence.common }
           : {}),
-        rules: 'Renju forbidden-move rules are enabled: BLACK cannot play overline, double-four, or real double-three; exact black five wins. WHITE has no forbidden moves and wins with five or more.',
+        rules: renjuRuleDescription(),
         decision_policy: [
           'You are the FINAL decision maker. Choose exactly one supplied candidate.',
           'Never ignore an immediate win, mandatory defense, proven VCF sequence, or threat-space proof of an opponent forced win.',
@@ -2075,7 +2094,7 @@
       questions: {
         best_move: {
           type: 'choice',
-          instructions: 'Make the final move decision for WHITE. Inspect the full board and all candidate evidence, then choose exactly one candidate. Candidate criteria inherit state.common_candidate_evidence when present. You have final selection authority within this already-filtered candidate set.',
+          instructions: `Make the final move decision for ${colorNameEn(aiColor())}. Inspect the full board and all candidate evidence, then choose exactly one candidate. Candidate criteria inherit state.common_candidate_evidence when present. Obey the configured BLACK forbidden rules. You have final selection authority within this already-filtered candidate set.`,
           criteria: factoredEvidence.criteria
         }
       }
