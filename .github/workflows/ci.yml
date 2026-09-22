@@ -41,6 +41,7 @@ jobs:
         run: |
           test -s index.html
           test -s jev-gomoku.html
+          find dist -name deep-worker.js -type f -size +0c | grep -q .
           grep -q './assets/styles.css' index.html
           grep -q './src/jev-client.js' index.html
           grep -q './src/app.js' index.html
