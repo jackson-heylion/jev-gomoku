@@ -1472,6 +1472,165 @@
     return { allies, enemies };
   }
 
+  function lineTokensThrough(r, c, color, dr, dc, span = 5) {
+    const tokens = [];
+    for (let offset = -span; offset <= span; offset++) {
+      const rr = r + dr * offset;
+      const cc = c + dc * offset;
+      if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE) tokens.push('#');
+      else if (board[rr][cc] === color) tokens.push('O');
+      else if (board[rr][cc] === EMPTY) tokens.push('.');
+      else tokens.push('#');
+    }
+    return tokens;
+  }
+
+  function lineWinningCompletionIndexes(tokens, center) {
+    const points = new Set();
+    for (let start = 0; start <= tokens.length - 5; start++) {
+      if (start > center || start + 4 < center) continue;
+      let own = 0, empty = 0, emptyIndex = -1, blocked = false;
+      for (let i = start; i < start + 5; i++) {
+        if (tokens[i] === '#') { blocked = true; break; }
+        if (tokens[i] === 'O') own++;
+        else if (tokens[i] === '.') { empty++; emptyIndex = i; }
+      }
+      if (!blocked && own === 4 && empty === 1) points.add(emptyIndex);
+    }
+    return points;
+  }
+
+  function directionalThreatPattern(r, c, color, dr, dc) {
+    const tokens = lineTokensThrough(r, c, color, dr, dc);
+    const center = 5;
+    const completions = lineWinningCompletionIndexes(tokens, center);
+    const openThreeExtensions = new Set();
+    let twoPotential = 0;
+
+    for (let start = 0; start <= tokens.length - 6; start++) {
+      if (start > center || start + 5 < center) continue;
+      const window = tokens.slice(start, start + 6);
+      if (window.includes('#')) continue;
+      const own = window.filter(v => v === 'O').length;
+      const empty = 6 - own;
+      if (own === 2 && empty === 4) twoPotential++;
+    }
+
+    for (let i = 1; i < tokens.length - 1; i++) {
+      if (tokens[i] !== '.' || Math.abs(i - center) > 4) continue;
+      tokens[i] = 'O';
+      const nextCompletions = lineWinningCompletionIndexes(tokens, center);
+      if (nextCompletions.size >= 2) openThreeExtensions.add(i);
+      tokens[i] = '.';
+    }
+
+    return {
+      winningPoints: completions.size,
+      openFour: completions.size >= 2,
+      rushFour: completions.size === 1,
+      openThree: openThreeExtensions.size > 0,
+      openThreeExtensions: openThreeExtensions.size,
+      twoPotential
+    };
+  }
+
+  function threatPatternClass(profile) {
+    if (profile.winsNow) return 'WIN_NOW';
+    if (profile.winningPoints >= 2 || profile.openFourDirections > 0) return 'OPEN_FOUR';
+    if (profile.fourDirections >= 1 && profile.openThreeDirections >= 1) return 'FOUR_THREE';
+    if (profile.fourDirections >= 2) return 'DOUBLE_FOUR';
+    if (profile.fourDirections >= 1) return 'FOUR';
+    if (profile.openThreeDirections >= 2) return 'DOUBLE_OPEN_THREE';
+    if (profile.openThreeDirections >= 1) return 'OPEN_THREE';
+    if (profile.twoDirections >= 2) return 'MULTI_TWO';
+    if (profile.twoDirections === 1) return 'TWO';
+    return 'POSITIONAL';
+  }
+
+  function threatPatternProfilePlaced(r, c, color) {
+    let winningPoints = 0;
+    let openFourDirections = 0;
+    let rushFourDirections = 0;
+    let openThreeDirections = 0;
+    let twoDirections = 0;
+    let activeDirections = 0;
+
+    for (const [dr, dc] of RENJU_DIRS) {
+      const line = directionalThreatPattern(r, c, color, dr, dc);
+      winningPoints += line.winningPoints;
+      if (line.openFour) openFourDirections++;
+      if (line.rushFour) rushFourDirections++;
+      if (line.openThree) openThreeDirections++;
+      if (line.twoPotential > 0) twoDirections++;
+      if (line.winningPoints > 0 || line.openThree || line.twoPotential > 0) activeDirections++;
+    }
+
+    const winsNow = isWin(r, c, color);
+    const fourDirections = openFourDirections + rushFourDirections;
+    const multiAxis = Math.max(0, activeDirections - 1);
+    const score =
+      (winsNow ? 900000000 : 0) +
+      winningPoints * 180000 +
+      openFourDirections * 120000 +
+      rushFourDirections * 32000 +
+      openThreeDirections * 6500 +
+      twoDirections * 420 +
+      multiAxis * 900;
+
+    const profile = {
+      winsNow,
+      winningPoints,
+      openFourDirections,
+      rushFourDirections,
+      fourDirections,
+      openThreeDirections,
+      twoDirections,
+      activeDirections,
+      multiAxis,
+      score
+    };
+    profile.className = threatPatternClass(profile);
+    return profile;
+  }
+
+  function previewThreatPattern(move, color) {
+    if (!move || board[move.r]?.[move.c] !== EMPTY) {
+      return { className: 'OCCUPIED', score: 0, winningPoints: 0, fourDirections: 0, openThreeDirections: 0, twoDirections: 0, multiAxis: 0 };
+    }
+    board[move.r][move.c] = color;
+    const profile = threatPatternProfilePlaced(move.r, move.c, color);
+    board[move.r][move.c] = EMPTY;
+    return profile;
+  }
+
+  function patternHotspots(color, limit = 4, radius = 2) {
+    const opponent = otherColor(color);
+    return nearbyMoves(radius)
+      .filter(move => isLegalMoveForColor(move.r, move.c, color))
+      .map(move => {
+        const own = previewThreatPattern(move, color);
+        const denial = previewThreatPattern(move, opponent);
+        return {
+          ...move,
+          patternPriority: own.score + denial.score * .82,
+          ownPattern: own,
+          denialPattern: denial
+        };
+      })
+      .sort((a, b) => b.patternPriority - a.patternPriority)
+      .slice(0, limit);
+  }
+
+  function mergeRootCandidates(primary, hotspots, limit) {
+    const map = new Map();
+    for (const move of [...hotspots, ...primary]) {
+      if (!move || map.has(move.key)) continue;
+      map.set(move.key, move);
+      if (map.size >= limit) break;
+    }
+    return [...map.values()];
+  }
+
   function quickMoveScore(move, color) {
     board[move.r][move.c] = color;
     let score;
@@ -1480,7 +1639,11 @@
     } else {
       const base = evaluateStatic();
       const conn = localConnectivity(move.r, move.c, color);
-      score = (color === aiColor() ? base : -base) + conn.allies * 18 + conn.enemies * 5;
+      const shape = threatPatternProfilePlaced(move.r, move.c, color);
+      score = (color === aiColor() ? base : -base)
+        + conn.allies * 18
+        + conn.enemies * 5
+        + shape.score;
     }
     board[move.r][move.c] = EMPTY;
     return score;
@@ -1779,7 +1942,9 @@
   function analyzeAdvancedCandidate(move, forced, cfg) {
     const side = aiColor();
     const opponent = otherColor(side);
+    const blockedOpponentPattern = previewThreatPattern(move, opponent);
     board[move.r][move.c] = side;
+    const ownPattern = threatPatternProfilePlaced(move.r, move.c, side);
     const winsNow = isWin(move.r, move.c, side);
     const ownImmediate = winsNow ? 2 : immediateWins(side, cfg.radius).length;
     const oppImmediate = winsNow ? 0 : immediateWins(opponent, cfg.radius).length;
@@ -1823,6 +1988,9 @@
       blackCounterVCT: opponentCounterVCT,
       opponentCounterVCF,
       opponentCounterVCT,
+      ownPattern,
+      blockedOpponentPattern,
+      patternDecisionScore: ownPattern.score + blockedOpponentPattern.score * .72,
       facts: {
         forced_role: forcedRole,
         tactical_safety: safety,
@@ -1837,7 +2005,16 @@
         opponent_counter_vcf: opponentCounterVCF ? 'FOUND' : 'NOT_FOUND',
         opponent_counter_vct: opponentCounterVCT ? 'PRESSURE_FOUND' : 'NOT_FOUND',
         connectivity: connectionLabel(conn.allies),
-        centrality: Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7)) <= 3 ? 'CENTRAL' : 'OUTER'
+        centrality: Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7)) <= 3 ? 'CENTRAL' : 'OUTER',
+        pattern_class: ownPattern.className,
+        pattern_score: Math.round(ownPattern.score),
+        pattern_winning_points: ownPattern.winningPoints,
+        pattern_four_directions: ownPattern.fourDirections,
+        pattern_open_three_directions: ownPattern.openThreeDirections,
+        pattern_two_directions: ownPattern.twoDirections,
+        pattern_multi_axis: ownPattern.multiAxis,
+        blocks_opponent_pattern: blockedOpponentPattern.className,
+        blocks_opponent_pattern_score: Math.round(blockedOpponentPattern.score)
       }
     };
   }
@@ -1930,7 +2107,9 @@
           forced = 'block_fork';
           roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
         } else {
-          roots = orderedMoves(side, cfg.root, cfg.radius);
+          const primaryRoots = orderedMoves(side, cfg.root, cfg.radius);
+          const hotspots = localSearchExpired() ? [] : patternHotspots(side, 4, cfg.radius);
+          roots = mergeRootCandidates(primaryRoots, hotspots, cfg.root + 2);
         }
       }
 
