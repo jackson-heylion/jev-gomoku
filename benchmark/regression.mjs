@@ -23,6 +23,22 @@ function positionFromSequence(sequence) {
   return { board, moves };
 }
 
+function positionFromStones({ black = [], white = [] }) {
+  const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
+  const moves = [];
+  for (const key of black) {
+    const { r, c } = parseCoord(key);
+    board[r][c] = BLACK;
+    moves.push({ r, c, color: BLACK, coord: key, source: 'renju-regression' });
+  }
+  for (const key of white) {
+    const { r, c } = parseCoord(key);
+    board[r][c] = 2;
+    moves.push({ r, c, color: 2, coord: key, source: 'renju-regression' });
+  }
+  return { board, moves };
+}
+
 function oneHotChoice(choice, keys) {
   return {
     type: 'choice',
@@ -149,6 +165,84 @@ async function testMustBlockOpponentForkCreator() {
   }
 }
 
+async function testRenjuForbiddenMoves() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Renju rule regression must not call Jev');
+    }
+  });
+
+  const cases = [
+    {
+      name: 'overline',
+      position: positionFromStones({ black: ['A8', 'B8', 'C8', 'D8', 'F8'] }),
+      move: 'E8',
+      forbidden: true,
+      type: 'OVERLINE'
+    },
+    {
+      name: 'double-four',
+      position: positionFromStones({ black: ['E8', 'F8', 'G8', 'H5', 'H6', 'H7'] }),
+      move: 'H8',
+      forbidden: true,
+      type: 'FOUR_FOUR'
+    },
+    {
+      name: 'double-three',
+      position: positionFromStones({ black: ['F8', 'G8', 'H6', 'H7'] }),
+      move: 'H8',
+      forbidden: true,
+      type: 'THREE_THREE',
+      excludedFromSearch: true
+    },
+    {
+      name: 'false-three-is-legal',
+      position: positionFromStones({
+        black: ['F8', 'G8', 'H6', 'H7'],
+        white: ['H5']
+      }),
+      move: 'H8',
+      forbidden: false,
+      type: null
+    },
+    {
+      name: 'exact-five-has-priority',
+      position: positionFromStones({ black: ['D8', 'E8', 'F8', 'G8', 'H6', 'H7'] }),
+      move: 'H8',
+      forbidden: false,
+      type: null,
+      winningFive: true
+    }
+  ];
+
+  for (const item of cases) {
+    engine.setPosition(item.position.board, item.position.moves, 'jev-latest');
+    const result = engine.forbidden(item.move);
+    console.log('renju regression:', JSON.stringify({
+      name: item.name,
+      move: item.move,
+      result
+    }));
+
+    if (result.forbidden !== item.forbidden) {
+      throw new Error(item.name + ': expected forbidden=' + item.forbidden + ', got ' + result.forbidden);
+    }
+    if ((result.type || null) !== item.type) {
+      throw new Error(item.name + ': expected type=' + item.type + ', got ' + result.type);
+    }
+    if (item.winningFive && result.winningFive !== true) {
+      throw new Error(item.name + ': exact five should be marked as winningFive');
+    }
+    if (item.excludedFromSearch) {
+      const ordered = engine.orderedBlack(64);
+      if (ordered.includes(item.move)) {
+        throw new Error(item.name + ': forbidden move leaked into black ordered search: ' + item.move);
+      }
+    }
+  }
+}
+
 await testJevFinalDecisionAuthority();
 await testMustBlockOpponentForkCreator();
+await testRenjuForbiddenMoves();
 console.log('Engine regression tests passed.');
