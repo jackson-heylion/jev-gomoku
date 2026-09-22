@@ -694,7 +694,8 @@
         await navigator.clipboard.writeText(text);
       } else {
         throw new Error('clipboard API unavailable');
-      } catch (_) {
+      }
+    } catch (_) {
       const ta = document.createElement('textarea');
       ta.value = text;
       ta.style.position = 'fixed';
