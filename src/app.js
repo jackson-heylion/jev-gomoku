@@ -13,6 +13,8 @@
   const historyEl = document.getElementById('history');
   const apiIndicator = document.getElementById('apiIndicator');
   const apiLabel = document.getElementById('apiLabel');
+  const levelBadge = document.getElementById('levelBadge');
+  const levelSummary = document.getElementById('levelSummary');
   const jevLiveState = document.getElementById('jevLiveState');
   const jevMove = document.getElementById('jevMove');
   const jevDecisionLabel = document.getElementById('jevDecisionLabel');
@@ -147,11 +149,37 @@
     }
   }
 
+  function publicModeMeta(mode) {
+    if (mode === 'local') {
+      return {
+        name: '本地引擎',
+        badge: '本地',
+        summary: '不使用 Jev：只运行传统搜索和战术判断。'
+      };
+    }
+    if (mode === 'jev') {
+      return {
+        name: 'Jev 直觉',
+        badge: '实验',
+        summary: 'Jev 更直接地从合法落点中选择；Jev 感更强，但不代表棋力更强。'
+      };
+    }
+    if (mode === 'strong') {
+      return {
+        name: 'Jev 快速',
+        badge: '等级 2',
+        summary: '速度优先：较浅的本地搜索 + Jev 候选判断。'
+      };
+    }
+    return {
+      name: 'Jev 大师',
+      badge: '等级 3',
+      summary: '棋力优先：更深的本地搜索 + Jev 判断，响应会稍慢。'
+    };
+  }
+
   function publicModeLabel(mode) {
-    return mode === 'local' ? '本地引擎'
-      : mode === 'jev' ? 'Jev 直觉'
-      : mode === 'strong' ? 'Jev 快速'
-      : 'Jev 大师';
+    return publicModeMeta(mode).name;
   }
 
   function updateApiState(kind = null, text = null) {
@@ -174,7 +202,10 @@
       jevLiveState.textContent = '在线';
     }
 
-    apiLabel.textContent = text || publicModeLabel(settings.strengthMode);
+    const meta = publicModeMeta(settings.strengthMode);
+    apiLabel.textContent = text || meta.name;
+    levelBadge.textContent = meta.badge;
+    levelSummary.textContent = meta.summary;
   }
 
   function openSettings() {
@@ -1730,6 +1761,11 @@
     settingsModal.classList.remove('show');
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+  strengthModeInput.addEventListener('change', () => {
+    const meta = publicModeMeta(strengthModeInput.value);
+    levelBadge.textContent = meta.badge;
+    levelSummary.textContent = meta.summary;
+  });
   testConnectionBtn.addEventListener('click', testConnection);
   document.getElementById('restartBtn').addEventListener('click', restart);
   document.getElementById('undoBtn').addEventListener('click', undo);
