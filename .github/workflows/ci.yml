@@ -31,7 +31,7 @@ jobs:
 
       - name: Enforce browser/server boundary
         run: |
-          grep -q "fetch('/api/jev'" src/jev-client.js
+          grep -q "const ENDPOINT = '/api/jev'" src/jev-client.js
           ! grep -R -n -E "api\.typesafe\.ai|dangerouslyAllowBrowser|jev_gomoku_api_key|Authorization.*Bearer" index.html jev-gomoku.html src
           grep -q "JEV_API_KEY" server/index.js
           grep -q "https://api.typesafe.ai/v1/systemone" server/index.js
