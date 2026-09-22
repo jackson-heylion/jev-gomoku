@@ -53,16 +53,23 @@
         </section>
 
         <section class="card jev-card">
-          <h2 class="section-title">Jev 上一步判断</h2>
-          <div class="big" id="jevMove">—</div>
-          <div class="sub" id="jevInfo">等待 Jev 落子</div>
+          <h2 class="section-title">上一步 AI 判断</h2>
+          <div class="decision-head">
+            <div>
+              <div class="decision-kicker" id="jevDecisionLabel">等待白棋判断</div>
+              <div class="big" id="jevMove">—</div>
+            </div>
+            <span class="decision-badge" id="jevVerdict">等待</span>
+          </div>
+          <div class="decision-summary" id="jevInfo">落子后，这里会用容易理解的文字说明为什么选择这一手。</div>
           <button class="btn" id="retryBtn" type="button" style="display:none;margin-top:10px;padding:6px 9px;min-height:30px;font-size:11px">重试 Jev 落子</button>
           <div class="confidence-row">
-            <span>Confidence</span>
+            <span>把握程度</span>
             <div class="bar"><i id="confidenceBar"></i></div>
             <b id="confidenceText" style="font-size:11px;min-width:36px;text-align:right">—</b>
           </div>
-          <div class="alternatives" id="alternatives"></div>
+          <div class="alternatives-title" id="alternativesTitle">其他考虑</div>
+          <div class="alternatives" id="alternatives"><div class="empty">暂无备选落点。</div></div>
         </section>
 
         <section class="card history-card">
@@ -107,6 +114,21 @@
         <button class="btn test-btn" id="testConnectionBtn" type="button">检测连接</button>
         <button class="btn" id="closeSettingsBtn" type="button">取消</button>
         <button class="btn primary" id="saveSettingsBtn" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+
+  <div class="modal-backdrop" id="resultModal" role="dialog" aria-modal="true" aria-labelledby="resultTitle">
+    <div class="modal result-modal">
+      <div class="result-icon" id="resultIcon">●</div>
+      <h2 id="resultTitle">对局结束</h2>
+      <p class="desc result-desc" id="resultDesc">本局已结束。</p>
+      <div class="result-stats" id="resultStats"></div>
+      <div class="modal-actions result-actions">
+        <button class="btn" id="resultCloseBtn" type="button">查看棋盘</button>
+        <button class="btn" id="resultCopyBtn" type="button">复制棋谱</button>
+        <button class="btn primary" id="resultRestartBtn" type="button">再来一局</button>
       </div>
     </div>
   </div>
