@@ -219,6 +219,63 @@ async function testGrandmasterParallelThreatMode() {
   }
 }
 
+async function testGrandmasterRealGameThreatTrace() {
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      const criteria = payload?.questions?.best_move?.criteria || {};
+      const keys = Object.keys(criteria);
+      const choice = keys[0];
+      return {
+        model: 'mock-jev',
+        answers: { best_move: oneHotChoice(choice, keys) },
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'real-game-regression' }
+      };
+    }
+  });
+
+  const sequence = [
+    'H7','G8','G6','I8','H8','H9','J7','F7','E6','I10','J11','I9',
+    'I7','I11','I12','K7','J8','G9','J9','J10','J6','J5','H6'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevFinal('grandmaster');
+  const threat = result.decisionTrace?.preJevThreatSearch;
+
+  console.log('grandmaster real-game threat trace:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    localChoice: result.localChoice,
+    candidates: result.candidates?.map(item => item.key),
+    threat
+  }));
+
+  if (!threat) throw new Error('Real-game grandmaster trace is missing threat evidence');
+  if (!Array.isArray(threat.analyses) || !threat.analyses.length) {
+    throw new Error('Real-game threat search returned no candidate analyses');
+  }
+
+  const byMove = new Map(threat.analyses.map(item => [item.move, item]));
+  for (const losingMove of ['K9', 'G5']) {
+    const evidence = byMove.get(losingMove);
+    if (!evidence?.forced) {
+      throw new Error('Threat search failed to prove the real-game losing candidate ' + losingMove);
+    }
+    if (evidence.attackerTurns !== 4) {
+      throw new Error('Expected a four-attacker-turn proof for ' + losingMove + ', got ' + evidence.attackerTurns);
+    }
+    if (evidence.line?.[0] !== 'I6' || !evidence.line?.includes('K8')) {
+      throw new Error('Threat proof for ' + losingMove + ' lost the expected I6...K8 forcing line');
+    }
+  }
+
+  for (const survivingMove of ['F9', 'E9']) {
+    if (byMove.get(survivingMove)?.forced) {
+      throw new Error('Threat search incorrectly marked ' + survivingMove + ' as a proven forced loss');
+    }
+  }
+}
+
 /** A single deterministic candidate must never trigger a Jev request. */
 async function testSingleCandidateShortCircuit() {
   let requestCount = 0;
@@ -559,6 +616,7 @@ await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
 await testJevFinalDecisionAuthority();
 await testGrandmasterParallelThreatMode();
+await testGrandmasterRealGameThreatTrace();
 await testArbitrationOracle();
 await testMustBlockOpponentForkCreator();
 await testRenjuForbiddenMoves();
