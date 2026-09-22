@@ -240,13 +240,13 @@
       return {
         name: 'Jev 快速',
         badge: '等级 2',
-        summary: '速度优先：较浅的本地搜索 + Jev 候选判断。'
+        summary: '速度优先：本地搜索提供候选与证据，由 Jev 做最终落子决定。'
       };
     }
     return {
       name: 'Jev 大师',
       badge: '等级 3',
-      summary: '棋力优先：更深的本地搜索 + Jev 判断，响应会稍慢。'
+      summary: '棋力优先：更深本地搜索与后台深搜提供证据，由 Jev 做最终落子决定。'
     };
   }
 
