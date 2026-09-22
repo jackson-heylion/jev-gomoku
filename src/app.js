@@ -49,6 +49,13 @@
   const testConnectionBtn = document.getElementById('testConnectionBtn');
   const connectionTest = document.getElementById('connectionTest');
   const connectionTestText = document.getElementById('connectionTestText');
+  const sideOptionButtons = [...document.querySelectorAll('.side-option')];
+  const ruleOverlineInput = document.getElementById('ruleOverline');
+  const ruleFourFourInput = document.getElementById('ruleFourFour');
+  const ruleThreeThreeInput = document.getElementById('ruleThreeThree');
+  const gameConfigSummary = document.getElementById('gameConfigSummary');
+  const ruleHint = document.getElementById('ruleHint');
+  const runtimeRulesHint = document.getElementById('runtimeRulesHint');
 
   let board = makeBoard();
   let current = BLACK;
@@ -66,6 +73,7 @@
   let thinkingStartedAt = null;
   let lastThinkMs = null;
   let gameSeed = createGameSeed();
+  let gameStarted = false;
 
   const settings = loadSettings();
   modelInput.value = settings.model;
@@ -73,6 +81,85 @@
 
   function makeBoard() {
     return Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  }
+
+  function storedBool(key, fallback = true) {
+    const value = localStorage.getItem(key);
+    if (value == null) return fallback;
+    return value !== 'false';
+  }
+
+  function playerColor() {
+    return settings.playerColor === 'white' ? WHITE : BLACK;
+  }
+
+  function aiColor() {
+    return playerColor() === BLACK ? WHITE : BLACK;
+  }
+
+  function colorNameZh(color) {
+    return color === BLACK ? '黑棋' : '白棋';
+  }
+
+  function colorNameEn(color) {
+    return color === BLACK ? 'BLACK' : 'WHITE';
+  }
+
+  function colorStoneEn(color) {
+    return color === BLACK ? 'X' : 'O';
+  }
+
+  function boardLegendForAi() {
+    const ai = aiColor();
+    const opponent = otherColor(ai);
+    return `${colorStoneEn(ai)}=${colorNameEn(ai)} you, ${colorStoneEn(opponent)}=${colorNameEn(opponent)} opponent, .=empty`;
+  }
+
+  function colorShortZh(color) {
+    return color === BLACK ? '黑' : '白';
+  }
+
+  function colorCss(color) {
+    return color === BLACK ? 'black' : 'white';
+  }
+
+  function activeRuleConfig() {
+    return {
+      overline: settings.forbidOverline !== false,
+      fourFour: settings.forbidFourFour !== false,
+      threeThree: settings.forbidThreeThree !== false
+    };
+  }
+
+  function enabledForbiddenLabels() {
+    const rules = activeRuleConfig();
+    return [
+      rules.overline && '长连',
+      rules.fourFour && '四四',
+      rules.threeThree && '三三'
+    ].filter(Boolean);
+  }
+
+  function ruleSummaryText() {
+    const enabled = enabledForbiddenLabels();
+    const blackWin = activeRuleConfig().overline ? '黑棋恰好五连胜' : '黑棋五连及以上胜';
+    return `你执${colorShortZh(playerColor())}${playerColor() === BLACK ? '先手' : '后手'} · 黑棋禁手：${enabled.length ? enabled.join(' / ') : '关闭'} · ${blackWin}`;
+  }
+
+  function renjuRuleDescription() {
+    const rules = activeRuleConfig();
+    const enabled = enabledForbiddenLabels();
+    const blackWin = rules.overline
+      ? 'BLACK wins only with an exact five; an overline is illegal.'
+      : 'BLACK wins with five or more in a row; overline is legal.';
+    const forbidden = enabled.length
+      ? `BLACK forbidden moves enabled: ${enabled.join(', ')}.`
+      : 'BLACK forbidden moves are disabled.';
+    return `${forbidden} ${blackWin} WHITE has no forbidden moves and wins with five or more in a row.`;
+  }
+
+  function workerRuleConfig() {
+    return { ...activeRuleConfig() };
   }
 
   function hashSeed32(text) {
@@ -152,6 +239,11 @@
   }
 
   function refreshTurnClock() {
+    if (!gameStarted) {
+      turnClockLabel.textContent = '对局状态';
+      turnClockValue.textContent = '等待开局';
+      return;
+    }
     if (gameOver) {
       turnClockLabel.textContent = '对局状态';
       turnClockValue.textContent = '已结束';
@@ -165,27 +257,70 @@
       const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
       turnClockLabel.textContent = `${actor} 已思考`;
       turnClockValue.textContent = formatElapsed(elapsed);
-      if (settings.strengthMode !== 'local') {
-        jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
-      }
+      if (settings.strengthMode !== 'local') jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
       return;
     }
 
-    if (current === BLACK) {
+    if (current === playerColor()) {
       turnClockLabel.textContent = '你已思考';
       turnClockValue.textContent = formatElapsed(now - turnStartedAt);
       return;
     }
-
     turnClockLabel.textContent = settings.strengthMode !== 'local' ? '等待 Jev' : '等待本地引擎';
     turnClockValue.textContent = formatElapsed(now - turnStartedAt);
   }
 
   function loadSettings() {
+    const player = localStorage.getItem('jev_gomoku_player_color');
     return {
       model: localStorage.getItem('jev_gomoku_model') || 'jev-latest',
-      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'grandmaster'
+      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'grandmaster',
+      playerColor: player === 'white' ? 'white' : 'black',
+      forbidOverline: storedBool('jev_gomoku_rule_overline', true),
+      forbidFourFour: storedBool('jev_gomoku_rule_four_four', true),
+      forbidThreeThree: storedBool('jev_gomoku_rule_three_three', true)
     };
+  }
+
+  function syncPreGameControls() {
+    sideOptionButtons.forEach(button => {
+      const selected = button.dataset.playerColor === settings.playerColor;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+    });
+    ruleOverlineInput.checked = settings.forbidOverline;
+    ruleFourFourInput.checked = settings.forbidFourFour;
+    ruleThreeThreeInput.checked = settings.forbidThreeThree;
+    updatePreGamePreview();
+  }
+
+  function updatePreGamePreview() {
+    const selected = sideOptionButtons.find(button => button.classList.contains('selected'));
+    const side = selected?.dataset.playerColor === 'white' ? WHITE : BLACK;
+    const enabled = [
+      ruleOverlineInput.checked && '长连',
+      ruleFourFourInput.checked && '四四',
+      ruleThreeThreeInput.checked && '三三'
+    ].filter(Boolean);
+    const blackWin = ruleOverlineInput.checked ? '黑棋恰好五连胜' : '黑棋五连及以上胜';
+    gameConfigSummary.textContent = `你执${colorShortZh(side)}${side === BLACK ? '先手' : '后手'} · 黑棋禁手：${enabled.length ? enabled.join(' / ') : '关闭'} · ${blackWin}`;
+  }
+
+  function readPreGameControls() {
+    const selected = sideOptionButtons.find(button => button.classList.contains('selected'));
+    settings.playerColor = selected?.dataset.playerColor === 'white' ? 'white' : 'black';
+    settings.forbidOverline = Boolean(ruleOverlineInput.checked);
+    settings.forbidFourFour = Boolean(ruleFourFourInput.checked);
+    settings.forbidThreeThree = Boolean(ruleThreeThreeInput.checked);
+  }
+
+  function persistSettings() {
+    localStorage.setItem('jev_gomoku_model', settings.model);
+    localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
+    localStorage.setItem('jev_gomoku_player_color', settings.playerColor);
+    localStorage.setItem('jev_gomoku_rule_overline', String(settings.forbidOverline));
+    localStorage.setItem('jev_gomoku_rule_four_four', String(settings.forbidFourFour));
+    localStorage.setItem('jev_gomoku_rule_three_three', String(settings.forbidThreeThree));
   }
 
   function saveSettings() {
@@ -194,12 +329,10 @@
     settings.strengthMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(strengthModeInput.value)
       ? strengthModeInput.value
       : 'grandmaster';
-    localStorage.setItem('jev_gomoku_model', settings.model);
-    localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
+    readPreGameControls();
+    persistSettings();
     settingsModal.classList.remove('show');
-    updateApiState();
-    toast(`已切换到 ${publicModeLabel(settings.strengthMode)}`);
-    if (current === WHITE && !thinking && !gameOver) setTimeout(jevTurn, 100);
+    startGame();
   }
 
   function setConnectionTest(kind, text) {
@@ -299,7 +432,7 @@
   }
 
   function renderLevelSelection(mode) {
-    const selectedMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(mode) ? mode : 'expert';
+    const selectedMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(mode) ? mode : 'grandmaster';
     strengthModeInput.value = selectedMode;
     levelOptionButtons.forEach(button => {
       const selected = button.dataset.mode === selectedMode;
@@ -335,12 +468,18 @@
     levelSummary.textContent = meta.summary;
   }
 
-  function openSettings() {
+  function openSettings(force = false) {
+    if (!force && gameStarted) {
+      toast('本局已开始。请点击“重开”后再修改棋色或禁手规则。', 3600);
+      return;
+    }
     modelInput.value = settings.model;
-    renderLevelSelection(settings.strengthMode || 'expert');
+    renderLevelSelection(settings.strengthMode || 'grandmaster');
+    syncPreGameControls();
     clearConnectionTest();
     settingsModal.classList.add('show');
-    const selected = levelOptionButtons.find(button => button.classList.contains('selected'));
+    const selected = sideOptionButtons.find(button => button.classList.contains('selected'))
+      || levelOptionButtons.find(button => button.classList.contains('selected'));
     setTimeout(() => selected?.focus(), 30);
   }
 
@@ -448,30 +587,33 @@
   }
 
   function onBoardClick(e) {
-    if (gameOver || thinking || current !== BLACK) return;
+    const human = playerColor();
+    if (!gameStarted || gameOver || thinking || current !== human) return;
     const p = pointFromEvent(e);
     if (!p || board[p.r][p.c] !== EMPTY) return;
 
-    const forbidden = blackForbiddenInfo(p.r, p.c);
-    if (forbidden.forbidden) {
-      const label = forbidden.type === 'OVERLINE' ? '长连'
-        : forbidden.type === 'FOUR_FOUR' ? '四四'
-        : forbidden.type === 'THREE_THREE' ? '三三'
-        : '禁手';
-      toast(`${coord(p.r, p.c)} 是黑棋${label}禁手，请选择其他落点。`, 3200);
-      return;
+    if (human === BLACK) {
+      const forbidden = blackForbiddenInfo(p.r, p.c);
+      if (forbidden.forbidden) {
+        const label = forbidden.type === 'OVERLINE' ? '长连'
+          : forbidden.type === 'FOUR_FOUR' ? '四四'
+          : forbidden.type === 'THREE_THREE' ? '三三'
+          : '禁手';
+        toast(`${coord(p.r, p.c)} 是黑棋${label}禁手，请选择其他落点。`, 3200);
+        return;
+      }
     }
 
-    place(p.r, p.c, BLACK, '你');
-    if (isWin(p.r, p.c, BLACK)) {
-      finish('你赢了', BLACK);
+    place(p.r, p.c, human, '你');
+    if (isWin(p.r, p.c, human)) {
+      finish('你赢了', human);
       return;
     }
     if (moves.length === SIZE * SIZE) {
       finish('平局', EMPTY);
       return;
     }
-    current = WHITE;
+    current = aiColor();
     resetTurnClock();
     updateStatus();
     setTimeout(jevTurn, 220);
@@ -507,7 +649,10 @@
   }
 
   function isWin(r, c, color) {
-    if (color === BLACK) return hasExactFiveAt(r, c, BLACK);
+    if (color === BLACK) {
+      if (activeRuleConfig().overline) return hasExactFiveAt(r, c, BLACK);
+      return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, BLACK, dr, dc) >= 5);
+    }
     return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, WHITE, dr, dc) >= 5);
   }
 
@@ -658,27 +803,30 @@
   }
 
   function blackForbiddenInfoPlaced(r, c, depth = 0) {
-    if (hasExactFiveAt(r, c, BLACK)) {
+    const rules = activeRuleConfig();
+    const exactFive = hasExactFiveAt(r, c, BLACK);
+    const overline = hasOverlineAt(r, c, BLACK);
+
+    if (exactFive) {
       return { forbidden: false, type: null, winningFive: true, fourCount: 0, threeCount: 0 };
     }
-    if (hasOverlineAt(r, c, BLACK)) {
+    if (rules.overline && overline) {
       return { forbidden: true, type: 'OVERLINE', winningFive: false, fourCount: 0, threeCount: 0 };
     }
 
-    const fours = collectBlackFoursThrough(r, c);
-    if (fours.length >= 2) {
+    const fours = rules.fourFour || rules.threeThree ? collectBlackFoursThrough(r, c) : [];
+    if (rules.fourFour && fours.length >= 2) {
       return { forbidden: true, type: 'FOUR_FOUR', winningFive: false, fourCount: fours.length, threeCount: 0 };
     }
-
-    if (depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
-      return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: 0 };
+    if (!rules.threeThree || depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
+      return { forbidden: false, type: null, winningFive: !rules.overline && overline, fourCount: fours.length, threeCount: 0 };
     }
 
     const threes = collectRealBlackThreesThrough(r, c, depth);
     if (threes.length >= 2) {
       return { forbidden: true, type: 'THREE_THREE', winningFive: false, fourCount: fours.length, threeCount: threes.length };
     }
-    return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: threes.length };
+    return { forbidden: false, type: null, winningFive: !rules.overline && overline, fourCount: fours.length, threeCount: threes.length };
   }
 
   function blackForbiddenInfo(r, c) {
@@ -703,16 +851,18 @@
 
   function showResultModal(text, winner) {
     const modeLabel = publicModeLabel(settings.strengthMode);
+    const human = playerColor();
+    const ai = aiColor();
 
     resultTitle.textContent = text;
     resultIcon.textContent = winner === BLACK ? '●' : winner === WHITE ? '○' : '＝';
-    resultIcon.className = `result-icon ${winner === BLACK ? 'player-win' : winner === WHITE ? 'ai-win' : 'draw'}`;
-    resultDesc.textContent = winner === BLACK
-      ? '你执黑完成五连，本局获胜。'
-      : winner === WHITE
-        ? 'Jev 执白完成五连，赢下了这一局。'
+    resultIcon.className = `result-icon ${winner === human ? 'player-win' : winner === ai ? 'ai-win' : 'draw'}`;
+    resultDesc.textContent = winner === human
+      ? `你执${colorShortZh(human)}完成五连，本局获胜。`
+      : winner === ai
+        ? `Jev 执${colorShortZh(ai)}完成五连，赢下了这一局。`
         : '棋盘已下满，你与 Jev 战成平局。';
-    resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel}`;
+    resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel} · ${ruleSummaryText()}`;
     resultCopyBtn.textContent = '复制棋谱';
     resultModal.classList.add('show');
   }
@@ -731,18 +881,19 @@
     showResultModal(text, winner);
   }
 
-  function restart() {
+  function resetGameState(started) {
     if (requestController) requestController.abort();
     requestController = null;
     board = makeBoard();
     current = BLACK;
     moves = [];
     gameOver = false;
+    gameStarted = Boolean(started);
     thinking = false;
     lastJev = null;
     jevDecisionLog = [];
     gameResult = null;
-    gameStartedAt = new Date();
+    gameStartedAt = started ? new Date() : null;
     gameSeed = createGameSeed();
     turnStartedAt = performance.now();
     thinkingStartedAt = null;
@@ -759,26 +910,46 @@
     alternativesTitle.textContent = '其他考虑';
     alternatives.innerHTML = '<div class="empty">暂无备选落点。</div>';
     retryBtn.style.display = 'none';
-    drawBoard(); updateHistory(); updateStatus(); updateApiState();
+    drawBoard();
+    updateHistory();
+    updateStatus();
+    updateApiState();
+  }
+
+  function startGame() {
+    resetGameState(true);
+    const enabled = enabledForbiddenLabels();
+    ruleHint.textContent = `${ruleSummaryText()}。点击交叉点落子。`;
+    runtimeRulesHint.textContent = `本局规则已锁定：你执${colorShortZh(playerColor())}，Jev 执${colorShortZh(aiColor())}；黑棋禁手：${enabled.length ? enabled.join('、') : '关闭'}。Local、Deep Worker、Threat-space 与 Jev 使用同一规则。`;
+    toast(`已开始：${ruleSummaryText()} · ${publicModeLabel(settings.strengthMode)}`, 3200);
+    if (aiColor() === BLACK) setTimeout(jevTurn, 180);
+  }
+
+  function restart() {
+    resetGameState(false);
+    ruleHint.textContent = '开局前可选择执黑 / 执白，并配置黑棋长连、四四、三三禁手。';
+    runtimeRulesHint.textContent = '规则将在开局时锁定，并同步应用于玩家、Local、Deep Worker、Threat-space 与 Jev。';
+    openSettings(true);
   }
 
   function undoPlyCount() {
     if (!moves.length) return 0;
+    const human = playerColor();
+    const ai = aiColor();
+    const lastMove = moves[moves.length - 1];
 
-    // During a finished game, current is intentionally not advanced after the
-    // winning move. Derive the rollback from the actual last stone instead of
-    // the stale side-to-move value.
     if (gameOver) {
-      const lastMove = moves[moves.length - 1];
-      return Math.min(lastMove?.color === WHITE ? 2 : 1, moves.length);
+      return Math.min(lastMove?.color === ai ? 2 : 1, moves.length);
     }
-
-    return Math.min(current === BLACK ? 2 : 1, moves.length);
+    if (current === human && lastMove?.color === ai) {
+      return Math.min(2, moves.length);
+    }
+    return 1;
   }
 
   function undo() {
     if (thinking) { toast('Jev 正在思考，暂时不能悔棋'); return; }
-    if (!moves.length) return;
+    if (!gameStarted || !moves.length) return;
 
     const remove = undoPlyCount();
     if (gameOver) gameOver = false;
@@ -789,7 +960,7 @@
       board[m.r][m.c] = EMPTY;
     }
     jevDecisionLog = jevDecisionLog.filter(item => item.moveNo <= moves.length);
-    current = BLACK;
+    current = moves.length % 2 === 0 ? BLACK : WHITE;
     turnStartedAt = performance.now();
     thinkingStartedAt = null;
     lastThinkMs = null;
@@ -804,27 +975,39 @@
     alternativesTitle.textContent = '其他考虑';
     alternatives.innerHTML = '<div class="empty">暂无备选落点。</div>';
     retryBtn.style.display = 'none';
-    drawBoard(); updateHistory(); updateStatus();
+    drawBoard();
+    updateHistory();
+    updateStatus();
+    if (current === aiColor()) setTimeout(jevTurn, 180);
   }
 
   function updateStatus() {
+    if (!gameStarted) {
+      turnText.innerHTML = '<span>等待开局</span>';
+      turnHint.textContent = '请先完成开局设置';
+      gameMeta.textContent = '尚未开始';
+      lastMoveText.textContent = '尚未落子';
+      refreshTurnClock();
+      return;
+    }
     if (gameOver) return;
+
     const nextNo = moves.length + 1;
+    const color = current;
+    const stoneClass = colorCss(color);
     if (thinking) {
       const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
-      turnText.innerHTML = `<span class="stone-dot white"></span><span class="thinking">${actor} 正在思考</span>`;
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span class="thinking">${actor} 正在思考</span>`;
       turnHint.textContent = '正在分析局面，请稍候';
-      gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
-    } else if (current === BLACK) {
-      turnText.innerHTML = '<span class="stone-dot black"></span><span>轮到你了</span>';
-      turnHint.textContent = '点击棋盘交叉点落下一枚黑棋';
-      gameMeta.textContent = `第 ${nextNo} 手 · 黑棋`;
+    } else if (current === playerColor()) {
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span>轮到你了</span>`;
+      turnHint.textContent = `点击棋盘交叉点落下一枚${colorNameZh(color)}`;
     } else {
       const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
-      turnText.innerHTML = `<span class="stone-dot white"></span><span>${actor} 的回合</span>`;
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span>${actor} 的回合</span>`;
       turnHint.textContent = `${actor} 即将开始思考`;
-      gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
     }
+    gameMeta.textContent = `第 ${nextNo} 手 · ${colorNameZh(color)}`;
     lastMoveText.textContent = moves.length ? `最后落子：${moves[moves.length - 1].coord}` : '尚未落子';
     refreshTurnClock();
   }
@@ -902,7 +1085,7 @@
       : d.mode === 'strong' ? 'Jev 强化'
       : d.mode === 'grandmaster' ? 'Jev 宗师'
       : 'Jev 大师';
-    lines.push(`第 ${d.moveNo} 手 · 白 ${d.chosen}`);
+    lines.push(`第 ${d.moveNo} 手 · ${colorShortZh(aiColor())} ${d.chosen}`);
     lines.push(`  模式：${modeLabel}`);
     if (d.stageNote) lines.push(`  决策阶段：${d.stageNote}`);
     if (d.forced) lines.push(`  强制类型：${d.forced === 'win' ? '立即取胜' : d.forced === 'block' ? '必须防守' : d.forced}`);
@@ -1014,13 +1197,20 @@
   }
 
   function formatGameRecord() {
-    const result = gameResult?.text || (gameOver ? '对局结束' : '进行中');
+    const result = gameResult?.text || (gameOver ? '对局结束' : gameStarted ? '进行中' : '未开始');
     const started = gameStartedAt instanceof Date ? gameStartedAt.toLocaleString() : '';
+    const blackOwner = playerColor() === BLACK ? '玩家' : 'Jev / 本地引擎';
+    const whiteOwner = playerColor() === WHITE ? '玩家' : 'Jev / 本地引擎';
+    const rules = activeRuleConfig();
     const lines = [
       'Jev 五子棋棋谱',
       `棋盘：${SIZE}×${SIZE}`,
-      '黑方：玩家',
-      '白方：Jev / 本地引擎',
+      `黑方：${blackOwner}`,
+      `白方：${whiteOwner}`,
+      `玩家棋色：${colorNameZh(playerColor())}`,
+      `AI 棋色：${colorNameZh(aiColor())}`,
+      `黑棋禁手：长连=${rules.overline ? '开' : '关'}；四四=${rules.fourFour ? '开' : '关'}；三三=${rules.threeThree ? '开' : '关'}`,
+      `胜负规则：${rules.overline ? '黑棋恰好五连获胜；白棋五连及以上获胜' : '黑白双方五连及以上获胜'}`,
       `结果：${result}`,
       `开始：${started}`,
       `对局种子：${gameSeed}`,
@@ -1042,9 +1232,8 @@
 
     lines.push('', '【Jev / AI 决策过程】');
     const activeDecisions = jevDecisionLog.filter(d => d.moveNo <= moves.length);
-    if (!activeDecisions.length) {
-      lines.push('—');
-    } else {
+    if (!activeDecisions.length) lines.push('—');
+    else {
       activeDecisions.forEach((d, i) => {
         if (i) lines.push('');
         appendDecisionTrace(lines, d);
@@ -1091,7 +1280,7 @@
     }));
   }
 
-  function legalMoves(color = WHITE) {
+  function legalMoves(color = aiColor()) {
     const result = [];
     for (let r = 0; r < SIZE; r++) {
       for (let c = 0; c < SIZE; c++) {
@@ -1145,7 +1334,7 @@
   function otherColor(color) { return color === WHITE ? BLACK : WHITE; }
 
   function evaluateStatic() {
-    let score = 0;
+    let whiteScore = 0;
     for (const seg of WIN_SEGMENTS) {
       let w = 0, b = 0;
       for (const [r, c] of seg) {
@@ -1153,18 +1342,18 @@
         else if (board[r][c] === BLACK) b++;
       }
       if (w && b) continue;
-      if (w) score += LINE_WEIGHTS[w];
-      else if (b) score -= LINE_WEIGHTS[b] * 1.16;
+      if (w) whiteScore += LINE_WEIGHTS[w];
+      else if (b) whiteScore -= LINE_WEIGHTS[b] * 1.16;
     }
     for (let r = 0; r < SIZE; r++) {
       for (let c = 0; c < SIZE; c++) {
         if (board[r][c] === EMPTY) continue;
         const d = Math.max(Math.abs(r - 7), Math.abs(c - 7));
         const bonus = Math.max(0, 8 - d) * .45;
-        score += board[r][c] === WHITE ? bonus : -bonus;
+        whiteScore += board[r][c] === WHITE ? bonus : -bonus;
       }
     }
-    return score;
+    return aiColor() === WHITE ? whiteScore : -whiteScore;
   }
 
   function nearbyMoves(radius = 2) {
@@ -1227,7 +1416,7 @@
     } else {
       const base = evaluateStatic();
       const conn = localConnectivity(move.r, move.c, color);
-      score = (color === WHITE ? base : -base) + conn.allies * 18 + conn.enemies * 5;
+      score = (color === aiColor() ? base : -base) + conn.allies * 18 + conn.enemies * 5;
     }
     board[move.r][move.c] = EMPTY;
     return score;
@@ -1262,7 +1451,7 @@
 
     const immediate = immediateWins(toMove, cfg.radius);
     if (immediate.length) {
-      const score = toMove === WHITE ? MATE_SCORE + depth : -MATE_SCORE - depth;
+      const score = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
       cache.set(key, score);
       return score;
     }
@@ -1271,18 +1460,18 @@
     const candidates = orderedMoves(toMove, limit, cfg.radius);
     if (!candidates.length) return evaluateStatic();
 
-    let value = toMove === WHITE ? -Infinity : Infinity;
+    let value = toMove === aiColor() ? -Infinity : Infinity;
     for (const m of candidates) {
       board[m.r][m.c] = toMove;
       let child;
       if (isWin(m.r, m.c, toMove)) {
-        child = toMove === WHITE ? MATE_SCORE + depth : -MATE_SCORE - depth;
+        child = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
       } else {
         child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), cfg, cache);
       }
       board[m.r][m.c] = EMPTY;
 
-      if (toMove === WHITE) {
+      if (toMove === aiColor()) {
         if (child > value) value = child;
         if (value > alpha) alpha = value;
       } else {
@@ -1296,12 +1485,14 @@
   }
 
   function scoreRootMove(move, cfg, cache) {
-    board[move.r][move.c] = WHITE;
+    const side = aiColor();
+    const opponent = otherColor(side);
+    board[move.r][move.c] = side;
     let score;
-    if (isWin(move.r, move.c, WHITE)) {
+    if (isWin(move.r, move.c, side)) {
       score = MATE_SCORE * 10;
     } else {
-      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, BLACK, cfg, cache);
+      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, opponent, cfg, cache);
       score += evaluateStatic() * .035;
     }
     board[move.r][move.c] = EMPTY;
@@ -1512,28 +1703,30 @@
   }
 
   function analyzeAdvancedCandidate(move, forced, cfg) {
-    board[move.r][move.c] = WHITE;
-    const winsNow = isWin(move.r, move.c, WHITE);
-    const ownImmediate = winsNow ? 2 : immediateWins(WHITE, cfg.radius).length;
-    const oppImmediate = winsNow ? 0 : immediateWins(BLACK, cfg.radius).length;
-    const forks = winsNow ? {count: 0, points: [], moves: []} : countForkCreators(WHITE, 10, cfg.radius, 3);
+    const side = aiColor();
+    const opponent = otherColor(side);
+    board[move.r][move.c] = side;
+    const winsNow = isWin(move.r, move.c, side);
+    const ownImmediate = winsNow ? 2 : immediateWins(side, cfg.radius).length;
+    const oppImmediate = winsNow ? 0 : immediateWins(opponent, cfg.radius).length;
+    const forks = winsNow ? {count: 0, points: [], moves: []} : countForkCreators(side, 10, cfg.radius, 3);
     const opponentForks = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
-      ? countForkCreators(BLACK, 12, cfg.radius, 2)
+      ? countForkCreators(opponent, 12, cfg.radius, 2)
       : { count: 0, points: [], moves: [] };
-    const conn = localConnectivity(move.r, move.c, WHITE);
-    const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(WHITE, cfg.vcfDepth, cfg.radius));
-    const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(WHITE, cfg.vctDepth, cfg.radius);
-    const blackCounterVCF = !winsNow && !ownImmediate && !opponentForks.count
-      && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
-    const blackCounterVCT = !winsNow && !ownImmediate && !opponentForks.count && !blackCounterVCF && cfg.vctDepth > 0
-      && searchVCTPressure(BLACK, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
+    const conn = localConnectivity(move.r, move.c, side);
+    const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(side, cfg.vcfDepth, cfg.radius));
+    const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(side, cfg.vctDepth, cfg.radius);
+    const opponentCounterVCF = !winsNow && !ownImmediate && !opponentForks.count
+      && searchVCF(opponent, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
+    const opponentCounterVCT = !winsNow && !ownImmediate && !opponentForks.count && !opponentCounterVCF && cfg.vctDepth > 0
+      && searchVCTPressure(opponent, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
     let safety = 'SAFE';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
     else if (opponentForks.count >= 1) safety = 'LOSING';
-    else if (blackCounterVCF || blackCounterVCT) safety = 'TACTICALLY_RISKY';
+    else if (opponentCounterVCF || opponentCounterVCT) safety = 'TACTICALLY_RISKY';
 
     const forcedRole = winsNow ? 'WIN_NOW'
       : forced === 'block' ? 'MUST_DEFEND'
@@ -1552,8 +1745,10 @@
       forkCreators: forks.count,
       vcf,
       vct,
-      blackCounterVCF,
-      blackCounterVCT,
+      blackCounterVCF: opponentCounterVCF,
+      blackCounterVCT: opponentCounterVCT,
+      opponentCounterVCF,
+      opponentCounterVCT,
       facts: {
         forced_role: forcedRole,
         tactical_safety: safety,
@@ -1565,8 +1760,8 @@
         opponent_fork_creator_points: opponentForks.points.length ? opponentForks.points.join(',') : 'NONE',
         vcf_status: vcf ? 'FORCED_SEQUENCE_FOUND' : 'NOT_FOUND',
         vct_status: vct ? 'PRESSURE_SEQUENCE_FOUND' : 'NOT_FOUND',
-        opponent_counter_vcf: blackCounterVCF ? 'FOUND' : 'NOT_FOUND',
-        opponent_counter_vct: blackCounterVCT ? 'PRESSURE_FOUND' : 'NOT_FOUND',
+        opponent_counter_vcf: opponentCounterVCF ? 'FOUND' : 'NOT_FOUND',
+        opponent_counter_vct: opponentCounterVCT ? 'PRESSURE_FOUND' : 'NOT_FOUND',
         connectivity: connectionLabel(conn.allies),
         centrality: Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7)) <= 3 ? 'CENTRAL' : 'OUTER'
       }
@@ -1595,25 +1790,27 @@
 
   function buildAdvancedCandidates(mode) {
     const cfg = advancedEngineConfig(mode);
-    const whiteWins = immediateWins(WHITE, cfg.radius);
-    const blackWins = immediateWins(BLACK, cfg.radius);
+    const side = aiColor();
+    const opponent = otherColor(side);
+    const ownWins = immediateWins(side, cfg.radius);
+    const opponentWins = immediateWins(opponent, cfg.radius);
     let forced = null;
     let roots;
-    if (whiteWins.length) {
+    if (ownWins.length) {
       forced = 'win';
-      roots = whiteWins;
-    } else if (blackWins.length) {
+      roots = ownWins;
+    } else if (opponentWins.length) {
       forced = 'block';
-      roots = blackWins;
+      roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
     } else {
-      const blackForks = moves.length >= 16
-        ? countForkCreators(BLACK, Math.max(12, cfg.root), cfg.radius, 2)
+      const opponentForks = moves.length >= 16
+        ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
         : { count: 0, points: [], moves: [] };
-      if (blackForks.count === 1) {
+      if (opponentForks.count === 1) {
         forced = 'block_fork';
-        roots = blackForks.moves;
+        roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
       } else {
-        roots = orderedMoves(WHITE, cfg.root, cfg.radius);
+        roots = orderedMoves(side, cfg.root, cfg.radius);
       }
     }
 
@@ -1645,9 +1842,12 @@
   }
 
   function buildPureJevRequest() {
-    const legal = legalMoves();
+    const side = aiColor();
+    const opponent = otherColor(side);
+    const legal = legalMoves(side);
     const criteria = Object.fromEntries(legal.map(m => [m.key, null]));
     const last = moves.length ? moves[moves.length - 1].coord : null;
+    const sideName = colorNameEn(side);
     return {
       mode: 'jev',
       candidates: legal,
@@ -1655,20 +1855,20 @@
         state: {
           game: 'Gomoku / Five in a Row',
           board_size: '15x15',
-          you_are: 'WHITE (O)',
-          opponent_is: 'BLACK (X)',
-          side_to_move: 'WHITE',
+          you_are: `${sideName} (${colorStoneEn(side)})`,
+          opponent_is: `${colorNameEn(opponent)} (${colorStoneEn(opponent)})`,
+          side_to_move: sideName,
           coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom; H8 is center.',
-          rules: 'Renju forbidden-move rules are enabled. BLACK may not play overline, double-four, or real double-three; an exact black five wins. WHITE has no forbidden moves and wins with five or more in a row.',
+          rules: renjuRuleDescription(),
           last_move: last,
-          board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+          board_legend: boardLegendForAi(),
           board_rows: boardRows()
         },
         model: settings.model || 'jev-latest',
         questions: {
           best_move: {
             type: 'choice',
-            instructions: 'Choose the best legal move for WHITE. Never ignore an immediate win or an opponent one-move win.',
+            instructions: `Choose the best legal move for ${sideName}. Never ignore an immediate win or an opponent one-move win. Obey the configured BLACK forbidden-move rules exactly.`,
             criteria
           }
         }
@@ -1692,7 +1892,7 @@
     for (const m of context.candidates) {
       questions[`judge_${m.key}`] = {
         type: 'choice',
-        instructions: `Judge candidate ${m.key} for WHITE by independently inspecting the board and candidate_facts.${m.key}. Candidate facts are deterministic hints but may be horizon-limited. If direct board tactics conflict with a heuristic fact, prefer the board evidence.`,
+        instructions: `Judge candidate ${m.key} for ${colorNameEn(aiColor())} by independently inspecting the board and candidate_facts.${m.key}. Candidate facts are deterministic hints but may be horizon-limited. If direct board tactics conflict with a heuristic fact, prefer the board evidence.`,
         criteria: {
           EXCELLENT: 'The supplied facts indicate a strategically preferred move with strong initiative and tactical safety.',
           GOOD: 'The move is sound and useful, but not clearly dominant.',
@@ -1705,10 +1905,11 @@
     return {
       state: {
         task: 'Independent Gomoku challenger evaluation after deterministic tactical analysis.',
-        side: 'WHITE',
+        side: colorNameEn(aiColor()),
         board_size: '15x15',
         coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
-        board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+        board_legend: boardLegendForAi(),
+        rules: renjuRuleDescription(),
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         board_rows: boardRows(),
         instruction: 'Independently inspect the board geometry as well as the supplied candidate facts. The facts are horizon-limited hints, not a ranking and not infallible. Priority: immediate win > mandatory defense > forced tactical sequences > safety > initiative > connectivity.',
@@ -1738,7 +1939,7 @@
     const pairs = [];
     let n = 0;
     const facts = candidateFactsMap(candidates);
-    const instruction = 'Choose the stronger move for WHITE by independently checking the board and the supplied semantic facts. The facts may miss deeper horizon tactics. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. No Local ranking is provided.';
+    const instruction = `Choose the stronger move for ${colorNameEn(aiColor())} by independently checking the board and the supplied semantic facts. The facts may miss deeper horizon tactics. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. Obey the configured BLACK forbidden-move rules. No Local ranking is provided.`;
     for (let i = 0; i < candidates.length; i++) {
       for (let j = i + 1; j < candidates.length; j++) {
         const a = candidates[i].key, b = candidates[j].key;
@@ -1752,10 +1953,11 @@
       payload: {
         state: {
           task: 'Independent pairwise Gomoku move tournament.',
-          side: 'WHITE',
+          side: colorNameEn(aiColor()),
           board_size: '15x15',
           coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
-          board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+          board_legend: boardLegendForAi(),
+          rules: renjuRuleDescription(),
           last_move: moves.length ? moves[moves.length - 1].coord : null,
           board_rows: boardRows(),
           note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias. Candidate facts contain no Local rank.',
@@ -1867,10 +2069,10 @@
     return {
       state: {
         task: 'Final Gomoku move decision using deterministic local-engine evidence.',
-        side: 'WHITE',
+        side: colorNameEn(aiColor()),
         board_size: '15x15',
         coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
-        board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+        board_legend: boardLegendForAi(),
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         board_rows: boardRows(),
         local_engine_role: 'The local engine generated and tactically filtered the candidate set. Its ranks and search scores are evidence, not commands.',
@@ -1890,7 +2092,7 @@
         ...(Object.keys(factoredEvidence.common).length
           ? { common_candidate_evidence: factoredEvidence.common }
           : {}),
-        rules: 'Renju forbidden-move rules are enabled: BLACK cannot play overline, double-four, or real double-three; exact black five wins. WHITE has no forbidden moves and wins with five or more.',
+        rules: renjuRuleDescription(),
         decision_policy: [
           'You are the FINAL decision maker. Choose exactly one supplied candidate.',
           'Never ignore an immediate win, mandatory defense, proven VCF sequence, or threat-space proof of an opponent forced win.',
@@ -1904,7 +2106,7 @@
       questions: {
         best_move: {
           type: 'choice',
-          instructions: 'Make the final move decision for WHITE. Inspect the full board and all candidate evidence, then choose exactly one candidate. Candidate criteria inherit state.common_candidate_evidence when present. You have final selection authority within this already-filtered candidate set.',
+          instructions: `Make the final move decision for ${colorNameEn(aiColor())}. Inspect the full board and all candidate evidence, then choose exactly one candidate. Candidate criteria inherit state.common_candidate_evidence when present. Obey the configured BLACK forbidden rules. You have final selection authority within this already-filtered candidate set.`,
           criteria: factoredEvidence.criteria
         }
       }
@@ -2286,7 +2488,8 @@
         id,
         task: 'search',
         board: board.map(row => row.slice()),
-        side: WHITE,
+        side: aiColor(),
+        rules: workerRuleConfig(),
         candidates: uniqueMoves.map(move => move.key),
         timeBudgetMs,
         maxDepth,
@@ -2398,7 +2601,8 @@
         id,
         task: 'threat',
         board: board.map(row => row.slice()),
-        side: WHITE,
+        side: aiColor(),
+        rules: workerRuleConfig(),
         candidates: uniqueMoves.map(move => move.key),
         timeBudgetMs,
         maxThreatTurns,
@@ -2834,8 +3038,10 @@
     };
   }
 
-    async function jevTurn() {
-    if (gameOver || current !== WHITE || thinking) return;
+  async function jevTurn() {
+    const side = aiColor();
+    const human = playerColor();
+    if (!gameStarted || gameOver || current !== side || thinking) return;
 
     thinking = true;
     beginThinkingClock();
@@ -2850,7 +3056,7 @@
     try {
       let result;
       if (settings.strengthMode === 'local') {
-        result = localOnlyDecision(settings.strengthMode === 'strong' ? 'strong' : 'expert');
+        result = localOnlyDecision('expert');
       } else if (settings.strengthMode === 'jev') {
         updateApiState('busy', 'Jev 正在思考…');
         const decision = buildPureJevRequest();
@@ -2880,29 +3086,31 @@
           stageNote: '纯 Jev（每回合 1 次请求）'
         };
       } else {
-        result = await advancedDecision(settings.strengthMode || 'expert');
+        result = await advancedDecision(settings.strengthMode || 'grandmaster');
       }
 
       const parsed = parseCoord(result.finalChoice);
-      if (!parsed || board[parsed.r][parsed.c] !== EMPTY) throw new Error(`最终决策产生非法落点：${result.finalChoice}`);
+      if (!parsed || board[parsed.r][parsed.c] !== EMPTY || !isLegalMoveForColor(parsed.r, parsed.c, side)) {
+        throw new Error(`最终决策产生非法落点：${result.finalChoice}`);
+      }
       captureThinkingDuration(result);
       lastJev = result;
       renderJevResult(lastJev);
       const moveSource = result.mode === 'local' || result.fallbackReason || result.stageNote?.includes('0 次 Jev')
         ? '本地战术'
         : 'Jev';
-      place(parsed.r, parsed.c, WHITE, moveSource);
+      place(parsed.r, parsed.c, side, moveSource);
       rememberDecision(result, moves.length);
 
-      if (isWin(parsed.r, parsed.c, WHITE)) {
-        finish(result.mode === 'local' ? '本地引擎赢了' : 'Jev 赢了', WHITE);
+      if (isWin(parsed.r, parsed.c, side)) {
+        finish(result.mode === 'local' ? '本地引擎赢了' : 'Jev 赢了', side);
         return;
       }
       if (moves.length === SIZE * SIZE) {
         finish('平局', EMPTY);
         return;
       }
-      current = BLACK;
+      current = human;
       resetTurnClock();
       updateApiState();
     } catch (err) {
@@ -2910,41 +3118,39 @@
       console.error(err);
 
       const msg = friendlyError(err);
-      const shouldFallback = true;
-
-      if (shouldFallback) {
-        try {
-          const fallback = localOnlyDecision(settings.strengthMode === 'strong' ? 'strong' : 'expert');
-          fallback.fallbackReason = msg;
-          fallback.stageNote = `${fallback.stageNote}；Jev 不可用时自动降级`;
-          const parsed = parseCoord(fallback.finalChoice);
-          if (!parsed || board[parsed.r][parsed.c] !== EMPTY) throw new Error('本地降级产生非法落点');
-          captureThinkingDuration(fallback);
-          lastJev = fallback;
-          renderJevResult(fallback);
-          place(parsed.r, parsed.c, WHITE, '本地引擎(降级)');
-          rememberDecision(fallback, moves.length);
-
-          if (isWin(parsed.r, parsed.c, WHITE)) {
-            finish('本地引擎赢了', WHITE);
-            return;
-          }
-          if (moves.length === SIZE * SIZE) {
-            finish('平局', EMPTY);
-            return;
-          }
-          current = BLACK;
-          resetTurnClock();
-          updateApiState('err', 'Jev 暂不可用 · 本地引擎接管');
-          toast('Jev 暂时不可用，本回合已由本地引擎接管。', 4200);
-          return;
-        } catch (fallbackErr) {
-          console.error('local fallback failed', fallbackErr);
+      try {
+        const fallback = localOnlyDecision('expert');
+        fallback.fallbackReason = msg;
+        fallback.stageNote = `${fallback.stageNote}；Jev 不可用时自动降级`;
+        const parsed = parseCoord(fallback.finalChoice);
+        if (!parsed || board[parsed.r][parsed.c] !== EMPTY || !isLegalMoveForColor(parsed.r, parsed.c, side)) {
+          throw new Error('本地降级产生非法落点');
         }
+        captureThinkingDuration(fallback);
+        lastJev = fallback;
+        renderJevResult(fallback);
+        place(parsed.r, parsed.c, side, '本地引擎(降级)');
+        rememberDecision(fallback, moves.length);
+
+        if (isWin(parsed.r, parsed.c, side)) {
+          finish('本地引擎赢了', side);
+          return;
+        }
+        if (moves.length === SIZE * SIZE) {
+          finish('平局', EMPTY);
+          return;
+        }
+        current = human;
+        resetTurnClock();
+        updateApiState('err', 'Jev 暂不可用 · 本地引擎接管');
+        toast('Jev 暂时不可用，本回合已由本地引擎接管。', 4200);
+        return;
+      } catch (fallbackErr) {
+        console.error('local fallback failed', fallbackErr);
       }
 
       captureThinkingDuration();
-      current = WHITE;
+      current = side;
       updateApiState('err', 'Jev 暂不可用');
       jevInfo.textContent = `Jev 暂不可用：${msg}`;
       retryBtn.style.display = 'inline-block';
@@ -2984,7 +3190,7 @@
     const modeLabel = publicModeLabel(result.mode);
 
     let verdict = '稳健选择';
-    let reason = `综合局面后，白棋选择 ${finalChoice}，优先保持棋形和后续空间。`;
+    let reason = `综合局面后，${colorNameZh(aiColor())}选择 ${finalChoice}，优先保持棋形和后续空间。`;
 
     if (result.forced === 'win' || f.forced_role === 'WIN_NOW' || f.attack_shape === 'IMMEDIATE_WIN') {
       verdict = '直接取胜';
@@ -3009,7 +3215,7 @@
       reason = `${finalChoice} 有进攻价值，但也存在被对手反击的风险。`;
     } else if (f.connectivity === 'VERY_HIGH' || f.connectivity === 'HIGH') {
       verdict = '强化棋形';
-      reason = `${finalChoice} 与现有白棋连接紧密，有利于形成更多后续进攻方向。`;
+      reason = `${finalChoice} 与现有${colorNameZh(aiColor())}连接紧密，有利于形成更多后续进攻方向。`;
     }
 
     let agreement;
@@ -3064,7 +3270,7 @@
           ? `${human.modeLabel} · 后台战术复核`
           : jevParticipated
             ? `${human.modeLabel} · Jev 选择`
-            : '本地战术 · 白棋落在';
+            : `本地战术 · ${colorNameZh(aiColor())}落在`;
     jevVerdict.textContent = human.verdict;
     jevInfo.innerHTML = `<strong>${escapeHtml(human.reason)}</strong><span>${escapeHtml(human.agreement)}</span>`;
 
@@ -3104,15 +3310,32 @@
   }
 
   canvas.addEventListener('click', onBoardClick);
-  document.getElementById('settingsBtn').addEventListener('click', openSettings);
-  document.getElementById('quickSettingsBtn').addEventListener('click', openSettings);
+  document.getElementById('settingsBtn').addEventListener('click', () => openSettings(false));
+  document.getElementById('quickSettingsBtn').addEventListener('click', () => openSettings(false));
   document.getElementById('closeSettingsBtn').addEventListener('click', () => {
     if (testController) testController.abort();
+    if (!gameStarted) {
+      toast('请先确认开局设置并点击“保存并开始”。', 3200);
+      return;
+    }
     settingsModal.classList.remove('show');
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
   levelOptionButtons.forEach(button => {
     button.addEventListener('click', () => renderLevelSelection(button.dataset.mode));
+  });
+  sideOptionButtons.forEach(button => {
+    button.addEventListener('click', () => {
+      sideOptionButtons.forEach(item => {
+        const selected = item === button;
+        item.classList.toggle('selected', selected);
+        item.setAttribute('aria-checked', selected ? 'true' : 'false');
+      });
+      updatePreGamePreview();
+    });
+  });
+  [ruleOverlineInput, ruleFourFourInput, ruleThreeThreeInput].forEach(input => {
+    input.addEventListener('change', updatePreGamePreview);
   });
   testConnectionBtn.addEventListener('click', testConnection);
   document.getElementById('restartBtn').addEventListener('click', restart);
@@ -3126,23 +3349,24 @@
     if (e.target === resultModal) hideResultModal();
   });
   settingsModal.addEventListener('click', e => {
-    if (e.target === settingsModal) {
+    if (e.target === settingsModal && gameStarted) {
       if (testController) testController.abort();
       settingsModal.classList.remove('show');
+    } else if (e.target === settingsModal && !gameStarted) {
+      toast('开局前必须先确认棋色和规则。', 3000);
     }
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (testController) testController.abort();
-      settingsModal.classList.remove('show');
+      if (gameStarted) settingsModal.classList.remove('show');
       hideResultModal();
     }
   });
 
   renderLevelSelection(settings.strengthMode);
-  drawBoard();
-  updateHistory();
-  updateStatus();
-  updateApiState();
+  syncPreGameControls();
+  resetGameState(false);
+  openSettings(true);
   setInterval(refreshTurnClock, 100);
 })();

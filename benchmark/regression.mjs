@@ -11,6 +11,7 @@
  */
 
 import { loadProductionEngine } from './harness.mjs';
+import { createBrowserWorkerClass } from './worker-shim.mjs';
 import { BLACK, EMPTY, SIZE, WHITE, Referee, coord, parseCoord } from './referee.mjs';
 
 function positionFromSequence(sequence) {
@@ -485,6 +486,173 @@ async function testRenjuForbiddenMoves() {
 }
 
 /**
+ * The three BLACK forbidden rules are independently configurable.
+ */
+async function testConfigurableForbiddenRules() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Rule configuration regression must not call Jev');
+    }
+  });
+
+  const cases = [
+    {
+      name: 'overline-off',
+      config: { playerColor: 'black', overline: false, fourFour: true, threeThree: true },
+      position: positionFromStones({ black: ['A8', 'B8', 'C8', 'D8', 'F8'] }),
+      move: 'E8',
+      expectedType: null,
+      winsNow: true
+    },
+    {
+      name: 'double-four-off',
+      config: { playerColor: 'black', overline: true, fourFour: false, threeThree: true },
+      position: positionFromStones({ black: ['E8', 'F8', 'G8', 'H5', 'H6', 'H7'] }),
+      move: 'H8',
+      expectedType: null
+    },
+    {
+      name: 'double-three-off',
+      config: { playerColor: 'black', overline: true, fourFour: true, threeThree: false },
+      position: positionFromStones({ black: ['F8', 'G8', 'H6', 'H7'] }),
+      move: 'H8',
+      expectedType: null
+    }
+  ];
+
+  for (const item of cases) {
+    engine.setGameConfig(item.config);
+    engine.setPosition(item.position.board, item.position.moves, 'jev-latest');
+    const verdict = engine.judge(item.move, BLACK);
+    console.log('configurable rule regression:', JSON.stringify({
+      name: item.name,
+      config: engine.gameConfig(),
+      verdict
+    }));
+    if (!verdict.legal || verdict.forbidden) {
+      throw new Error(item.name + ': disabling this forbidden rule must make the move legal');
+    }
+    if ((verdict.forbiddenType || null) !== item.expectedType) {
+      throw new Error(item.name + ': unexpected forbidden type ' + verdict.forbiddenType);
+    }
+    if (item.winsNow && verdict.winsNow !== true) {
+      throw new Error(item.name + ': black overline must win when overline prohibition is disabled');
+    }
+  }
+
+  // Independence check: turning off double-three must not silently turn off overline.
+  engine.setGameConfig({ playerColor: 'black', overline: true, fourFour: true, threeThree: false });
+  const overline = positionFromStones({ black: ['A8', 'B8', 'C8', 'D8', 'F8'] });
+  engine.setPosition(overline.board, overline.moves, 'jev-latest');
+  const stillForbidden = engine.judge('E8', BLACK);
+  if (stillForbidden.legal || stillForbidden.forbiddenType !== 'OVERLINE') {
+    throw new Error('Forbidden toggles are not independent: overline changed when only three-three was disabled');
+  }
+}
+
+/** AI can take BLACK and the deterministic engine must search from BLACK's perspective. */
+async function testAiCanPlayBlack() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async () => {
+      requestCount++;
+      throw new Error('Immediate AI-black win must not call Jev');
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'white',
+    overline: true,
+    fourFour: true,
+    threeThree: true
+  });
+  const position = positionFromStones({
+    black: ['A8', 'B8', 'C8', 'D8'],
+    white: ['H6', 'I6']
+  });
+  engine.setPosition(position.board, position.moves, 'jev-latest', BLACK);
+  const result = await engine.jevFinal('grandmaster');
+
+  console.log('AI-black regression:', JSON.stringify({
+    config: engine.gameConfig(),
+    finalChoice: result.finalChoice,
+    candidates: result.candidates?.map(item => item.key),
+    requestCount
+  }));
+
+  if (engine.gameConfig().aiColor !== BLACK) throw new Error('AI color did not switch to BLACK');
+  if (result.finalChoice !== 'E8') {
+    throw new Error('BLACK AI failed to take immediate exact-five win E8: ' + result.finalChoice);
+  }
+  if (requestCount !== 0) {
+    throw new Error('Deterministic BLACK immediate win unexpectedly called Jev');
+  }
+
+  // With overline disabled, a six-in-a-row completion is legal and winning.
+  engine.setGameConfig({
+    playerColor: 'white',
+    overline: false,
+    fourFour: true,
+    threeThree: true
+  });
+  const overlineWin = positionFromStones({
+    black: ['A8', 'B8', 'C8', 'D8', 'F8'],
+    white: ['H6', 'I6']
+  });
+  engine.setPosition(overlineWin.board, overlineWin.moves, 'jev-latest', BLACK);
+  const overlineResult = engine.local('expert');
+  if (overlineResult.finalChoice !== 'E8') {
+    throw new Error('BLACK AI did not use legal overline winning point E8 when overline prohibition was disabled');
+  }
+}
+
+/** Worker-side legality must receive the same BLACK rule toggles as the main engine. */
+async function testWorkerRulePropagation() {
+  const WorkerClass = createBrowserWorkerClass();
+  const board = positionFromStones({ black: ['A8', 'B8', 'C8', 'D8', 'F8'] }).board;
+
+  const run = rules => new Promise((resolve, reject) => {
+    const worker = new WorkerClass('/deep-worker.js');
+    const timer = setTimeout(() => {
+      worker.terminate();
+      reject(new Error('Worker rule regression timed out'));
+    }, 5000);
+    worker.onmessage = event => {
+      clearTimeout(timer);
+      worker.terminate();
+      resolve(event.data);
+    };
+    worker.onerror = event => {
+      clearTimeout(timer);
+      worker.terminate();
+      reject(new Error(event?.message || 'Worker rule regression crashed'));
+    };
+    worker.postMessage({
+      id: 991,
+      task: 'search',
+      board,
+      side: BLACK,
+      rules,
+      candidates: ['E8'],
+      timeBudgetMs: 500,
+      maxDepth: 3,
+      branch: 4
+    });
+  });
+
+  const disabled = await run({ overline: false, fourFour: true, threeThree: true });
+  if (!disabled.ok || disabled.result?.winner !== 'E8') {
+    throw new Error('Worker rejected legal BLACK overline after overline rule was disabled');
+  }
+
+  const enabled = await run({ overline: true, fourFour: true, threeThree: true });
+  if (enabled.ok) {
+    throw new Error('Worker accepted forbidden BLACK overline while overline rule was enabled');
+  }
+  console.log('worker rule regression: dynamic overline legality matches main rule config');
+}
+
+/**
  * The benchmark game engine must enforce exactly the same rules as production:
  * the referee delegates every legality/win question to `src/app.js`.
  */
@@ -620,6 +788,9 @@ await testGrandmasterRealGameThreatTrace();
 await testArbitrationOracle();
 await testMustBlockOpponentForkCreator();
 await testRenjuForbiddenMoves();
+await testConfigurableForbiddenRules();
+await testAiCanPlayBlack();
+await testWorkerRulePropagation();
 await testUndoAfterGameOver();
 await testRefereeRuleParity();
 console.log('Engine regression tests passed.');

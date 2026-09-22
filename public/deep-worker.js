@@ -29,6 +29,7 @@ let rootSide;
 let opponentSide;
 let deadline;
 let nodes;
+let ruleConfig = { overline: true, fourFour: true, threeThree: true };
 let hashA = 0;
 let hashB = 0;
 const TT_MAX_ENTRIES = 60000;
@@ -81,6 +82,14 @@ function otherColor(color) {
   return color === WHITE ? BLACK : WHITE;
 }
 
+function applyRuleConfig(value) {
+  ruleConfig = {
+    overline: value?.overline !== false,
+    fourFour: value?.fourFour !== false,
+    threeThree: value?.threeThree !== false
+  };
+}
+
 function coordToPoint(key) {
   const match = String(key || '').toUpperCase().match(/^([A-O])(1[0-5]|[1-9])$/);
   if (!match) return null;
@@ -126,7 +135,10 @@ function hasOverlineAt(r, c, color) {
 }
 
 function isWin(r, c, color) {
-  if (color === BLACK) return hasExactFiveAt(r, c, BLACK);
+  if (color === BLACK) {
+    if (ruleConfig.overline) return hasExactFiveAt(r, c, BLACK);
+    return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, BLACK, dr, dc) >= 5);
+  }
   return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, WHITE, dr, dc) >= 5);
 }
 
@@ -266,12 +278,14 @@ function potentialBlackThreeDirections(r, c) {
 }
 
 function blackForbiddenInfoPlaced(r, c, depth = 0) {
-  if (hasExactFiveAt(r, c, BLACK)) return { forbidden: false, type: null };
-  if (hasOverlineAt(r, c, BLACK)) return { forbidden: true, type: 'OVERLINE' };
+  const exactFive = hasExactFiveAt(r, c, BLACK);
+  const overline = hasOverlineAt(r, c, BLACK);
+  if (exactFive) return { forbidden: false, type: null };
+  if (ruleConfig.overline && overline) return { forbidden: true, type: 'OVERLINE' };
 
-  const fourCount = collectBlackFoursThrough(r, c);
-  if (fourCount >= 2) return { forbidden: true, type: 'FOUR_FOUR' };
-  if (depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
+  const fourCount = ruleConfig.fourFour || ruleConfig.threeThree ? collectBlackFoursThrough(r, c) : 0;
+  if (ruleConfig.fourFour && fourCount >= 2) return { forbidden: true, type: 'FOUR_FOUR' };
+  if (!ruleConfig.threeThree || depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
     return { forbidden: false, type: null };
   }
 
@@ -499,6 +513,7 @@ function evaluateRootCandidate(move, depth, branch, radius, cache) {
 function runSearch(message) {
   board = message.board.map(row => row.slice());
   rootSide = message.side === BLACK ? BLACK : WHITE;
+  applyRuleConfig(message.rules);
   opponentSide = otherColor(rootSide);
   nodes = 0;
   initializeHash();
@@ -506,7 +521,8 @@ function runSearch(message) {
   const candidates = (message.candidates || [])
     .map(coordToPoint)
     .filter(Boolean)
-    .filter(move => board[move.r]?.[move.c] === EMPTY);
+    .filter(move => board[move.r]?.[move.c] === EMPTY)
+    .filter(move => isLegalMoveForColor(move.r, move.c, rootSide));
 
   if (!candidates.length) throw new Error('No legal deep-search candidates');
 
@@ -667,6 +683,7 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
 function runThreatSearch(message) {
   board = message.board.map(row => row.slice());
   rootSide = message.side === BLACK ? BLACK : WHITE;
+  applyRuleConfig(message.rules);
   opponentSide = otherColor(rootSide);
   nodes = 0;
   initializeHash();
@@ -674,7 +691,8 @@ function runThreatSearch(message) {
   const candidates = (message.candidates || [])
     .map(coordToPoint)
     .filter(Boolean)
-    .filter(move => board[move.r]?.[move.c] === EMPTY);
+    .filter(move => board[move.r]?.[move.c] === EMPTY)
+    .filter(move => isLegalMoveForColor(move.r, move.c, rootSide));
 
   if (!candidates.length) throw new Error('No legal threat-search candidates');
 

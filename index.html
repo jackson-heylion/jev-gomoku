@@ -15,7 +15,7 @@
         <div class="logo">J</div>
         <div>
           <h1>Jev 五子棋</h1>
-          <p>15×15 五子棋 · 你执黑先手 · 挑战 Jev AI</p>
+          <p>15×15 五子棋 · 执黑 / 执白可选 · 挑战 Jev AI</p>
         </div>
       </div>
       <div class="actions">
@@ -29,8 +29,8 @@
       <div class="card board-card">
         <div class="statusbar">
           <div class="turn-area">
-            <div class="turn" id="turnText"><span class="stone-dot black"></span><span>你的回合</span></div>
-            <div class="turn-hint" id="turnHint">请落下一枚黑棋</div>
+            <div class="turn" id="turnText"><span>等待开局</span></div>
+            <div class="turn-hint" id="turnHint">请先完成开局设置</div>
           </div>
           <div class="turn-side">
             <div class="meta" id="gameMeta">第 1 手 · 黑棋</div>
@@ -44,7 +44,7 @@
           <canvas id="board" width="760" height="760" aria-label="15乘15五子棋棋盘"></canvas>
         </div>
         <div class="hint">
-          <span>点击交叉点落子。你执黑：禁长连、三三、四四；黑棋恰好五连获胜，白棋五连及以上获胜。</span>
+          <span id="ruleHint">开局前可选择执黑 / 执白，并配置黑棋长连、四四、三三禁手。</span>
           <span id="lastMoveText">尚未落子</span>
         </div>
       </div>
@@ -55,7 +55,7 @@
             <div class="jev-avatar" aria-hidden="true">J</div>
             <div class="jev-profile-copy">
               <div class="jev-name">Jev</div>
-              <div class="jev-tagline">你的白棋对手</div>
+              <div class="jev-tagline">你的 AI 对手</div>
             </div>
             <span class="jev-live" id="jevLiveState">在线</span>
           </div>
@@ -74,7 +74,7 @@
             <span>Jev 上一步思考</span>
             <strong id="lastThinkDuration">—</strong>
           </div>
-          <div class="runtime-hint">已启用黑棋禁手：长连、三三、四四不可落子；本地搜索与 Jev 候选分析使用同一规则。</div>
+          <div class="runtime-hint" id="runtimeRulesHint">规则将在开局时锁定，并同步应用于玩家、Local、Deep Worker、Threat-space 与 Jev。</div>
         </section>
 
         <section class="card jev-card">
@@ -110,12 +110,39 @@
 
   <div class="modal-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="modal">
-      <h2 id="settingsTitle">对局设置</h2>
-      <p class="desc">选择对局等级。等级 3 保持稳定体验；等级 4 增加强制威胁搜索，并只在多路证据分歧时调用 Jev。</p>
+      <h2 id="settingsTitle">开局设置</h2>
+      <p class="desc">每局开始前选择执黑 / 执白、黑棋禁手规则和 AI 难度。开局后本局规则锁定。</p>
 
       <input id="model" type="hidden" value="jev-latest" />
 
       <input id="strengthMode" type="hidden" value="grandmaster" />
+
+      <section class="game-options" aria-label="开局规则">
+        <div class="game-option-group">
+          <div class="game-option-label">你的棋色</div>
+          <div class="side-picker" role="radiogroup" aria-label="选择执黑或执白">
+            <button class="side-option selected" type="button" data-player-color="black" role="radio" aria-checked="true">
+              <span class="mini-stone black"></span>
+              <span><b>执黑</b><small>先手</small></span>
+            </button>
+            <button class="side-option" type="button" data-player-color="white" role="radio" aria-checked="false">
+              <span class="mini-stone white"></span>
+              <span><b>执白</b><small>后手，Jev 执黑先行</small></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="game-option-group">
+          <div class="game-option-label">黑棋禁手</div>
+          <div class="rule-toggles">
+            <label class="rule-toggle"><input id="ruleOverline" type="checkbox" checked /><span><b>长连</b><small>黑棋六连及以上禁止</small></span></label>
+            <label class="rule-toggle"><input id="ruleFourFour" type="checkbox" checked /><span><b>四四</b><small>黑棋同时形成两个四禁止</small></span></label>
+            <label class="rule-toggle"><input id="ruleThreeThree" type="checkbox" checked /><span><b>三三</b><small>黑棋同时形成两个真活三禁止</small></span></label>
+          </div>
+        </div>
+      </section>
+
+      <div class="game-config-summary" id="gameConfigSummary">你执黑先手 · 黑棋禁手：长连 / 四四 / 三三</div>
 
       <div class="level-picker" role="radiogroup" aria-label="对局等级">
         <button class="level-option" type="button" data-mode="grandmaster" role="radio" aria-checked="false">
@@ -174,7 +201,7 @@
       <div class="modal-actions">
         <button class="btn test-btn" id="testConnectionBtn" type="button">检查 Jev 状态</button>
         <button class="btn" id="closeSettingsBtn" type="button">取消</button>
-        <button class="btn primary" id="saveSettingsBtn" type="button">保存</button>
+        <button class="btn primary" id="saveSettingsBtn" type="button">保存并开始</button>
       </div>
     </div>
   </div>
