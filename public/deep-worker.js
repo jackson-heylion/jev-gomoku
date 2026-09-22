@@ -280,7 +280,7 @@ function potentialBlackThreeDirections(r, c) {
 function blackForbiddenInfoPlaced(r, c, depth = 0) {
   const exactFive = hasExactFiveAt(r, c, BLACK);
   const overline = hasOverlineAt(r, c, BLACK);
-  if (exactFive || (!ruleConfig.overline && overline)) return { forbidden: false, type: null };
+  if (exactFive) return { forbidden: false, type: null };
   if (ruleConfig.overline && overline) return { forbidden: true, type: 'OVERLINE' };
 
   const fourCount = ruleConfig.fourFour || ruleConfig.threeThree ? collectBlackFoursThrough(r, c) : 0;
