@@ -1625,26 +1625,15 @@
 
   function patternHotspots(color, limit = 4, radius = 2) {
     const opponent = otherColor(color);
-    const shortlist = nearbyMoves(radius)
+    // Candidate recall is intentionally cheap. Full live-three/four parsing is
+    // deferred until the small semantic candidate set is analysed.
+    return nearbyMoves(radius)
       .filter(move => isLegalMoveForColor(move.r, move.c, color))
       .map(move => ({
         ...move,
-        seed: fastPatternSeedScore(move, color) + fastPatternSeedScore(move, opponent) * .7
+        patternPriority: fastPatternSeedScore(move, color)
+          + fastPatternSeedScore(move, opponent) * .72
       }))
-      .sort((a, b) => b.seed - a.seed)
-      .slice(0, Math.max(10, limit * 3));
-
-    return shortlist
-      .map(move => {
-        const own = previewThreatPattern(move, color);
-        const denial = previewThreatPattern(move, opponent);
-        return {
-          ...move,
-          patternPriority: own.score + denial.score * .82,
-          ownPattern: own,
-          denialPattern: denial
-        };
-      })
       .sort((a, b) => b.patternPriority - a.patternPriority)
       .slice(0, limit);
   }
