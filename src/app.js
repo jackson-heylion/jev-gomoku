@@ -1288,6 +1288,11 @@
       }
       if (threats.length === 1) {
         const d = threats[0];
+        if (!isLegalMoveForColor(d.r, d.c, defender)) {
+          board[m.r][m.c] = EMPTY;
+          memo.set(memoKey, true);
+          return true;
+        }
         board[d.r][d.c] = defender;
         const forced = !isWin(d.r, d.c, defender) && searchVCF(attacker, turns - 1, radius, memo);
         board[d.r][d.c] = EMPTY;
@@ -1348,7 +1353,7 @@
 
       let allHold = defenses.length > 0;
       for (const d of defenses) {
-        if (board[d.r][d.c] !== EMPTY) continue;
+        if (board[d.r][d.c] !== EMPTY || !isLegalMoveForColor(d.r, d.c, defender)) continue;
         board[d.r][d.c] = defender;
         const survives = !isWin(d.r, d.c, defender) && searchVCTPressure(attacker, turns - 1, radius, memo);
         board[d.r][d.c] = EMPTY;
@@ -1371,6 +1376,7 @@
     if (threats.length >= 2) return true;
     if (threats.length === 1) {
       const d = threats[0];
+      if (!isLegalMoveForColor(d.r, d.c, defender)) return true;
       board[d.r][d.c] = defender;
       const result = !isWin(d.r, d.c, defender) && searchVCF(attacker, turns - 1, radius, new Map());
       board[d.r][d.c] = EMPTY;
@@ -1389,7 +1395,7 @@
     defenses = defenses.slice(0, 4);
     let allHold = defenses.length > 0;
     for (const d of defenses) {
-      if (board[d.r][d.c] !== EMPTY) continue;
+      if (board[d.r][d.c] !== EMPTY || !isLegalMoveForColor(d.r, d.c, defender)) continue;
       board[d.r][d.c] = defender;
       const survives = !isWin(d.r, d.c, defender) && searchVCTPressure(attacker, turns - 1, radius, new Map());
       board[d.r][d.c] = EMPTY;
