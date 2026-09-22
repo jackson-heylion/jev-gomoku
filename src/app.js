@@ -13,6 +13,7 @@
   const historyEl = document.getElementById('history');
   const apiIndicator = document.getElementById('apiIndicator');
   const apiLabel = document.getElementById('apiLabel');
+  const jevLiveState = document.getElementById('jevLiveState');
   const jevMove = document.getElementById('jevMove');
   const jevDecisionLabel = document.getElementById('jevDecisionLabel');
   const jevVerdict = document.getElementById('jevVerdict');
@@ -79,7 +80,7 @@
     localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
     settingsModal.classList.remove('show');
     updateApiState();
-    toast(settings.strengthMode === 'local' ? '已切换到本地模式' : '对局设置已保存');
+    toast(`已切换到 ${publicModeLabel(settings.strengthMode)}`);
     if (current === WHITE && !thinking && !gameOver) setTimeout(jevTurn, 100);
   }
 
@@ -100,7 +101,7 @@
     const timeout = setTimeout(() => testController?.abort(), 15000);
     testConnectionBtn.disabled = true;
     testConnectionBtn.textContent = '检查中…';
-    setConnectionTest('busy', '正在检查 AI 服务…');
+    setConnectionTest('busy', '正在检查 Jev 服务…');
     const started = performance.now();
     const payload = {
       state: 'TypeSafe Jev API connection test from Jev Gomoku.',
@@ -131,9 +132,9 @@
       }
       const answer = data?.answers?.connection_test;
       if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') {
-        throw new Error('AI 服务响应异常，请稍后重试。');
+        throw new Error('Jev 服务响应异常，请稍后重试。');
       }
-      setConnectionTest('ok', `AI 服务正常 · ${elapsed} ms`);
+      setConnectionTest('ok', `Jev 在线 · ${elapsed} ms`);
     } catch (err) {
       setConnectionTest('err', err?.name === 'AbortError'
         ? '检查超时，请稍后重试。'
@@ -142,24 +143,38 @@
       clearTimeout(timeout);
       testController = null;
       testConnectionBtn.disabled = false;
-      testConnectionBtn.textContent = '检查 AI 状态';
+      testConnectionBtn.textContent = '检查 Jev 状态';
     }
+  }
+
+  function publicModeLabel(mode) {
+    return mode === 'local' ? '本地引擎'
+      : mode === 'jev' ? 'Jev 直觉'
+      : mode === 'strong' ? 'Jev 快速'
+      : 'Jev 大师';
   }
 
   function updateApiState(kind = null, text = null) {
     apiIndicator.className = 'indicator';
-    if (kind === 'busy') apiIndicator.classList.add('busy');
-    else if (kind === 'err') apiIndicator.classList.add('err');
-    else if (settings.strengthMode !== 'local') apiIndicator.classList.add('ok');
+    jevLiveState.className = 'jev-live';
 
-    if (text) apiLabel.textContent = text;
-    else {
-      const strengthLabel = settings.strengthMode === 'local' ? '本地模式'
-        : settings.strengthMode === 'jev' ? 'Jev 模式'
-        : settings.strengthMode === 'strong' ? '快速模式'
-        : '大师模式';
-      apiLabel.textContent = strengthLabel;
+    if (kind === 'busy') {
+      apiIndicator.classList.add('busy');
+      jevLiveState.classList.add('busy');
+      jevLiveState.textContent = '思考中';
+    } else if (kind === 'err') {
+      apiIndicator.classList.add('err');
+      jevLiveState.classList.add('fallback');
+      jevLiveState.textContent = '本地接管';
+    } else if (settings.strengthMode === 'local') {
+      jevLiveState.classList.add('off');
+      jevLiveState.textContent = '未启用';
+    } else {
+      apiIndicator.classList.add('ok');
+      jevLiveState.textContent = '在线';
     }
+
+    apiLabel.textContent = text || publicModeLabel(settings.strengthMode);
   }
 
   function openSettings() {
@@ -311,10 +326,7 @@
   }
 
   function showResultModal(text, winner) {
-    const modeLabel = settings.strengthMode === 'local' ? '本地模式'
-      : settings.strengthMode === 'jev' ? 'Jev 模式'
-      : settings.strengthMode === 'strong' ? '快速模式'
-      : '大师模式';
+    const modeLabel = publicModeLabel(settings.strengthMode);
 
     resultTitle.textContent = text;
     resultIcon.textContent = winner === BLACK ? '●' : winner === WHITE ? '○' : '＝';
@@ -322,8 +334,8 @@
     resultDesc.textContent = winner === BLACK
       ? '你执黑完成五连，本局获胜。'
       : winner === WHITE
-        ? '白棋完成五连，本局结束。'
-        : '棋盘已下满，双方均未形成五连。';
+        ? 'Jev 执白完成五连，赢下了这一局。'
+        : '棋盘已下满，你与 Jev 战成平局。';
     resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel}`;
     resultCopyBtn.textContent = '复制棋谱';
     resultModal.classList.add('show');
@@ -357,9 +369,9 @@
     hideResultModal();
     canvas.classList.remove('disabled');
     jevMove.textContent = '—';
-    jevDecisionLabel.textContent = '等待白棋判断';
+    jevDecisionLabel.textContent = '等待 Jev 判断';
     jevVerdict.textContent = '等待';
-    jevInfo.textContent = '落子后，这里会用容易理解的文字说明为什么选择这一手。';
+    jevInfo.textContent = 'Jev 落子后，这里会解释它为什么考虑这一手。';
     confidenceBar.style.width = '0%';
     confidenceText.textContent = '—';
     alternativesTitle.textContent = '其他考虑';
@@ -387,7 +399,7 @@
     jevMove.textContent = '—';
     jevDecisionLabel.textContent = '已悔棋';
     jevVerdict.textContent = '等待';
-    jevInfo.textContent = '等待下一次白棋判断。';
+    jevInfo.textContent = '等待下一次 Jev 判断。';
     confidenceBar.style.width = '0%';
     confidenceText.textContent = '—';
     alternativesTitle.textContent = '其他考虑';
@@ -1480,7 +1492,7 @@
     canvas.classList.add('disabled');
     updateStatus();
     updateApiState('busy', settings.strengthMode !== 'local'
-      ? 'AI 正在思考…'
+      ? '正在为 Jev 分析局面…'
       : '本地引擎正在思考…');
     requestController = new AbortController();
 
@@ -1524,7 +1536,10 @@
       if (!parsed || board[parsed.r][parsed.c] !== EMPTY) throw new Error(`最终决策产生非法落点：${result.finalChoice}`);
       lastJev = result;
       renderJevResult(lastJev);
-      place(parsed.r, parsed.c, WHITE, result.mode === 'local' ? '本地引擎' : 'Jev');
+      const moveSource = result.mode === 'local' || result.fallbackReason || result.stageNote?.includes('0 次 Jev')
+        ? '本地战术'
+        : 'Jev';
+      place(parsed.r, parsed.c, WHITE, moveSource);
       rememberDecision(result, moves.length);
 
       if (isWin(parsed.r, parsed.c, WHITE)) {
@@ -1565,8 +1580,8 @@
             return;
           }
           current = BLACK;
-          updateApiState('err', 'AI 暂不可用 · 已切换本地模式');
-          toast('AI 服务暂不可用，本回合已由本地引擎继续。', 4200);
+          updateApiState('err', 'Jev 暂不可用 · 本地引擎接管');
+          toast('Jev 暂时不可用，本回合已由本地引擎接管。', 4200);
           return;
         } catch (fallbackErr) {
           console.error('local fallback failed', fallbackErr);
@@ -1574,10 +1589,10 @@
       }
 
       current = WHITE;
-      updateApiState('err', 'AI 服务暂不可用');
-      jevInfo.textContent = `AI 服务暂不可用：${msg}`;
+      updateApiState('err', 'Jev 暂不可用');
+      jevInfo.textContent = `Jev 暂不可用：${msg}`;
       retryBtn.style.display = 'inline-block';
-      toast('AI 服务暂不可用，请重试。', 4200);
+      toast('Jev 暂不可用，请重试。', 4200);
     } finally {
       thinking = false;
       requestController = null;
@@ -1609,10 +1624,7 @@
   function buildHumanDecision(result, finalChoice) {
     const candidate = (result.candidates || []).find(m => m.key === finalChoice) || null;
     const f = candidate?.analysis?.facts || {};
-    const modeLabel = result.mode === 'local' ? '本地模式'
-      : result.mode === 'jev' ? 'Jev 模式'
-      : result.mode === 'strong' ? '快速模式'
-      : '大师模式';
+    const modeLabel = publicModeLabel(result.mode);
 
     let verdict = '稳健选择';
     let reason = `综合局面后，白棋选择 ${finalChoice}，优先保持棋形和后续空间。`;
@@ -1644,12 +1656,16 @@
     }
 
     let agreement;
-    if (result.mode === 'local' || result.stageNote?.includes('0 次 Jev')) {
-      agreement = '这一手已有明确的战术结论，无需 Jev 再判断。';
+    if (result.fallbackReason) {
+      agreement = 'Jev 暂时不可用，本手由本地引擎接管。';
+    } else if (result.mode === 'local') {
+      agreement = '当前为本地引擎模式，Jev 未参与这一手。';
+    } else if (result.stageNote?.includes('0 次 Jev')) {
+      agreement = 'Jev 未介入：本地引擎发现了明确的必胜、必防或强制手。';
     } else if (result.mode === 'jev') {
       agreement = '这一手由 Jev 直接判断并选择。';
     } else if (result.jevSuggested && result.jevSuggested !== finalChoice) {
-      agreement = `Jev 更偏向 ${result.jevSuggested}，但综合本地搜索后最终仍选择 ${finalChoice}。`;
+      agreement = `Jev 更偏向 ${result.jevSuggested}，最终结合本地搜索选择了 ${finalChoice}。`;
     } else {
       agreement = 'Jev 与本地搜索意见一致。';
     }
@@ -1663,8 +1679,11 @@
     const finalChoice = result.finalChoice || a.choice;
     const human = buildHumanDecision(result, finalChoice);
 
+    const jevParticipated = result.mode !== 'local' && !result.fallbackReason && !result.stageNote?.includes('0 次 Jev');
     jevMove.textContent = finalChoice;
-    jevDecisionLabel.textContent = `${human.modeLabel} · 白棋落在`;
+    jevDecisionLabel.textContent = jevParticipated
+      ? `${human.modeLabel} · Jev 选择`
+      : '本地战术 · 白棋落在';
     jevVerdict.textContent = human.verdict;
     jevInfo.innerHTML = `<strong>${escapeHtml(human.reason)}</strong><span>${escapeHtml(human.agreement)}</span>`;
 
@@ -1691,10 +1710,10 @@
 
   function friendlyError(err) {
     const msg = String(err?.message || err || '未知错误');
-    if (err?.httpStatus === 429) return 'AI 服务请求较多，请稍后重试。';
-    if (err?.httpStatus === 529) return 'AI 服务暂时繁忙，请稍后重试。';
-    if (err?.httpStatus === 503 && /not configured|未配置/i.test(msg)) return 'AI 服务暂未配置。';
-    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return 'AI 服务暂时无法连接，本回合将使用本地引擎。';
+    if (err?.httpStatus === 429) return 'Jev 当前请求较多，请稍后重试。';
+    if (err?.httpStatus === 529) return 'Jev 暂时繁忙，请稍后重试。';
+    if (err?.httpStatus === 503 && /not configured|未配置/i.test(msg)) return 'Jev 服务暂未配置。';
+    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return '暂时无法连接 Jev，本回合将使用本地引擎。';
     if (msg.length > 220) return msg.slice(0, 220) + '…';
     return msg;
   }
