@@ -231,8 +231,8 @@ export async function loadProductionEngine({ request, appPath } = {}) {
     TextEncoder,
     setTimeout,
     clearTimeout,
-    setInterval,
-    clearInterval,
+    setInterval() { return 0; },
+    clearInterval() {},
     window: {
       JevClient: {
         request
