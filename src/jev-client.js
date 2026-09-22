@@ -106,13 +106,15 @@
 
     try {
       const result = await client.systemOne(payload);
-      result.__client = {
-        attempts: 1,
-        cached: false,
-        transport: 'typesafe-sdk-browser',
-        dangerouslyAllowBrowser: true
+      return {
+        ...result,
+        __client: {
+          attempts: 1,
+          cached: false,
+          transport: 'typesafe-sdk-browser',
+          dangerouslyAllowBrowser: true
+        }
       };
-      return result;
     } catch (err) {
       if (Number.isFinite(err?.status)) err.httpStatus = err.status;
       throw err;
