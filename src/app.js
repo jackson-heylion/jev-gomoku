@@ -1761,11 +1761,6 @@
     settingsModal.classList.remove('show');
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
-  strengthModeInput.addEventListener('change', () => {
-    const meta = publicModeMeta(strengthModeInput.value);
-    levelBadge.textContent = meta.badge;
-    levelSummary.textContent = meta.summary;
-  });
   testConnectionBtn.addEventListener('click', testConnection);
   document.getElementById('restartBtn').addEventListener('click', restart);
   document.getElementById('undoBtn').addEventListener('click', undo);
