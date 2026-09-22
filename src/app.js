@@ -1542,7 +1542,20 @@
 
     return await new Promise(resolve => {
       let settled = false;
-      const worker = new Worker('/deep-worker.js', { type: 'module' });
+      let worker;
+      try {
+        worker = new Worker('/deep-worker.js', { type: 'module' });
+      } catch (error) {
+        resolve({
+          status: 'unavailable',
+          source: 'web-worker',
+          trigger,
+          winner: uniqueMoves[0].key,
+          error: String(error?.message || error || 'Web Worker unavailable'),
+          timedOut: false
+        });
+        return;
+      }
       const finish = result => {
         if (settled) return;
         settled = true;
