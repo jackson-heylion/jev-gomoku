@@ -1308,7 +1308,7 @@
   function otherColor(color) { return color === WHITE ? BLACK : WHITE; }
 
   function evaluateStatic() {
-    let score = 0;
+    let whiteScore = 0;
     for (const seg of WIN_SEGMENTS) {
       let w = 0, b = 0;
       for (const [r, c] of seg) {
@@ -1316,18 +1316,18 @@
         else if (board[r][c] === BLACK) b++;
       }
       if (w && b) continue;
-      if (w) score += LINE_WEIGHTS[w];
-      else if (b) score -= LINE_WEIGHTS[b] * 1.16;
+      if (w) whiteScore += LINE_WEIGHTS[w];
+      else if (b) whiteScore -= LINE_WEIGHTS[b] * 1.16;
     }
     for (let r = 0; r < SIZE; r++) {
       for (let c = 0; c < SIZE; c++) {
         if (board[r][c] === EMPTY) continue;
         const d = Math.max(Math.abs(r - 7), Math.abs(c - 7));
         const bonus = Math.max(0, 8 - d) * .45;
-        score += board[r][c] === WHITE ? bonus : -bonus;
+        whiteScore += board[r][c] === WHITE ? bonus : -bonus;
       }
     }
-    return score;
+    return aiColor() === WHITE ? whiteScore : -whiteScore;
   }
 
   function nearbyMoves(radius = 2) {
@@ -1390,7 +1390,7 @@
     } else {
       const base = evaluateStatic();
       const conn = localConnectivity(move.r, move.c, color);
-      score = (color === WHITE ? base : -base) + conn.allies * 18 + conn.enemies * 5;
+      score = (color === aiColor() ? base : -base) + conn.allies * 18 + conn.enemies * 5;
     }
     board[move.r][move.c] = EMPTY;
     return score;
@@ -1425,7 +1425,7 @@
 
     const immediate = immediateWins(toMove, cfg.radius);
     if (immediate.length) {
-      const score = toMove === WHITE ? MATE_SCORE + depth : -MATE_SCORE - depth;
+      const score = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
       cache.set(key, score);
       return score;
     }
@@ -1434,18 +1434,18 @@
     const candidates = orderedMoves(toMove, limit, cfg.radius);
     if (!candidates.length) return evaluateStatic();
 
-    let value = toMove === WHITE ? -Infinity : Infinity;
+    let value = toMove === aiColor() ? -Infinity : Infinity;
     for (const m of candidates) {
       board[m.r][m.c] = toMove;
       let child;
       if (isWin(m.r, m.c, toMove)) {
-        child = toMove === WHITE ? MATE_SCORE + depth : -MATE_SCORE - depth;
+        child = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
       } else {
         child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), cfg, cache);
       }
       board[m.r][m.c] = EMPTY;
 
-      if (toMove === WHITE) {
+      if (toMove === aiColor()) {
         if (child > value) value = child;
         if (value > alpha) alpha = value;
       } else {
@@ -1459,12 +1459,14 @@
   }
 
   function scoreRootMove(move, cfg, cache) {
-    board[move.r][move.c] = WHITE;
+    const side = aiColor();
+    const opponent = otherColor(side);
+    board[move.r][move.c] = side;
     let score;
-    if (isWin(move.r, move.c, WHITE)) {
+    if (isWin(move.r, move.c, side)) {
       score = MATE_SCORE * 10;
     } else {
-      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, BLACK, cfg, cache);
+      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, opponent, cfg, cache);
       score += evaluateStatic() * .035;
     }
     board[move.r][move.c] = EMPTY;
@@ -1675,28 +1677,30 @@
   }
 
   function analyzeAdvancedCandidate(move, forced, cfg) {
-    board[move.r][move.c] = WHITE;
-    const winsNow = isWin(move.r, move.c, WHITE);
-    const ownImmediate = winsNow ? 2 : immediateWins(WHITE, cfg.radius).length;
-    const oppImmediate = winsNow ? 0 : immediateWins(BLACK, cfg.radius).length;
-    const forks = winsNow ? {count: 0, points: [], moves: []} : countForkCreators(WHITE, 10, cfg.radius, 3);
+    const side = aiColor();
+    const opponent = otherColor(side);
+    board[move.r][move.c] = side;
+    const winsNow = isWin(move.r, move.c, side);
+    const ownImmediate = winsNow ? 2 : immediateWins(side, cfg.radius).length;
+    const oppImmediate = winsNow ? 0 : immediateWins(opponent, cfg.radius).length;
+    const forks = winsNow ? {count: 0, points: [], moves: []} : countForkCreators(side, 10, cfg.radius, 3);
     const opponentForks = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
-      ? countForkCreators(BLACK, 12, cfg.radius, 2)
+      ? countForkCreators(opponent, 12, cfg.radius, 2)
       : { count: 0, points: [], moves: [] };
-    const conn = localConnectivity(move.r, move.c, WHITE);
-    const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(WHITE, cfg.vcfDepth, cfg.radius));
-    const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(WHITE, cfg.vctDepth, cfg.radius);
-    const blackCounterVCF = !winsNow && !ownImmediate && !opponentForks.count
-      && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
-    const blackCounterVCT = !winsNow && !ownImmediate && !opponentForks.count && !blackCounterVCF && cfg.vctDepth > 0
-      && searchVCTPressure(BLACK, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
+    const conn = localConnectivity(move.r, move.c, side);
+    const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(side, cfg.vcfDepth, cfg.radius));
+    const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(side, cfg.vctDepth, cfg.radius);
+    const opponentCounterVCF = !winsNow && !ownImmediate && !opponentForks.count
+      && searchVCF(opponent, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
+    const opponentCounterVCT = !winsNow && !ownImmediate && !opponentForks.count && !opponentCounterVCF && cfg.vctDepth > 0
+      && searchVCTPressure(opponent, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
     let safety = 'SAFE';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
     else if (opponentForks.count >= 1) safety = 'LOSING';
-    else if (blackCounterVCF || blackCounterVCT) safety = 'TACTICALLY_RISKY';
+    else if (opponentCounterVCF || opponentCounterVCT) safety = 'TACTICALLY_RISKY';
 
     const forcedRole = winsNow ? 'WIN_NOW'
       : forced === 'block' ? 'MUST_DEFEND'
@@ -1715,8 +1719,10 @@
       forkCreators: forks.count,
       vcf,
       vct,
-      blackCounterVCF,
-      blackCounterVCT,
+      blackCounterVCF: opponentCounterVCF,
+      blackCounterVCT: opponentCounterVCT,
+      opponentCounterVCF,
+      opponentCounterVCT,
       facts: {
         forced_role: forcedRole,
         tactical_safety: safety,
@@ -1728,8 +1734,8 @@
         opponent_fork_creator_points: opponentForks.points.length ? opponentForks.points.join(',') : 'NONE',
         vcf_status: vcf ? 'FORCED_SEQUENCE_FOUND' : 'NOT_FOUND',
         vct_status: vct ? 'PRESSURE_SEQUENCE_FOUND' : 'NOT_FOUND',
-        opponent_counter_vcf: blackCounterVCF ? 'FOUND' : 'NOT_FOUND',
-        opponent_counter_vct: blackCounterVCT ? 'PRESSURE_FOUND' : 'NOT_FOUND',
+        opponent_counter_vcf: opponentCounterVCF ? 'FOUND' : 'NOT_FOUND',
+        opponent_counter_vct: opponentCounterVCT ? 'PRESSURE_FOUND' : 'NOT_FOUND',
         connectivity: connectionLabel(conn.allies),
         centrality: Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7)) <= 3 ? 'CENTRAL' : 'OUTER'
       }
@@ -1758,25 +1764,27 @@
 
   function buildAdvancedCandidates(mode) {
     const cfg = advancedEngineConfig(mode);
-    const whiteWins = immediateWins(WHITE, cfg.radius);
-    const blackWins = immediateWins(BLACK, cfg.radius);
+    const side = aiColor();
+    const opponent = otherColor(side);
+    const ownWins = immediateWins(side, cfg.radius);
+    const opponentWins = immediateWins(opponent, cfg.radius);
     let forced = null;
     let roots;
-    if (whiteWins.length) {
+    if (ownWins.length) {
       forced = 'win';
-      roots = whiteWins;
-    } else if (blackWins.length) {
+      roots = ownWins;
+    } else if (opponentWins.length) {
       forced = 'block';
-      roots = blackWins;
+      roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
     } else {
-      const blackForks = moves.length >= 16
-        ? countForkCreators(BLACK, Math.max(12, cfg.root), cfg.radius, 2)
+      const opponentForks = moves.length >= 16
+        ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
         : { count: 0, points: [], moves: [] };
-      if (blackForks.count === 1) {
+      if (opponentForks.count === 1) {
         forced = 'block_fork';
-        roots = blackForks.moves;
+        roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
       } else {
-        roots = orderedMoves(WHITE, cfg.root, cfg.radius);
+        roots = orderedMoves(side, cfg.root, cfg.radius);
       }
     }
 
