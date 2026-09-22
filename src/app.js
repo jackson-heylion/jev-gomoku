@@ -469,7 +469,7 @@
   }
 
   function openSettings(force = false) {
-    if (!force && gameStarted && moves.length > 0) {
+    if (!force && gameStarted) {
       toast('本局已开始。请点击“重开”后再修改棋色或禁手规则。', 3600);
       return;
     }
@@ -807,7 +807,7 @@
     const exactFive = hasExactFiveAt(r, c, BLACK);
     const overline = hasOverlineAt(r, c, BLACK);
 
-    if (exactFive || (!rules.overline && overline)) {
+    if (exactFive) {
       return { forbidden: false, type: null, winningFive: true, fourCount: 0, threeCount: 0 };
     }
     if (rules.overline && overline) {
@@ -819,14 +819,14 @@
       return { forbidden: true, type: 'FOUR_FOUR', winningFive: false, fourCount: fours.length, threeCount: 0 };
     }
     if (!rules.threeThree || depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
-      return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: 0 };
+      return { forbidden: false, type: null, winningFive: !rules.overline && overline, fourCount: fours.length, threeCount: 0 };
     }
 
     const threes = collectRealBlackThreesThrough(r, c, depth);
     if (threes.length >= 2) {
       return { forbidden: true, type: 'THREE_THREE', winningFive: false, fourCount: fours.length, threeCount: threes.length };
     }
-    return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: threes.length };
+    return { forbidden: false, type: null, winningFive: !rules.overline && overline, fourCount: fours.length, threeCount: threes.length };
   }
 
   function blackForbiddenInfo(r, c) {
