@@ -79,7 +79,7 @@
     localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
     settingsModal.classList.remove('show');
     updateApiState();
-    toast(settings.strengthMode === 'local' ? '已切换到本地引擎' : 'Jev 设置已保存');
+    toast(settings.strengthMode === 'local' ? '已切换到本地模式' : '对局设置已保存');
     if (current === WHITE && !thinking && !gameOver) setTimeout(jevTurn, 100);
   }
 
@@ -99,8 +99,8 @@
     testController = new AbortController();
     const timeout = setTimeout(() => testController?.abort(), 15000);
     testConnectionBtn.disabled = true;
-    testConnectionBtn.textContent = '检测中…';
-    setConnectionTest('busy', '正在通过同源 /api/jev 验证服务端 Jev 连接…');
+    testConnectionBtn.textContent = '检查中…';
+    setConnectionTest('busy', '正在检查 AI 服务…');
     const started = performance.now();
     const payload = {
       state: 'TypeSafe Jev API connection test from Jev Gomoku.',
@@ -133,17 +133,16 @@
       if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') {
         throw new Error('API 已响应，但返回结构不符合预期。');
       }
-      const actualModel = data?.model || model;
-      setConnectionTest('ok', `连接成功 · HTTP ${response.status} · ${elapsed} ms · ${actualModel}`);
+      setConnectionTest('ok', `AI 服务正常 · ${elapsed} ms`);
     } catch (err) {
       setConnectionTest('err', err?.name === 'AbortError'
-        ? '检测超时（15 秒）或已取消。'
-        : `${err?.httpStatus ? `HTTP ${err.httpStatus} · ` : ''}${friendlyError(err)}`);
+        ? '检查超时，请稍后重试。'
+        : friendlyError(err));
     } finally {
       clearTimeout(timeout);
       testController = null;
       testConnectionBtn.disabled = false;
-      testConnectionBtn.textContent = '检测连接';
+      testConnectionBtn.textContent = '检查 AI 状态';
     }
   }
 
@@ -155,13 +154,11 @@
 
     if (text) apiLabel.textContent = text;
     else {
-      const strengthLabel = settings.strengthMode === 'local' ? '本地引擎'
-        : settings.strengthMode === 'jev' ? '纯 Jev'
-        : settings.strengthMode === 'strong' ? '强力混合'
-        : '大师混合';
-      apiLabel.textContent = settings.strengthMode === 'local'
-        ? '本地引擎 · 0 次 Jev 请求'
-        : `${settings.model} · ${strengthLabel} · 同源服务端`;
+      const strengthLabel = settings.strengthMode === 'local' ? '本地模式'
+        : settings.strengthMode === 'jev' ? 'Jev 模式'
+        : settings.strengthMode === 'strong' ? '快速模式'
+        : '大师模式';
+      apiLabel.textContent = strengthLabel;
     }
   }
 
@@ -170,7 +167,7 @@
     strengthModeInput.value = settings.strengthMode || 'expert';
     clearConnectionTest();
     settingsModal.classList.add('show');
-    setTimeout(() => modelInput.focus(), 30);
+    setTimeout(() => strengthModeInput.focus(), 30);
   }
 
   function toast(msg, duration = 2600) {
@@ -314,10 +311,10 @@
   }
 
   function showResultModal(text, winner) {
-    const modeLabel = settings.strengthMode === 'local' ? '本地引擎'
-      : settings.strengthMode === 'jev' ? '纯 Jev'
-      : settings.strengthMode === 'strong' ? '强力混合'
-      : '大师混合';
+    const modeLabel = settings.strengthMode === 'local' ? '本地模式'
+      : settings.strengthMode === 'jev' ? 'Jev 模式'
+      : settings.strengthMode === 'strong' ? '快速模式'
+      : '大师模式';
 
     resultTitle.textContent = text;
     resultIcon.textContent = winner === BLACK ? '●' : winner === WHITE ? '○' : '＝';
@@ -1379,7 +1376,7 @@
       .slice(0, Math.min(context.cfg.tournament, candidates.length));
     const { payload, pairs } = buildBatchedDecisionPayload(context, tournament);
 
-    updateApiState('busy', `Jev 单次批量判断：${candidates.length} Atomic + ${pairs.length * 2} Pairwise…`);
+    updateApiState('busy', 'Jev 正在比较候选落点…');
     const data = await callJev(payload);
 
     for (const m of candidates) {
@@ -1483,8 +1480,8 @@
     canvas.classList.add('disabled');
     updateStatus();
     updateApiState('busy', settings.strengthMode !== 'local'
-      ? '本地引擎：Alpha-Beta + VCF/VCT…'
-      : '本地引擎计算中…');
+      ? 'AI 正在思考…'
+      : '本地引擎正在思考…');
     requestController = new AbortController();
 
     try {
@@ -1492,7 +1489,7 @@
       if (settings.strengthMode === 'local') {
         result = localOnlyDecision(settings.strengthMode === 'strong' ? 'strong' : 'expert');
       } else if (settings.strengthMode === 'jev') {
-        updateApiState('busy', '正在请求纯 Jev…');
+        updateApiState('busy', 'Jev 正在思考…');
         const decision = buildPureJevRequest();
         const data = await callJev(decision.payload);
         const answer = data?.answers?.best_move;
@@ -1568,8 +1565,8 @@
             return;
           }
           current = BLACK;
-          updateApiState('err', 'Jev 暂不可用 · 已降级本地引擎');
-          toast(`Jev 暂不可用，已用本地引擎继续：${msg}`, 5000);
+          updateApiState('err', 'AI 暂不可用 · 已切换本地模式');
+          toast('AI 服务暂不可用，本回合已由本地引擎继续。', 4200);
           return;
         } catch (fallbackErr) {
           console.error('local fallback failed', fallbackErr);
@@ -1577,10 +1574,10 @@
       }
 
       current = WHITE;
-      updateApiState('err', 'Jev 请求失败');
-      jevInfo.textContent = `请求失败：${msg}`;
+      updateApiState('err', 'AI 服务暂不可用');
+      jevInfo.textContent = `AI 服务暂不可用：${msg}`;
       retryBtn.style.display = 'inline-block';
-      toast(`Jev 请求失败：${msg}`, 5000);
+      toast('AI 服务暂不可用，请重试。', 4200);
     } finally {
       thinking = false;
       requestController = null;
@@ -1612,10 +1609,10 @@
   function buildHumanDecision(result, finalChoice) {
     const candidate = (result.candidates || []).find(m => m.key === finalChoice) || null;
     const f = candidate?.analysis?.facts || {};
-    const modeLabel = result.mode === 'local' ? '本地引擎'
-      : result.mode === 'jev' ? '纯 Jev'
-      : result.mode === 'strong' ? '强力混合'
-      : '大师混合';
+    const modeLabel = result.mode === 'local' ? '本地模式'
+      : result.mode === 'jev' ? 'Jev 模式'
+      : result.mode === 'strong' ? '快速模式'
+      : '大师模式';
 
     let verdict = '稳健选择';
     let reason = `综合局面后，白棋选择 ${finalChoice}，优先保持棋形和后续空间。`;
@@ -1694,10 +1691,10 @@
 
   function friendlyError(err) {
     const msg = String(err?.message || err || '未知错误');
-    if (err?.httpStatus === 429) return 'Jev 请求过于频繁（HTTP 429）。服务端已按 Retry-After / 指数退避重试，仍未恢复。';
-    if (err?.httpStatus === 529) return 'TypeSafe 暂时过载（HTTP 529）。服务端已按 Retry-After / 指数退避重试，仍未恢复。';
-    if (err?.httpStatus === 503 && /not configured|未配置/i.test(msg)) return '服务端未配置 Jev Secret。';
-    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return '无法访问同源 /api/jev；本回合将使用本地引擎。';
+    if (err?.httpStatus === 429) return 'AI 服务请求较多，请稍后重试。';
+    if (err?.httpStatus === 529) return 'AI 服务暂时繁忙，请稍后重试。';
+    if (err?.httpStatus === 503 && /not configured|未配置/i.test(msg)) return 'AI 服务暂未配置。';
+    if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return 'AI 服务暂时无法连接，本回合将使用本地引擎。';
     if (msg.length > 220) return msg.slice(0, 220) + '…';
     return msg;
   }
