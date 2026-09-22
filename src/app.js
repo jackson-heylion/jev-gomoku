@@ -998,20 +998,24 @@
     return score;
   }
 
-  function countForkCreators(color, limit = 10, radius = 2) {
+  function countForkCreators(color, limit = 10, radius = 2, maxCount = Infinity) {
     let count = 0;
     const points = [];
+    const movesFound = [];
     const candidates = orderedMoves(color, limit, radius);
     for (const m of candidates) {
       board[m.r][m.c] = color;
       const wins = isWin(m.r, m.c, color) ? 2 : immediateWins(color, radius).length;
+      const defenderImmediate = wins >= 2 ? immediateWins(otherColor(color), radius).length : 0;
       board[m.r][m.c] = EMPTY;
-      if (wins >= 2) {
+      if (wins >= 2 && defenderImmediate === 0) {
         count++;
         points.push(m.key);
+        movesFound.push({ r: m.r, c: m.c, key: m.key });
+        if (count >= maxCount) break;
       }
     }
-    return { count, points };
+    return { count, points, moves: movesFound };
   }
 
   function forcingExtensions(color, limit = 8, radius = 2) {
@@ -1196,22 +1200,28 @@
     const winsNow = isWin(move.r, move.c, WHITE);
     const ownImmediate = winsNow ? 2 : immediateWins(WHITE, cfg.radius).length;
     const oppImmediate = winsNow ? 0 : immediateWins(BLACK, cfg.radius).length;
-    const forks = winsNow ? {count: 0, points: []} : countForkCreators(WHITE, 10, cfg.radius);
+    const forks = winsNow ? {count: 0, points: [], moves: []} : countForkCreators(WHITE, 10, cfg.radius, 3);
+    const opponentForks = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
+      ? countForkCreators(BLACK, 12, cfg.radius, 2)
+      : { count: 0, points: [], moves: [] };
     const conn = localConnectivity(move.r, move.c, WHITE);
     const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(WHITE, cfg.vcfDepth, cfg.radius));
     const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(WHITE, cfg.vctDepth, cfg.radius);
-    const blackCounterVCF = !winsNow && !ownImmediate && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
-    const blackCounterVCT = !winsNow && !ownImmediate && !blackCounterVCF && cfg.vctDepth > 0
+    const blackCounterVCF = !winsNow && !ownImmediate && !opponentForks.count
+      && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
+    const blackCounterVCT = !winsNow && !ownImmediate && !opponentForks.count && !blackCounterVCF && cfg.vctDepth > 0
       && searchVCTPressure(BLACK, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
     let safety = 'SAFE';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
+    else if (opponentForks.count >= 1) safety = 'LOSING';
     else if (blackCounterVCF || blackCounterVCT) safety = 'TACTICALLY_RISKY';
 
     const forcedRole = winsNow ? 'WIN_NOW'
       : forced === 'block' ? 'MUST_DEFEND'
+      : forced === 'block_fork' ? 'MUST_DEFEND_FORK'
       : forced === 'win' ? 'WIN_NOW'
       : 'NORMAL';
     const attack = semanticThreatLabel(winsNow, ownImmediate, forks.count, vcf, vct);
@@ -1235,6 +1245,8 @@
         initiative,
         own_immediate_winning_points_after_move: countLabel(ownImmediate),
         opponent_immediate_winning_points_after_move: countLabel(oppImmediate),
+        opponent_fork_creators_after_move: countLabel(opponentForks.count),
+        opponent_fork_creator_points: opponentForks.points.length ? opponentForks.points.join(',') : 'NONE',
         vcf_status: vcf ? 'FORCED_SEQUENCE_FOUND' : 'NOT_FOUND',
         vct_status: vct ? 'PRESSURE_SEQUENCE_FOUND' : 'NOT_FOUND',
         opponent_counter_vcf: blackCounterVCF ? 'FOUND' : 'NOT_FOUND',
@@ -1251,9 +1263,23 @@
     const blackWins = immediateWins(BLACK, cfg.radius);
     let forced = null;
     let roots;
-    if (whiteWins.length) { forced = 'win'; roots = whiteWins; }
-    else if (blackWins.length) { forced = 'block'; roots = blackWins; }
-    else roots = orderedMoves(WHITE, cfg.root, cfg.radius);
+    if (whiteWins.length) {
+      forced = 'win';
+      roots = whiteWins;
+    } else if (blackWins.length) {
+      forced = 'block';
+      roots = blackWins;
+    } else {
+      const blackForks = moves.length >= 16
+        ? countForkCreators(BLACK, Math.max(12, cfg.root), cfg.radius, 2)
+        : { count: 0, points: [], moves: [] };
+      if (blackForks.count === 1) {
+        forced = 'block_fork';
+        roots = blackForks.moves;
+      } else {
+        roots = orderedMoves(WHITE, cfg.root, cfg.radius);
+      }
+    }
 
     const cache = new Map();
     const scored = roots.map(m => ({ ...m, searchScore: scoreRootMove(m, cfg, cache) }))
@@ -1624,7 +1650,7 @@
     }
 
     const id = ++deepWorkerSequence;
-    const timeBudgetMs = mode === 'expert' ? 2200 : 1400;
+    const timeBudgetMs = mode === 'expert' ? 1500 : 1000;
     const maxDepth = mode === 'expert' ? 7 : 5;
     const branch = mode === 'expert' ? 7 : 6;
 
@@ -1714,7 +1740,9 @@
     if (localChoice?.analysis?.winsNow || localChoice?.analysis?.vcf) return false;
     const facts = localChoice?.analysis?.facts || {};
     return facts.initiative === 'FORCING'
-      || facts.tactical_safety === 'TACTICALLY_RISKY'
+      || facts.tactical_safety !== 'SAFE'
+      || facts.opponent_fork_creators_after_move === 'ONE'
+      || facts.opponent_fork_creators_after_move === 'MULTIPLE'
       || facts.attack_shape === 'FOUR_PLUS_FOLLOWUP'
       || facts.attack_shape === 'MULTIPLE_OPEN_THREE_PRESSURE';
   }
