@@ -4,6 +4,8 @@
   const CACHE_PREFIX = 'jev_gomoku_jev_cache_v2:';
   const MAX_ATTEMPTS = 3;
   const RETRYABLE = new Set([429, 529]);
+  const TYPESAFE_SDK_URL = 'https://esm.sh/@typesafe-ai/sdk@0.6.0?bundle';
+  let sdkModulePromise = null;
 
   function hash(text) {
     let h = 2166136261 >>> 0;
@@ -67,16 +69,57 @@
     });
   }
 
-  async function request({ endpoint, apiKey, payload, signal, useCache = true }) {
-    if (!endpoint) throw new Error('缺少 Jev Endpoint');
-    if (!apiKey) throw new Error('缺少 Jev API Key');
-
-    const key = cacheKey(endpoint, payload);
-    if (useCache) {
-      const cached = readCache(key);
-      if (cached) return cached;
+  function isOfficialSystemOneEndpoint(endpoint) {
+    try {
+      const url = new URL(endpoint);
+      return url.origin === 'https://api.typesafe.ai'
+        && url.pathname.replace(/\/+$/, '') === '/v1/systemone';
+    } catch (_) {
+      return false;
     }
+  }
 
+  async function loadTypeSafeSdk() {
+    if (!sdkModulePromise) {
+      sdkModulePromise = import(TYPESAFE_SDK_URL);
+    }
+    return sdkModulePromise;
+  }
+
+  async function requestViaBrowserSdk({ apiKey, payload, signal }) {
+    const { TypeSafeClient } = await loadTypeSafeSdk();
+
+    const client = new TypeSafeClient({
+      apiKey,
+      baseURL: 'https://api.typesafe.ai',
+      dangerouslyAllowBrowser: true,
+      // Keep SDK retry semantics explicit: initial request + 2 retries.
+      // Official defaults also retry 408, 429 and 5xx, and respect Retry-After.
+      retry: {
+        maxRetries: 2
+      },
+      fetch: (input, init = {}) => fetch(input, {
+        ...init,
+        signal: init.signal || signal
+      })
+    });
+
+    try {
+      const result = await client.systemOne(payload);
+      result.__client = {
+        attempts: 1,
+        cached: false,
+        transport: 'typesafe-sdk-browser',
+        dangerouslyAllowBrowser: true
+      };
+      return result;
+    } catch (err) {
+      if (Number.isFinite(err?.status)) err.httpStatus = err.status;
+      throw err;
+    }
+  }
+
+  async function requestViaFetch({ endpoint, apiKey, payload, signal }) {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -95,7 +138,6 @@
       if (response.ok) {
         const result = data || {};
         result.__client = { attempts: attempt + 1, cached: false };
-        if (useCache) writeCache(key, result);
         return result;
       }
 
@@ -112,6 +154,24 @@
     }
 
     throw new Error('Jev request failed after retries');
+  }
+
+  async function request({ endpoint, apiKey, payload, signal, useCache = true }) {
+    if (!endpoint) throw new Error('缺少 Jev Endpoint');
+    if (!apiKey) throw new Error('缺少 Jev API Key');
+
+    const key = cacheKey(endpoint, payload);
+    if (useCache) {
+      const cached = readCache(key);
+      if (cached) return cached;
+    }
+
+    const result = isOfficialSystemOneEndpoint(endpoint)
+      ? await requestViaBrowserSdk({ apiKey, payload, signal })
+      : await requestViaFetch({ endpoint, apiKey, payload, signal });
+
+    if (useCache) writeCache(key, result);
+    return result;
   }
 
   function clearCache() {
