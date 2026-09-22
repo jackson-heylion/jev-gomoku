@@ -1318,17 +1318,17 @@
   const ENGINE_PRESETS = {
     strong: {
       depth: 3, root: 10, branch: 7, semantic: 5, tournament: 3, radius: 2,
-      vcfDepth: 3, vctDepth: 1, localTimeMs: 900,
+      vcfDepth: 3, vctDepth: 1, localTimeMs: 900, localRootShare: .75,
       localWeight: .66, pairWeight: .24, atomicWeight: .10
     },
     expert: {
       depth: 5, root: 14, branch: 7, semantic: 6, tournament: 4, radius: 2,
-      vcfDepth: 4, vctDepth: 2, localTimeMs: 1800,
+      vcfDepth: 4, vctDepth: 2, localTimeMs: 2200, localRootShare: .80,
       localWeight: .62, pairWeight: .27, atomicWeight: .11
     },
     grandmaster: {
       depth: 4, root: 12, branch: 7, semantic: 6, tournament: 3, radius: 2,
-      vcfDepth: 4, vctDepth: 2, localTimeMs: 1200,
+      vcfDepth: 4, vctDepth: 2, localTimeMs: 2400, localRootShare: .85,
       localWeight: .62, pairWeight: .27, atomicWeight: .11
     }
   };
@@ -1338,11 +1338,13 @@
   function beginLocalSearchBudget(cfg) {
     const startedAt = performance.now();
     const budgetMs = Math.max(250, Number(cfg.localTimeMs) || 1200);
+    const rootShare = Math.max(.50, Math.min(.90, Number(cfg.localRootShare) || .75));
     const runtime = {
       startedAt,
       budgetMs,
+      rootShare,
       deadline: startedAt + budgetMs,
-      phaseDeadline: startedAt + Math.max(150, budgetMs * .70),
+      phaseDeadline: startedAt + Math.max(150, budgetMs * rootShare),
       timedOut: false,
       rootTimedOut: false,
       phase: 'root',
@@ -1381,6 +1383,7 @@
     const elapsedMs = Math.round(performance.now() - runtime.startedAt);
     const result = {
       budgetMs: runtime.budgetMs,
+      rootShare: runtime.rootShare,
       elapsedMs,
       timedOut: runtime.timedOut || elapsedMs >= runtime.budgetMs,
       rootTimedOut: runtime.rootTimedOut,
