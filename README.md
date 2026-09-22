@@ -31,12 +31,17 @@ FINAL MOVE
 - Alpha-Beta 搜索
 - VCF / VCT 威胁判断
 - 立即取胜 / 必防 / fork 防守 / Renju 禁手过滤
-- 本地、Jev 最终决策、纯 Jev 多种模式
+- 本地、快速、大师、宗师（Alpha-Beta + Threat-space Search 并行）与纯 Jev 多种模式
 - 可选的离线 Deep Worker 深搜证据
+- 宗师模式：Deep Search 与强制威胁证明双 Worker 并行；证据一致时 0 次 Jev，分歧时最多 1 次 Jev
 - Jev 失败时自动降级到本地引擎
 - 对局结束胜负弹窗
 - 一键复制完整棋谱与 AI 决策记录
 - ChatGPT Sites / Cloudflare Worker 同源部署
+
+## 宗师模式
+
+宗师模式不引入 MCTS。它把同步根搜索控制在较轻预算内，再并行运行两路有界后台证据：常规 Deep Alpha-Beta 与 Threat-space 强制威胁证明。若威胁搜索证明某候选会遭遇对手强制胜，则优先过滤该候选；若 Local、Deep 与威胁证据收敛，则直接落子，只有存在分歧或证据不足时才调用 Jev 裁决。
 
 ## Jev 架构
 
