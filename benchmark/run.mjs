@@ -544,7 +544,7 @@ function generateRecommendations(summary, seedCount) {
     recommendations.push({
       priority: 'P0',
       title: 'Jev 有分歧但最终从不改变落点',
-      detail: 'Hybrid 中 Jev 已经与 Local 出现分歧，但融合结果没有一次真正改写 Local。优先把 Jev 改成 challenger：只有发生分歧时，对 Local 首选与 Jev 首选做更深一轮确定性验证，再决定是否改手。'
+      detail: 'Hybrid 中 Jev 已经与 Local 出现分歧，但没有真正改写 Local。检查 Jev 最终决策请求是否收到完整的 Local/深搜证据，以及候选集是否过窄或被过度过滤。'
     });
   }
 
@@ -576,7 +576,7 @@ function generateRecommendations(summary, seedCount) {
     recommendations.push({
       priority: 'P1',
       title: '先收紧 Jev 对 Local 的改写权限',
-      detail: '交换黑白后 Hybrid 对 Local 的得分率低于 50%。建议保留 Local 作为主线，Jev 只提出 challenger，再由更深搜索确认；不要直接提高 Jev 融合权重。'
+      detail: '交换黑白后 Hybrid 对 Local 的得分率低于 50%。优先检查候选过滤质量、深搜证据质量和 Jev 最终决策提示，不要退回简单加权融合。'
     });
   } else if (hybridVsLocal != null && hybridVsLocal > 0.55) {
     recommendations.push({
