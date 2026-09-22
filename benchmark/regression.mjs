@@ -96,5 +96,40 @@ async function testIndependentChallengerVerification() {
   }
 }
 
+async function testMustBlockOpponentForkCreator() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Fork-defense regression must be resolved locally without a Jev request');
+    }
+  });
+
+  const sequence = [
+    'H8', 'G7', 'G9', 'I7', 'H7', 'H6', 'J8', 'I5', 'F8', 'I8',
+    'I6', 'J4', 'K3', 'G5', 'H5', 'F4', 'E3', 'G4', 'G6', 'E4',
+    'D4', 'I4', 'H4', 'G1', 'C5', 'G2', 'G3'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const result = engine.local('expert');
+  console.log('fork-defense regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    forced: result.forced,
+    candidates: result.candidates?.map(candidate => ({
+      move: candidate.key,
+      safety: candidate.analysis?.facts?.tactical_safety,
+      opponentForks: candidate.analysis?.facts?.opponent_fork_creator_points
+    }))
+  }));
+
+  if (result.finalChoice !== 'B6') {
+    throw new Error('Expected mandatory fork defense B6, got ' + result.finalChoice);
+  }
+  if (result.forced !== 'block_fork') {
+    throw new Error('Expected forced=block_fork, got ' + result.forced);
+  }
+}
+
 await testIndependentChallengerVerification();
+await testMustBlockOpponentForkCreator();
 console.log('Engine regression tests passed.');
