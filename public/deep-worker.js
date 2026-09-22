@@ -567,11 +567,196 @@ function runSearch(message) {
   };
 }
 
+function forcingProofKey(attacker, turns) {
+  return 'TS:' + attacker + ':' + turns + ':' + hashA + ':' + hashB;
+}
+
+function proveForcingWin(attacker, turns, branch, radius, memo) {
+  assertTime();
+  const defender = otherColor(attacker);
+
+  const winsNow = immediateWins(attacker, radius);
+  if (winsNow.length) {
+    return {
+      forced: true,
+      attackerTurns: 1,
+      line: [winsNow[0].key],
+      reason: 'immediate_win'
+    };
+  }
+  if (turns <= 0) return { forced: false, attackerTurns: null, line: [], reason: 'depth_limit' };
+
+  // A forcing proof is conservative: if the defender already has a direct win,
+  // this attacker line is not considered forced.
+  if (immediateWins(defender, radius).length) {
+    return { forced: false, attackerTurns: null, line: [], reason: 'defender_immediate_win' };
+  }
+
+  const key = forcingProofKey(attacker, turns);
+  const cached = memo.get(key);
+  if (cached) return cached;
+
+  const candidates = orderedMoves(attacker, branch, radius);
+  for (const move of candidates) {
+    assertTime();
+    playMove(move, attacker);
+    let result = null;
+    try {
+      if (isWin(move.r, move.c, attacker)) {
+        result = {
+          forced: true,
+          attackerTurns: 1,
+          line: [move.key],
+          reason: 'winning_move'
+        };
+      } else if (immediateWins(defender, radius).length) {
+        result = null;
+      } else {
+        const threats = immediateWins(attacker, radius);
+        if (threats.length >= 2) {
+          result = {
+            forced: true,
+            attackerTurns: 2,
+            line: [move.key],
+            reason: 'double_winning_points'
+          };
+        } else if (threats.length === 1) {
+          const block = threats[0];
+          if (!isLegalMoveForColor(block.r, block.c, defender)) {
+            result = {
+              forced: true,
+              attackerTurns: 2,
+              line: [move.key],
+              reason: 'unblockable_threat'
+            };
+          } else {
+            playMove(block, defender);
+            try {
+              if (!isWin(block.r, block.c, defender)) {
+                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo);
+                if (child.forced) {
+                  result = {
+                    forced: true,
+                    attackerTurns: 1 + (child.attackerTurns || 0),
+                    line: [move.key, block.key, ...child.line],
+                    reason: 'forced_reply_chain'
+                  };
+                }
+              }
+            } finally {
+              undoMove(block, defender);
+            }
+          }
+        }
+      }
+    } finally {
+      undoMove(move, attacker);
+    }
+
+    if (result?.forced) {
+      memo.set(key, result);
+      return result;
+    }
+  }
+
+  const miss = { forced: false, attackerTurns: null, line: [], reason: 'not_proven' };
+  memo.set(key, miss);
+  return miss;
+}
+
+function runThreatSearch(message) {
+  board = message.board.map(row => row.slice());
+  rootSide = message.side === BLACK ? BLACK : WHITE;
+  opponentSide = otherColor(rootSide);
+  nodes = 0;
+  initializeHash();
+
+  const candidates = (message.candidates || [])
+    .map(coordToPoint)
+    .filter(Boolean)
+    .filter(move => board[move.r]?.[move.c] === EMPTY);
+
+  if (!candidates.length) throw new Error('No legal threat-search candidates');
+
+  const started = performance.now();
+  const budgetMs = Math.max(250, Math.min(4000, Number(message.timeBudgetMs) || 1200));
+  const maxThreatTurns = Math.max(2, Math.min(8, Number(message.maxThreatTurns) || 6));
+  const branch = Math.max(4, Math.min(10, Number(message.branch) || 8));
+  const radius = 2;
+  const sliceMs = Math.max(120, Math.floor(budgetMs / candidates.length));
+
+  const analyses = [];
+  let anyTimedOut = false;
+
+  for (let index = 0; index < candidates.length; index++) {
+    const move = candidates[index];
+    const remainingBudget = Math.max(0, budgetMs - (performance.now() - started));
+    if (remainingBudget <= 0) {
+      analyses.push({
+        move: move.key,
+        forced: false,
+        timedOut: true,
+        attackerTurns: null,
+        line: [],
+        reason: 'budget_exhausted'
+      });
+      anyTimedOut = true;
+      continue;
+    }
+
+    deadline = performance.now() + Math.min(sliceMs, remainingBudget);
+    let timedOut = false;
+    let proof = { forced: false, attackerTurns: null, line: [], reason: 'not_proven' };
+
+    playMove(move, rootSide);
+    try {
+      if (!isWin(move.r, move.c, rootSide)) {
+        const memo = new Map();
+        proof = proveForcingWin(opponentSide, maxThreatTurns, branch, radius, memo);
+      }
+    } catch (error) {
+      if (error !== TIMEOUT) throw error;
+      timedOut = true;
+      anyTimedOut = true;
+    } finally {
+      undoMove(move, rootSide);
+    }
+
+    analyses.push({
+      move: move.key,
+      forced: Boolean(proof.forced),
+      timedOut,
+      attackerTurns: proof.attackerTurns ?? null,
+      line: Array.isArray(proof.line) ? proof.line : [],
+      reason: timedOut ? 'timeout' : proof.reason
+    });
+  }
+
+  // This engine only claims preference when it can prove a candidate loses.
+  // Otherwise preserve root order instead of inventing a heuristic ranking.
+  const safe = analyses.find(item => !item.forced && !item.timedOut)
+    || analyses.find(item => !item.forced)
+    || analyses[0];
+
+  return {
+    status: 'completed',
+    source: 'threat-worker',
+    winner: safe?.move || candidates[0].key,
+    analyses,
+    timedOut: anyTimedOut,
+    nodes,
+    elapsedMs: Math.round(performance.now() - started),
+    budgetMs,
+    maxThreatTurns,
+    branch
+  };
+}
+
 self.onmessage = event => {
   const message = event.data || {};
   const id = message.id;
   try {
-    const result = runSearch(message);
+    const result = message.task === 'threat' ? runThreatSearch(message) : runSearch(message);
     self.postMessage({ id, ok: true, result });
   } catch (error) {
     self.postMessage({
