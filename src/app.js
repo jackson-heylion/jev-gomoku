@@ -2630,7 +2630,7 @@
   async function runThreatWorkerAnalysis(candidateMoves, mode, trigger = 'parallel_threat_evidence') {
     const uniqueMoves = [...new Map(
       (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
-    ).values()].slice(0, 4);
+    ).values()].slice(0, 6);
     if (!uniqueMoves.length) return null;
 
     // Do not run a heavy synchronous fallback on the UI thread. The new mode
@@ -2848,11 +2848,12 @@
       return deterministicGrandmasterResult(context, allCandidates, allCandidates[0].key, null, null, 'single_candidate');
     }
 
-    const workerCandidates = allCandidates.slice(0, Math.min(4, allCandidates.length));
+    const deepCandidates = allCandidates.slice(0, Math.min(4, allCandidates.length));
+    const threatCandidates = allCandidates.slice(0, Math.min(6, allCandidates.length));
     updateApiState('busy', '宗师模式：深搜与威胁空间搜索并行计算…');
     const [deepAnalysis, threatAnalysis] = await Promise.all([
-      runDeepWorkerVerification(workerCandidates, 'grandmaster', 'grandmaster_parallel'),
-      runThreatWorkerAnalysis(workerCandidates, 'grandmaster', 'grandmaster_parallel')
+      runDeepWorkerVerification(deepCandidates, 'grandmaster', 'grandmaster_parallel'),
+      runThreatWorkerAnalysis(threatCandidates, 'grandmaster', 'grandmaster_parallel')
     ]);
 
     const deepRows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
