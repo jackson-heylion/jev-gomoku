@@ -598,7 +598,8 @@
       client: result?.client ? { ...result.client } : null,
       fallbackReason: result?.fallbackReason || null,
       probabilities,
-      candidates
+      candidates,
+      trace: result?.decisionTrace ? JSON.parse(JSON.stringify(result.decisionTrace)) : null
     };
   }
 
@@ -643,6 +644,44 @@
         ].filter(Boolean).join('；');
         if (factText) lines.push(`      ${factText}`);
       });
+    }
+
+    if (d.trace?.atomic?.length) {
+      lines.push('  Jev Atomic 原始判断：');
+      d.trace.atomic.forEach(item => {
+        const probs = item.probabilities
+          ? Object.entries(item.probabilities)
+              .sort((a,b) => Number(b[1]) - Number(a[1]))
+              .map(([k,v]) => `${k} ${(Number(v) * 100).toFixed(1)}%`)
+              .join('，')
+          : '';
+        lines.push(`    ${item.move}: ${item.choice || '—'}${probs ? ` [${probs}]` : ''}`);
+      });
+    }
+
+    if (d.trace?.pairwise?.length) {
+      lines.push('  Jev Pairwise 对决：');
+      d.trace.pairwise.forEach(item => {
+        const probs = item.probabilities
+          ? Object.entries(item.probabilities)
+              .sort((a,b) => Number(b[1]) - Number(a[1]))
+              .map(([k,v]) => `${k} ${(Number(v) * 100).toFixed(1)}%`)
+              .join('，')
+          : '';
+        lines.push(`    ${item.left} vs ${item.right} -> ${item.choice || '—'}${probs ? ` [${probs}]` : ''}`);
+      });
+    }
+
+    if (d.trace?.pureJev) {
+      const p = d.trace.pureJev;
+      const probs = p.probabilities
+        ? Object.entries(p.probabilities)
+            .sort((a,b) => Number(b[1]) - Number(a[1]))
+            .slice(0, 12)
+            .map(([k,v]) => `${k} ${(Number(v) * 100).toFixed(1)}%`)
+            .join('，')
+        : '';
+      lines.push(`  纯 Jev：${p.choice || '—'}${probs ? ` [${probs}]` : ''}`);
     }
   }
 
@@ -1335,6 +1374,18 @@
     };
   }
 
+  function compactAnswer(answer) {
+    if (!answer || typeof answer !== 'object') return null;
+    const probabilities = answer.probabilities && typeof answer.probabilities === 'object'
+      ? Object.fromEntries(Object.entries(answer.probabilities).map(([k,v]) => [k, Number(v)]))
+      : null;
+    return {
+      choice: typeof answer.choice === 'string' ? answer.choice : null,
+      confidence: Number.isFinite(answer.confidence) ? answer.confidence : null,
+      probabilities
+    };
+  }
+
   function probabilityFor(answer, key) {
     const p = Number(answer?.probabilities?.[key]);
     if (Number.isFinite(p)) return Math.max(0, Math.min(1, p));
@@ -1403,6 +1454,19 @@
       model: 'local-engine',
       usage: null,
       client: null,
+      decisionTrace: {
+        local: {
+          engineMode,
+          forced: context.forced,
+          ranked: ranked.slice(0, 8).map(m => ({
+            move: m.key,
+            rank: m.rank,
+            searchScore: Number.isFinite(m.searchScore) ? m.searchScore : null,
+            finalScore: Number.isFinite(m.finalScore) ? m.finalScore : null,
+            facts: m.analysis?.facts || null
+          }))
+        }
+      },
       stageNote: '本地 Alpha-Beta + VCF/VCT（0 次 Jev 请求）'
     };
   }
@@ -1428,6 +1492,9 @@
         model: `${settings.model || 'jev-latest'} + local-forced`,
         usage: null,
         client: null,
+        decisionTrace: {
+          local: { reason: 'single_deterministic_forced_move', move: only.key }
+        },
         stageNote: '本地强制手（0 次 Jev 请求）'
       };
     }
@@ -1488,6 +1555,21 @@
       .sort((a,b) => (b.pairScore ?? 0) - (a.pairScore ?? 0))[0]?.key || final.key;
     const probabilities = softmaxProbabilities(ranked);
     const confidence = probabilities[final.key] ?? .5;
+    const atomicTrace = candidates.map(m => ({
+      move: m.key,
+      ...compactAnswer(data?.answers?.[`judge_${m.key}`])
+    }));
+    const pairwiseTrace = [];
+    for (const pair of pairs) {
+      for (const suffix of ['ab', 'ba']) {
+        const ans = compactAnswer(data?.answers?.[`duel_${pair.id}_${suffix}`]);
+        pairwiseTrace.push({
+          left: suffix === 'ab' ? pair.a : pair.b,
+          right: suffix === 'ab' ? pair.b : pair.a,
+          ...(ans || { choice: null, confidence: null, probabilities: null })
+        });
+      }
+    }
 
     return {
       answer: { choice: final.key, confidence, probabilities },
@@ -1499,6 +1581,24 @@
       model: data?.model || settings.model,
       usage: data?.usage || null,
       client: data?.__client || null,
+      decisionTrace: {
+        requestShape: {
+          atomicQuestions: candidates.length,
+          pairwiseQuestions: pairs.length * 2,
+          httpRequests: data?.__client?.cached ? 0 : (data?.__client?.attempts || 1)
+        },
+        atomic: atomicTrace,
+        pairwise: pairwiseTrace,
+        fusion: {
+          weights: {
+            local: context.cfg.localWeight,
+            atomic: context.cfg.atomicWeight,
+            pairwise: context.cfg.pairWeight
+          },
+          finalChoice: final.key,
+          jevSuggested
+        }
+      },
       stageNote: '单次批量：Atomic + 双向 Pairwise（每回合最多 1 次 Jev 请求）'
     };
   }
@@ -1538,6 +1638,13 @@
           model: data.model || settings.model,
           usage: data.usage || null,
           client: data?.__client || null,
+          decisionTrace: {
+            pureJev: compactAnswer(answer),
+            requestShape: {
+              legalChoices: decision.candidates.length,
+              httpRequests: data?.__client?.cached ? 0 : (data?.__client?.attempts || 1)
+            }
+          },
           stageNote: '纯 Jev（每回合 1 次请求）'
         };
       } else {
