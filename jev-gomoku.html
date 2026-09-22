@@ -44,7 +44,7 @@
           <canvas id="board" width="760" height="760" aria-label="15乘15五子棋棋盘"></canvas>
         </div>
         <div class="hint">
-          <span>点击交叉点落子。横、竖、斜任一方向连续 5 子即胜。</span>
+          <span>点击交叉点落子。你执黑：禁长连、三三、四四；黑棋恰好五连获胜，白棋五连及以上获胜。</span>
           <span id="lastMoveText">尚未落子</span>
         </div>
       </div>
@@ -74,7 +74,7 @@
             <span>Jev 上一步思考</span>
             <strong id="lastThinkDuration">—</strong>
           </div>
-          <div class="runtime-hint">遇到明确的必胜或必防手时，本地战术引擎会直接执行，不额外调用 Jev。</div>
+          <div class="runtime-hint">已启用黑棋禁手：长连、三三、四四不可落子；本地搜索与 Jev 候选分析使用同一规则。</div>
         </section>
 
         <section class="card jev-card">
