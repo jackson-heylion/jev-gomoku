@@ -70,7 +70,7 @@ async function testJevFinalDecisionAuthority() {
 
   const position = positionFromSequence(['G7']);
   engine.setPosition(position.board, position.moves, 'jev-latest');
-  const result = await engine.hybrid('strong');
+  const result = await engine.hybrid('expert');
 
   console.log('jev-final regression:', JSON.stringify({
     finalChoice: result.finalChoice,
@@ -93,6 +93,15 @@ async function testJevFinalDecisionAuthority() {
   }
   if (result.decisionTrace?.requestShape?.decisionAuthority !== 'jev_final') {
     throw new Error('Trace does not record Jev final decision authority');
+  }
+  if (result.decisionTrace?.requestShape?.localOpeningAdaptive !== true) {
+    throw new Error('Expert opening must use the adaptive shallow local profile');
+  }
+  if (result.decisionTrace?.requestShape?.deepSearchPolicy !== 'skip_opening') {
+    throw new Error('Expert opening must skip the extra pre-Jev deep worker');
+  }
+  if (result.decisionTrace?.preJevDeepSearch?.status !== 'skipped_opening') {
+    throw new Error('Expected pre-Jev deep search to be marked skipped_opening');
   }
   if (result.decisionTrace?.requestShape?.localEvidenceVisibleToJev !== true) {
     throw new Error('Trace does not confirm Local evidence is visible to Jev');
