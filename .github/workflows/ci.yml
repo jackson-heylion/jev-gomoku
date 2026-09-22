@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Check JavaScript syntax
+        run: |
+          node --check src/jev-client.js
+          node --check src/app.js
+          node --check jev-proxy.mjs
+      - name: Check static entrypoints
+        run: |
+          test -s index.html
+          test -s jev-gomoku.html
+          grep -q './assets/styles.css' index.html
+          grep -q './src/jev-client.js' index.html
+          grep -q './src/app.js' index.html
+          ! grep -q '<style>' index.html
