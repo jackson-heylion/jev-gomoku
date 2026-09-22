@@ -1277,8 +1277,28 @@
     };
   }
 
+  function advancedEngineConfig(mode) {
+    const base = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
+    if (mode === 'expert' && moves.length < 8) {
+      // The opening has the widest search tree and very little tactical
+      // information. Keep it shallow on the UI thread; Jev still owns the
+      // final move decision.
+      return {
+        ...base,
+        depth: 3,
+        root: Math.min(base.root, 10),
+        branch: Math.min(base.branch, 6),
+        semantic: Math.min(base.semantic, 5),
+        vcfDepth: Math.min(base.vcfDepth, 3),
+        vctDepth: Math.min(base.vctDepth, 1),
+        openingAdaptive: true
+      };
+    }
+    return { ...base, openingAdaptive: false };
+  }
+
   function buildAdvancedCandidates(mode) {
-    const cfg = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
+    const cfg = advancedEngineConfig(mode);
     const whiteWins = immediateWins(WHITE, cfg.radius);
     const blackWins = immediateWins(BLACK, cfg.radius);
     let forced = null;
@@ -1832,6 +1852,13 @@
     });
   }
 
+  function shouldRunPreJevDeepSearch(mode, candidates) {
+    if (mode !== 'expert' || candidates.length < 2) return false;
+    // Avoid launching a second expensive search while the board is still
+    // highly symmetric. This was the dominant crash path on the hosted page.
+    return moves.length >= 10;
+  }
+
   function shouldRunHorizonGuard(mode, candidates, localChoice) {
     if (mode !== 'expert' || moves.length < 12 || candidates.length < 2) return false;
     if (localChoice?.analysis?.winsNow || localChoice?.analysis?.vcf) return false;
@@ -1884,12 +1911,25 @@
 
     const localChoice = candidates[0];
 
-    updateApiState('busy', '本地深搜正在为 Jev 准备决策证据…');
-    const deepAnalysis = await runDeepWorkerVerification(
-      candidates,
-      mode,
-      'pre_jev_evidence'
-    );
+    let deepAnalysis;
+    if (shouldRunPreJevDeepSearch(mode, candidates)) {
+      updateApiState('busy', '本地深搜正在为 Jev 准备决策证据…');
+      deepAnalysis = await runDeepWorkerVerification(
+        candidates.slice(0, Math.min(4, candidates.length)),
+        mode,
+        'pre_jev_evidence'
+      );
+    } else {
+      deepAnalysis = {
+        status: 'skipped_opening',
+        source: 'policy',
+        depthReached: null,
+        scores: [],
+        timedOut: false,
+        elapsedMs: 0,
+        budgetMs: 0
+      };
+    }
 
     const deepRows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
     const deepByMove = new Map(deepRows.map((item, index) => [
@@ -1959,7 +1999,11 @@
           candidateCount: candidates.length,
           httpRequests: data?.__client?.cached ? 0 : (data?.__client?.attempts || 1),
           localEvidenceVisibleToJev: true,
-          decisionAuthority: 'jev_final'
+          decisionAuthority: 'jev_final',
+          localOpeningAdaptive: Boolean(context.cfg.openingAdaptive),
+          deepSearchPolicy: deepAnalysis?.status === 'skipped_opening'
+            ? 'skip_opening'
+            : 'pre_jev_worker'
         },
         preJevDeepSearch: deepAnalysis ? {
           status: deepAnalysis.status || null,
@@ -1980,7 +2024,7 @@
           facts: move.analysis?.facts || null
         }))
       },
-      stageNote: `Jev 最终决策：Local 提供 ${candidates.length} 个候选及搜索证据，Jev 最终选择 ${finalChoice}（每回合 1 次 Jev 请求）`
+      stageNote: `Jev 最终决策：Local 提供 ${candidates.length} 个候选${deepAnalysis?.status === 'skipped_opening' ? '（开局跳过额外深搜）' : '及深搜证据'}，Jev 最终选择 ${finalChoice}（每回合 1 次 Jev 请求）`
     };
   }
 
