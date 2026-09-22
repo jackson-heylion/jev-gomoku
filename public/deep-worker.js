@@ -553,11 +553,11 @@ function prioritizeCachedMove(candidates, key) {
 
 function forcingMoves(color, limit, radius) {
   const wins = immediateWins(color, radius);
-  if (wins.length) return wins.slice(0, limit);
+  if (wins.length) return { moves: wins.slice(0, limit), mandatory: true, reason: 'win' };
 
   const blocks = immediateWins(otherColor(color), radius)
     .filter(move => isLegalMoveForColor(move.r, move.c, color));
-  if (blocks.length) return blocks.slice(0, limit);
+  if (blocks.length) return { moves: blocks.slice(0, limit), mandatory: true, reason: 'block' };
 
   const candidates = orderedMoves(color, Math.max(limit * 2, 6), radius);
   const forcing = [];
@@ -574,9 +574,11 @@ function forcingMoves(color, limit, radius) {
       forcing.push({ ...move, threatScore: profile.score });
     }
   }
-  return forcing
-    .sort((a, b) => b.threatScore - a.threatScore)
-    .slice(0, limit);
+  return {
+    moves: forcing.sort((a, b) => b.threatScore - a.threatScore).slice(0, limit),
+    mandatory: false,
+    reason: 'shape'
+  };
 }
 
 function threatQuiescence(alpha, beta, toMove, remaining, branch, radius) {
@@ -584,14 +586,17 @@ function threatQuiescence(alpha, beta, toMove, remaining, branch, radius) {
   const standPat = evaluateStatic();
   if (remaining <= 0) return standPat;
 
-  const candidates = forcingMoves(toMove, Math.min(4, branch), radius);
+  const forcing = forcingMoves(toMove, Math.min(4, branch), radius);
+  const candidates = forcing.moves;
   if (!candidates.length) return standPat;
 
   const maximizing = toMove === rootSide;
-  let value = standPat;
-  if (maximizing) alpha = Math.max(alpha, value);
-  else beta = Math.min(beta, value);
-  if (beta <= alpha) return value;
+  let value = forcing.mandatory ? (maximizing ? -Infinity : Infinity) : standPat;
+  if (!forcing.mandatory) {
+    if (maximizing) alpha = Math.max(alpha, value);
+    else beta = Math.min(beta, value);
+    if (beta <= alpha) return value;
+  }
 
   for (const move of candidates) {
     assertTime();
