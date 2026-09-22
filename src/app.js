@@ -1231,7 +1231,7 @@
     for (const m of context.candidates) {
       questions[`judge_${m.key}`] = {
         type: 'choice',
-        instructions: `Judge candidate ${m.key} for WHITE using only candidate_facts.${m.key}. Do not reconstruct the board, count stones, or perform arithmetic. Deterministic code already handled geometry and tactical search.`,
+        instructions: `Judge candidate ${m.key} for WHITE by independently inspecting the board and candidate_facts.${m.key}. Candidate facts are deterministic hints but may be horizon-limited. If direct board tactics conflict with a heuristic fact, prefer the board evidence.`,
         criteria: {
           EXCELLENT: 'The supplied facts indicate a strategically preferred move with strong initiative and tactical safety.',
           GOOD: 'The move is sound and useful, but not clearly dominant.',
@@ -1243,9 +1243,14 @@
     }
     return {
       state: {
-        task: 'Gomoku candidate evaluation after deterministic tactical analysis.',
+        task: 'Independent Gomoku challenger evaluation after deterministic tactical analysis.',
         side: 'WHITE',
-        instruction: 'Treat supplied facts as ground truth. Do not infer board geometry. Priority: WIN_NOW > MUST_DEFEND > VCF_FORCED_SEQUENCE > tactical safety > forcing initiative > VCT pressure > connectivity.',
+        board_size: '15x15',
+        coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
+        board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+        last_move: moves.length ? moves[moves.length - 1].coord : null,
+        board_rows: boardRows(),
+        instruction: 'Independently inspect the board geometry as well as the supplied candidate facts. The facts are horizon-limited hints, not a ranking and not infallible. Priority: immediate win > mandatory defense > forced tactical sequences > safety > initiative > connectivity.',
         candidate_facts: candidateFactsMap(context.candidates)
       },
       model: settings.model || 'jev-latest',
@@ -1272,7 +1277,7 @@
     const pairs = [];
     let n = 0;
     const facts = candidateFactsMap(candidates);
-    const instruction = 'Choose the stronger move for WHITE using only the supplied deterministic semantic facts. Do not reconstruct the board. Priority: immediate win > mandatory defense > proven VCF > tactical safety > forcing initiative > VCT pressure > connectivity. Judge the moves independently; no Local ranking is provided.';
+    const instruction = 'Choose the stronger move for WHITE by independently checking the board and the supplied semantic facts. The facts may miss deeper horizon tactics. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. No Local ranking is provided.';
     for (let i = 0; i < candidates.length; i++) {
       for (let j = i + 1; j < candidates.length; j++) {
         const a = candidates[i].key, b = candidates[j].key;
@@ -1285,9 +1290,14 @@
     return {
       payload: {
         state: {
-          task: 'Pairwise Gomoku move tournament.',
+          task: 'Independent pairwise Gomoku move tournament.',
           side: 'WHITE',
-          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias.',
+          board_size: '15x15',
+          coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
+          board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+          last_move: moves.length ? moves[moves.length - 1].coord : null,
+          board_rows: boardRows(),
+          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias. Candidate facts contain no Local rank.',
           candidate_facts: facts
         },
         model: settings.model || 'jev-latest',
@@ -1492,6 +1502,111 @@
     };
   }
 
+  let deepWorkerSequence = 0;
+
+  async function runDeepWorkerVerification(candidateMoves, mode, trigger) {
+    const uniqueMoves = [...new Map(
+      (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
+    ).values()];
+    if (uniqueMoves.length < 2) return null;
+
+    // Benchmark/Node harnesses do not expose Worker. Keep the old synchronous
+    // verifier only there; browsers always use the isolated worker.
+    if (typeof Worker === 'undefined') {
+      const legacy = deepVerifyChallenger(uniqueMoves[0], uniqueMoves[1], mode);
+      return legacy ? {
+        ...legacy,
+        status: 'completed',
+        source: 'sync-test-fallback',
+        depthReached: legacy.config?.depth || null,
+        trigger,
+        timedOut: false
+      } : null;
+    }
+
+    const id = ++deepWorkerSequence;
+    const timeBudgetMs = mode === 'expert' ? 2200 : 1400;
+    const maxDepth = mode === 'expert' ? 7 : 5;
+    const branch = mode === 'expert' ? 7 : 6;
+
+    return await new Promise(resolve => {
+      let settled = false;
+      const worker = new Worker('/deep-worker.js', { type: 'module' });
+      const finish = result => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.terminate();
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        finish({
+          status: 'timeout',
+          source: 'web-worker',
+          trigger,
+          winner: uniqueMoves[0].key,
+          depthReached: null,
+          scores: [],
+          timedOut: true,
+          elapsedMs: timeBudgetMs,
+          budgetMs: timeBudgetMs
+        });
+      }, timeBudgetMs + 350);
+
+      worker.onmessage = event => {
+        const message = event.data || {};
+        if (message.id !== id) return;
+        if (!message.ok) {
+          finish({
+            status: 'error',
+            source: 'web-worker',
+            trigger,
+            winner: uniqueMoves[0].key,
+            error: message.error || 'deep worker failed',
+            timedOut: false
+          });
+          return;
+        }
+        finish({
+          ...(message.result || {}),
+          trigger
+        });
+      };
+
+      worker.onerror = event => {
+        finish({
+          status: 'error',
+          source: 'web-worker',
+          trigger,
+          winner: uniqueMoves[0].key,
+          error: event?.message || 'deep worker crashed',
+          timedOut: false
+        });
+      };
+
+      worker.postMessage({
+        id,
+        board: board.map(row => row.slice()),
+        side: WHITE,
+        candidates: uniqueMoves.map(move => move.key),
+        timeBudgetMs,
+        maxDepth,
+        branch
+      });
+    });
+  }
+
+  function shouldRunHorizonGuard(mode, candidates, localChoice) {
+    if (mode !== 'expert' || moves.length < 12 || candidates.length < 2) return false;
+    if (localChoice?.analysis?.winsNow || localChoice?.analysis?.vcf) return false;
+    const facts = localChoice?.analysis?.facts || {};
+    return facts.initiative === 'FORCING'
+      || facts.tactical_safety === 'TACTICALLY_RISKY'
+      || facts.attack_shape === 'FOUR_PLUS_FOLLOWUP'
+      || facts.attack_shape === 'MULTIPLE_OPEN_THREE_PRESSURE';
+  }
+
   async function advancedDecision(mode) {
     const context = buildAdvancedCandidates(mode);
     const candidates = context.candidates;
@@ -1579,13 +1694,31 @@
     const jevSuggested = jevSuggestedMove.key;
 
     let verification = null;
+    let verificationTrigger = null;
     let final = localChoice;
+
     if (jevSuggested !== localChoice.key) {
-      updateApiState('busy', `Jev 提出 ${jevSuggested}，正在深度复核…`);
-      verification = deepVerifyChallenger(localChoice, jevSuggestedMove, mode);
-      const verified = candidates.find(m => m.key === verification?.winner);
-      if (verified) final = verified;
+      verificationTrigger = 'jev_disagreement';
+      updateApiState('busy', `Jev 提出 ${jevSuggested}，正在后台深度复核…`);
+      verification = await runDeepWorkerVerification(
+        [localChoice, jevSuggestedMove],
+        mode,
+        verificationTrigger
+      );
+    } else if (shouldRunHorizonGuard(mode, candidates, localChoice)) {
+      verificationTrigger = 'horizon_guard';
+      updateApiState('busy', 'Jev 与 Local 一致，正在后台做战术复核…');
+      verification = await runDeepWorkerVerification(
+        candidates.slice(0, Math.min(4, candidates.length)),
+        mode,
+        verificationTrigger
+      );
     }
+
+    const verified = verification?.winner
+      ? candidates.find(m => m.key === verification.winner)
+      : null;
+    if (verified) final = verified;
 
     const ranked = [final, ...candidates.filter(m => m.key !== final.key)]
       .map((m, i) => ({ ...m, rank: i + 1 }));
@@ -1636,6 +1769,7 @@
           localChoice: localChoice.key,
           jevSuggested,
           disagreed: jevSuggested !== localChoice.key,
+          verificationTrigger,
           verification
         },
         fusionTelemetry: {
@@ -1648,8 +1782,8 @@
         }
       },
       stageNote: verification
-        ? `Jev Challenger：${jevSuggested} vs Local ${localChoice.key}，深度复核选择 ${final.key}`
-        : 'Jev Challenger 与 Local 一致'
+        ? `${verificationTrigger === 'horizon_guard' ? 'Horizon Guard' : 'Jev Challenger'}：Local ${localChoice.key} / Jev ${jevSuggested}，后台深搜选择 ${final.key}${verification.timedOut ? '（达到时间上限）' : ''}`
+        : 'Jev Challenger 与 Local 独立判断一致'
     };
   }
 
