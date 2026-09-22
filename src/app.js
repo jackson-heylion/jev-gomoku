@@ -518,6 +518,7 @@
       chosen: result?.finalChoice || result?.answer?.choice || '—',
       mode: result?.mode || 'unknown',
       forced: result?.forced || null,
+      localChoice: result?.localChoice || null,
       jevSuggested: result?.jevSuggested || null,
       stageNote: result?.stageNote || '',
       model: result?.model || '',
@@ -544,7 +545,17 @@
     lines.push(`  模式：${modeLabel}`);
     if (d.stageNote) lines.push(`  决策阶段：${d.stageNote}`);
     if (d.forced) lines.push(`  强制类型：${d.forced === 'win' ? '立即取胜' : d.forced === 'block' ? '必须防守' : d.forced}`);
+    if (d.localChoice) lines.push(`  Local 首选：${d.localChoice}`);
     if (d.jevSuggested) lines.push(`  Jev 建议：${d.jevSuggested}`);
+    if (d.trace?.challenger?.verification) {
+      const v = d.trace.challenger.verification;
+      lines.push(`  后台深搜：trigger=${d.trace.challenger.verificationTrigger || v.trigger || '—'}；source=${v.source || '—'}；status=${v.status || '—'}；depth=${v.depthReached ?? v.config?.depth ?? '—'}；elapsed=${v.elapsedMs ?? '—'}ms`);
+      if (Array.isArray(v.scores) && v.scores.length) {
+        lines.push(`    深搜评分：${v.scores.map(item => `${item.move}=${compactNumber(item.score, 1)}`).join('；')}`);
+      } else if (v.local && v.challenger) {
+        lines.push(`    Local=${v.local.move} ${compactNumber(v.local.searchScore, 1)}；Jev=${v.challenger.move} ${compactNumber(v.challenger.searchScore, 1)}`);
+      }
+    }
     if (d.model) lines.push(`  模型：${d.model}`);
     if (d.confidence != null) lines.push(`  最终置信度：${(d.confidence * 100).toFixed(1)}%`);
     if (d.usage) lines.push(`  Token：${d.usage.input_tokens ?? '?'} in / ${d.usage.output_tokens ?? '?'} out`);
@@ -1967,10 +1978,18 @@
       agreement = 'Jev 未介入：本地引擎发现了明确的必胜、必防或强制手。';
     } else if (result.mode === 'jev') {
       agreement = '这一手由 Jev 直接判断并选择。';
-    } else if (result.jevSuggested && result.jevSuggested !== finalChoice) {
-      agreement = `Jev 更偏向 ${result.jevSuggested}，最终结合本地搜索选择了 ${finalChoice}。`;
     } else {
-      agreement = 'Jev 与本地搜索意见一致。';
+      const challenger = result.decisionTrace?.challenger;
+      const verification = challenger?.verification;
+      if (challenger?.disagreed && verification) {
+        agreement = `Local 首选 ${result.localChoice || '—'}，Jev 独立提出 ${result.jevSuggested || '—'}；后台深搜最终选择 ${finalChoice}${verification.timedOut ? '，并在时间上限内返回' : ''}。`;
+      } else if (challenger?.verificationTrigger === 'horizon_guard' && verification) {
+        agreement = `Jev 与 Local 都倾向 ${result.localChoice || finalChoice}；系统额外在后台做了战术深搜复核，最终选择 ${finalChoice}${verification.timedOut ? '，并在时间上限内返回' : ''}。`;
+      } else if (result.jevSuggested && result.jevSuggested !== finalChoice) {
+        agreement = `Jev 更偏向 ${result.jevSuggested}，最终选择 ${finalChoice}。`;
+      } else {
+        agreement = 'Jev 与 Local 独立判断得到同一选择。';
+      }
     }
 
     return { verdict, reason, agreement, modeLabel };
@@ -1983,10 +2002,15 @@
     const human = buildHumanDecision(result, finalChoice);
 
     const jevParticipated = result.mode !== 'local' && !result.fallbackReason && !result.stageNote?.includes('0 次 Jev');
+    const challengerTrace = result.decisionTrace?.challenger;
     jevMove.textContent = finalChoice;
-    jevDecisionLabel.textContent = jevParticipated
-      ? `${human.modeLabel} · Jev 选择`
-      : '本地战术 · 白棋落在';
+    jevDecisionLabel.textContent = challengerTrace?.verificationTrigger === 'jev_disagreement'
+      ? `${human.modeLabel} · Jev 挑战裁决`
+      : challengerTrace?.verificationTrigger === 'horizon_guard'
+        ? `${human.modeLabel} · 后台战术复核`
+        : jevParticipated
+          ? `${human.modeLabel} · Jev 选择`
+          : '本地战术 · 白棋落在';
     jevVerdict.textContent = human.verdict;
     jevInfo.innerHTML = `<strong>${escapeHtml(human.reason)}</strong><span>${escapeHtml(human.agreement)}</span>`;
 
