@@ -296,3 +296,99 @@
   font-size: 11px;
   line-height: 1.55;
 }
+
+
+    /* Human-readable last decision */
+    .decision-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .decision-kicker {
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 2px;
+    }
+    .decision-badge {
+      flex: 0 0 auto;
+      border: 1px solid rgba(88,166,255,.28);
+      background: rgba(88,166,255,.09);
+      color: #a9d1ff;
+      border-radius: 999px;
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .decision-summary {
+      display: grid;
+      gap: 5px;
+      padding: 10px 11px;
+      border: 1px solid #283342;
+      border-radius: 10px;
+      background: #111820;
+      color: #c8d3df;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .decision-summary strong { color: #eef4fa; font-weight: 650; }
+    .decision-summary span { color: var(--muted); font-size: 11px; }
+    .alternatives-title {
+      margin-top: 13px;
+      color: #8d9aaa;
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .jev-card .alt { grid-template-columns: minmax(100px, 1fr) 72px 38px; }
+    .alt-copy { display: grid; min-width: 0; gap: 1px; }
+    .alt-copy strong { color: #dce5ee; font-size: 12px; }
+    .alt-copy span {
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* End-of-game result dialog */
+    .result-modal {
+      width: min(440px, 100%);
+      text-align: center;
+      padding: 26px 24px 22px;
+    }
+    .result-icon {
+      display: grid;
+      width: 58px;
+      height: 58px;
+      margin: 0 auto 13px;
+      place-items: center;
+      border-radius: 50%;
+      border: 1px solid #3a4654;
+      background: #101720;
+      font-size: 34px;
+      line-height: 1;
+    }
+    .result-icon.player-win { color: #111820; background: #dce5ee; }
+    .result-icon.ai-win { color: #f4f7fb; background: #2a3340; }
+    .result-icon.draw { color: #b8c4d1; }
+    .result-modal h2 { margin-bottom: 7px; font-size: 22px; }
+    .result-modal .result-desc { margin-bottom: 12px; font-size: 13px; }
+    .result-stats {
+      display: inline-block;
+      margin-bottom: 18px;
+      padding: 7px 10px;
+      border: 1px solid #2b3542;
+      border-radius: 999px;
+      background: #111820;
+      color: #9eabb9;
+      font-size: 11px;
+    }
+    .result-actions { justify-content: center; }
+
+    @media (max-width: 560px) {
+      .jev-card .alt { grid-template-columns: minmax(90px, 1fr) 54px 34px; }
+      .result-actions { display: grid; grid-template-columns: 1fr 1fr; }
+      .result-actions .primary { grid-column: 1 / -1; }
+    }
