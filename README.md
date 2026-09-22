@@ -80,6 +80,8 @@ TypeSafe 还明确推荐把多个独立问题放进一个请求；官方 Paralle
 - 每一步白方最终落点
 - 模式、模型、阶段、强制取胜 / 防守状态
 - Jev 最终概率与 confidence
+- Jev Atomic 每个候选的原始 choice / probabilities
+- Jev 双向 Pairwise 每场对决的原始 choice / probabilities
 - 本地候选排序
 - Atomic / Pairwise / 最终融合分数
 - VCF / VCT、战术安全、先手压力、连接性等确定性特征
