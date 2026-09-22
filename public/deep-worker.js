@@ -29,6 +29,53 @@ let rootSide;
 let opponentSide;
 let deadline;
 let nodes;
+let hashA = 0;
+let hashB = 0;
+const TT_MAX_ENTRIES = 60000;
+
+function mix32(value) {
+  let x = value >>> 0;
+  x ^= x >>> 16;
+  x = Math.imul(x, 0x7feb352d);
+  x ^= x >>> 15;
+  x = Math.imul(x, 0x846ca68b);
+  x ^= x >>> 16;
+  return x >>> 0;
+}
+
+function hashStone(r, c, color, salt) {
+  return mix32((((r * SIZE + c + 1) * 3 + color) ^ salt) >>> 0);
+}
+
+function toggleHash(r, c, color) {
+  hashA = (hashA ^ hashStone(r, c, color, 0x9e3779b9)) >>> 0;
+  hashB = (hashB ^ hashStone(r, c, color, 0x85ebca6b)) >>> 0;
+}
+
+function initializeHash() {
+  hashA = 0;
+  hashB = 0;
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const color = board[r][c];
+      if (color !== EMPTY) toggleHash(r, c, color);
+    }
+  }
+}
+
+function playMove(move, color) {
+  board[move.r][move.c] = color;
+  toggleHash(move.r, move.c, color);
+}
+
+function undoMove(move, color) {
+  toggleHash(move.r, move.c, color);
+  board[move.r][move.c] = EMPTY;
+}
+
+function cachePut(cache, key, entry) {
+  if (cache.size < TT_MAX_ENTRIES) cache.set(key, entry);
+}
 
 function otherColor(color) {
   return color === WHITE ? BLACK : WHITE;
@@ -125,9 +172,9 @@ function nearbyMoves(radius = 2) {
 
 function wouldWin(move, color) {
   if (board[move.r][move.c] !== EMPTY) return false;
-  board[move.r][move.c] = color;
+  playMove(move, color);
   const win = isWin(move.r, move.c, color);
-  board[move.r][move.c] = EMPTY;
+  undoMove(move, color);
   return win;
 }
 
@@ -157,7 +204,7 @@ function localConnectivity(r, c, color) {
 }
 
 function quickMoveScore(move, color) {
-  board[move.r][move.c] = color;
+  playMove(move, color);
   let score;
   if (isWin(move.r, move.c, color)) {
     score = MATE_SCORE;
@@ -167,7 +214,7 @@ function quickMoveScore(move, color) {
     const conn = localConnectivity(move.r, move.c, color);
     score = signedBase + conn.allies * 18 + conn.enemies * 5;
   }
-  board[move.r][move.c] = EMPTY;
+  undoMove(move, color);
   return score;
 }
 
@@ -190,9 +237,7 @@ function orderedMoves(color, limit, radius = 2) {
 }
 
 function boardKey(toMove, depth) {
-  let key = toMove + ':' + depth + ':';
-  for (let r = 0; r < SIZE; r++) key += board[r].join('');
-  return key;
+  return toMove + ':' + depth + ':' + hashA + ':' + hashB;
 }
 
 function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
@@ -200,17 +245,25 @@ function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
   if (depth <= 0) return evaluateStatic();
 
   const cacheKey = boardKey(toMove, depth);
+  const alphaStart = alpha;
+  const betaStart = beta;
   const cached = cache.get(cacheKey);
-  if (cached != null) return cached;
+  if (cached) {
+    if (cached.flag === 'EXACT') return cached.value;
+    if (cached.flag === 'LOWER') alpha = Math.max(alpha, cached.value);
+    else if (cached.flag === 'UPPER') beta = Math.min(beta, cached.value);
+    if (alpha >= beta) return cached.value;
+  }
 
   const immediate = immediateWins(toMove, radius);
   if (immediate.length) {
     const score = toMove === rootSide ? MATE_SCORE + depth : -MATE_SCORE - depth;
-    cache.set(cacheKey, score);
+    cachePut(cache, cacheKey, { value: score, flag: 'EXACT' });
     return score;
   }
 
-  const candidates = orderedMoves(toMove, branch, radius);
+  const localBranch = Math.max(4, branch - (depth <= 2 ? 2 : depth <= 4 ? 1 : 0));
+  const candidates = orderedMoves(toMove, localBranch, radius);
   if (!candidates.length) return evaluateStatic();
 
   const maximizing = toMove === rootSide;
@@ -218,14 +271,14 @@ function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
 
   for (const move of candidates) {
     assertTime();
-    board[move.r][move.c] = toMove;
+    playMove(move, toMove);
     let child;
     if (isWin(move.r, move.c, toMove)) {
       child = maximizing ? MATE_SCORE + depth : -MATE_SCORE - depth;
     } else {
       child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), branch, radius, cache);
     }
-    board[move.r][move.c] = EMPTY;
+    undoMove(move, toMove);
 
     if (maximizing) {
       value = Math.max(value, child);
@@ -237,7 +290,10 @@ function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache) {
     if (beta <= alpha) break;
   }
 
-  cache.set(cacheKey, value);
+  let flag = 'EXACT';
+  if (value <= alphaStart) flag = 'UPPER';
+  else if (value >= betaStart) flag = 'LOWER';
+  cachePut(cache, cacheKey, { value, flag });
   return value;
 }
 
@@ -245,7 +301,7 @@ function evaluateRootCandidate(move, depth, branch, radius, cache) {
   assertTime();
   if (!move || board[move.r]?.[move.c] !== EMPTY) return -Infinity;
 
-  board[move.r][move.c] = rootSide;
+  playMove(move, rootSide);
   let score;
   if (isWin(move.r, move.c, rootSide)) {
     score = MATE_SCORE * 10;
@@ -253,7 +309,7 @@ function evaluateRootCandidate(move, depth, branch, radius, cache) {
     score = alphaBeta(depth - 1, -Infinity, Infinity, opponentSide, branch, radius, cache);
     score += evaluateStatic() * .035;
   }
-  board[move.r][move.c] = EMPTY;
+  undoMove(move, rootSide);
   return score;
 }
 
@@ -262,6 +318,7 @@ function runSearch(message) {
   rootSide = message.side === BLACK ? BLACK : WHITE;
   opponentSide = otherColor(rootSide);
   nodes = 0;
+  initializeHash();
 
   const candidates = (message.candidates || [])
     .map(coordToPoint)
