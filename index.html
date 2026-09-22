@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
+  <meta name="description" content="Jev 五子棋：15×15 AI 对战，支持本地搜索与 Jev 混合决策。" />
   <title>Jev 五子棋</title>
   <link rel="stylesheet" href="./assets/styles.css" />
 </head>
@@ -14,13 +15,13 @@
         <div class="logo">J</div>
         <div>
           <h1>Jev 五子棋</h1>
-          <p>15×15 · 你执黑先手 · 本地 Alpha-Beta + VCF/VCT · Jev 可选增强</p>
+          <p>15×15 五子棋 · 你执黑先手 · 挑战 Jev AI</p>
         </div>
       </div>
       <div class="actions">
         <button class="btn" id="undoBtn" type="button">悔棋</button>
         <button class="btn" id="restartBtn" type="button">重开</button>
-        <button class="btn primary" id="settingsBtn" type="button"><span class="wide">Jev </span>设置</button>
+        <button class="btn primary" id="settingsBtn" type="button">对局设置</button>
       </div>
     </header>
 
@@ -40,16 +41,16 @@
       </div>
 
       <aside class="side">
-        <section class="card">
-          <h2 class="section-title">Jev API</h2>
+        <section class="card opponent-card">
+          <h2 class="section-title">AI 对手</h2>
           <div class="api-state">
             <div class="api-state-left">
               <span class="indicator" id="apiIndicator"></span>
-              <span class="api-label" id="apiLabel">同源服务端代理</span>
+              <span class="api-label" id="apiLabel">大师模式</span>
             </div>
-            <button class="btn" id="quickSettingsBtn" type="button" style="padding:6px 9px;min-height:30px;font-size:11px">配置</button>
+            <button class="btn compact-btn" id="quickSettingsBtn" type="button">切换模式</button>
           </div>
-          <div class="runtime-hint">浏览器只请求同源 <code>/api/jev</code>；TypeSafe API Key 仅存在服务端 Secret。上游失败时自动降级到本地 Alpha-Beta + VCF/VCT。</div>
+          <div class="runtime-hint">推荐使用大师模式。AI 服务暂不可用时，会自动切换到本地引擎继续对局。</div>
         </section>
 
         <section class="card jev-card">
@@ -85,25 +86,22 @@
 
   <div class="modal-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="modal">
-      <h2 id="settingsTitle">Jev 设置</h2>
-      <p class="desc">Jev 通过同源服务端 <code>POST /api/jev</code> 调用 TypeSafe。浏览器不会接触 API Key，也不会直接跨域请求 TypeSafe。</p>
+      <h2 id="settingsTitle">对局设置</h2>
+      <p class="desc">选择白棋的思考方式。第一次体验建议使用大师模式。</p>
+
+      <input id="model" type="hidden" value="jev-latest" />
 
       <div class="field">
-        <label for="model">Model</label>
-        <input id="model" type="text" value="jev-latest" spellcheck="false" />
-      </div>
-
-      <div class="field">
-        <label for="strengthMode">棋力模式</label>
+        <label for="strengthMode">AI 模式</label>
         <select id="strengthMode">
-          <option value="local">本地引擎（免费 / 0 次 Jev 请求）</option>
-          <option value="expert">大师混合（推荐：Alpha-Beta 5 层 + VCF/VCT + Jev 单次批量判断）</option>
-          <option value="strong">强力混合（Alpha-Beta 3 层 + 威胁搜索 + Jev 单次批量判断）</option>
-          <option value="jev">纯 Jev（实验：所有合法点直接交给 Jev）</option>
+          <option value="expert">大师模式（推荐）</option>
+          <option value="strong">快速模式（响应更快）</option>
+          <option value="local">本地模式（无需 AI 服务）</option>
+          <option value="jev">Jev 模式（实验）</option>
         </select>
       </div>
 
-      <div class="warning">TypeSafe Key 由服务端 Secret 提供；不会写入 HTML、浏览器 JavaScript、localStorage/sessionStorage 或日志。</div>
+      <div class="settings-note">大师模式会结合本地搜索与 Jev 判断；如果 AI 服务暂时不可用，会自动使用本地引擎继续对局。</div>
 
       <div class="connection-test" id="connectionTest" role="status" aria-live="polite">
         <span class="test-dot"></span>
@@ -111,7 +109,7 @@
       </div>
 
       <div class="modal-actions">
-        <button class="btn test-btn" id="testConnectionBtn" type="button">检测连接</button>
+        <button class="btn test-btn" id="testConnectionBtn" type="button">检查 AI 状态</button>
         <button class="btn" id="closeSettingsBtn" type="button">取消</button>
         <button class="btn primary" id="saveSettingsBtn" type="button">保存</button>
       </div>
