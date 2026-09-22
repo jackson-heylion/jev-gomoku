@@ -98,4 +98,4 @@ TypeSafe 还明确推荐把多个独立问题放进一个请求；官方 Paralle
 POST https://api.typesafe.ai/v1/systemone
 ```
 
-公开 GitHub Pages 页面只支持用户自行填写 Key，并且是否能浏览器直连取决于 TypeSafe 的 CORS 策略。不要把 API Key 提交到 GitHub、Workflow、Pages 文件或 JavaScript 常量中。
+公开 GitHub Pages 页面只支持用户自行填写 Key，并且是否能浏览器直连取决于 TypeSafe 的 CORS 策略。当前“浏览器直连”会使用官方 `@typesafe-ai/sdk@0.6.0`，并显式设置 `dangerouslyAllowBrowser: true` 进行实际验证；该选项只解除 SDK 对浏览器使用的保护，不会修改 TypeSafe 服务端的 CORS 响应。不要把 API Key 提交到 GitHub、Workflow、Pages 文件或 JavaScript 常量中。
