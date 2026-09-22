@@ -67,8 +67,8 @@
             <button class="btn compact-btn" id="quickSettingsBtn" type="button">切换等级</button>
           </div>
           <div class="level-meta">
-            <span class="level-badge" id="levelBadge">等级 3</span>
-            <span class="level-summary" id="levelSummary">棋力优先：更深的本地搜索 + Jev 判断，响应会稍慢。</span>
+            <span class="level-badge" id="levelBadge">等级 4</span>
+            <span class="level-summary" id="levelSummary">战术增强：Alpha-Beta 深搜与强制威胁搜索并行；证据分歧时再由 Jev 裁决。</span>
           </div>
           <div class="jev-time-row">
             <span>Jev 上一步思考</span>
@@ -115,13 +115,13 @@
 
       <input id="model" type="hidden" value="jev-latest" />
 
-      <input id="strengthMode" type="hidden" value="expert" />
+      <input id="strengthMode" type="hidden" value="grandmaster" />
 
       <div class="level-picker" role="radiogroup" aria-label="对局等级">
         <button class="level-option" type="button" data-mode="grandmaster" role="radio" aria-checked="false">
           <span class="level-option-head">
             <span class="level-option-title">等级 4 · Jev 宗师</span>
-            <span class="level-option-tag experiment">战术增强</span>
+            <span class="level-option-tag recommended">默认</span>
             <span class="level-option-current">✓ 当前选择</span>
           </span>
           <span class="level-option-desc">Alpha-Beta 深搜与 Threat-space Search 并行；证据一致时直接落子，分歧时才交给 Jev 裁决。</span>
@@ -130,7 +130,7 @@
         <button class="level-option" type="button" data-mode="expert" role="radio" aria-checked="false">
           <span class="level-option-head">
             <span class="level-option-title">等级 3 · Jev 大师</span>
-            <span class="level-option-tag recommended">推荐</span>
+            <span class="level-option-tag">稳定</span>
             <span class="level-option-current">✓ 当前选择</span>
           </span>
           <span class="level-option-desc">棋力优先。更深的本地搜索后，再交给 Jev 判断候选。</span>
@@ -169,7 +169,7 @@
         <div class="test-detail" id="connectionTestText"></div>
       </div>
 
-      <div class="selection-summary">当前选择：<strong id="currentLevelSummary">等级 3 · Jev 大师</strong></div>
+      <div class="selection-summary">当前选择：<strong id="currentLevelSummary">等级 4 · Jev 宗师</strong></div>
 
       <div class="modal-actions">
         <button class="btn test-btn" id="testConnectionBtn" type="button">检查 Jev 状态</button>
