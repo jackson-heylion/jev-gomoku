@@ -1096,4 +1096,242 @@
       let w = 0, b = 0;
       for (const [r, c] of seg) {
         if (board[r][c] === WHITE) w++;
-        else if (board[r][c] === BLACK)
+        else if (board[r][c] === BLACK) b++;
+      }
+      if (w && b) continue;
+      if (w) score += LINE_WEIGHTS[w];
+      else if (b) score -= LINE_WEIGHTS[b] * 1.16;
+    }
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] === EMPTY) continue;
+        const d = Math.max(Math.abs(r - 7), Math.abs(c - 7));
+        const bonus = Math.max(0, 8 - d) * .45;
+        score += board[r][c] === WHITE ? bonus : -bonus;
+      }
+    }
+    return score;
+  }
+
+  function nearbyMoves(radius = 2) {
+    let hasStone = false;
+    const set = new Set();
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] === EMPTY) continue;
+        hasStone = true;
+        for (let dr = -radius; dr <= radius; dr++) {
+          for (let dc = -radius; dc <= radius; dc++) {
+            if (!dr && !dc) continue;
+            const rr = r + dr, cc = c + dc;
+            if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE || board[rr][cc] !== EMPTY) continue;
+            set.add(rr * SIZE + cc);
+          }
+        }
+      }
+    }
+    if (!hasStone) return [{ r: 7, c: 7, key: 'H8' }];
+    return [...set].map(v => {
+      const r = Math.floor(v / SIZE), c = v % SIZE;
+      return { r, c, key: coord(r, c) };
+    });
+  }
+
+  function wouldWin(r, c, color) {
+    if (board[r][c] !== EMPTY) return false;
+    board[r][c] = color;
+    const yes = isWin(r, c, color);
+    board[r][c] = EMPTY;
+    return yes;
+  }
+
+  function immediateWins(color, radius = 2) {
+    return nearbyMoves(radius).filter(m => wouldWin(m.r, m.c, color));
+  }
+
+  function localConnectivity(r, c, color) {
+    let allies = 0, enemies = 0;
+    for (let dr = -2; dr <= 2; dr++) {
+      for (let dc = -2; dc <= 2; dc++) {
+        if (!dr && !dc) continue;
+        const rr = r + dr, cc = c + dc;
+        if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE) continue;
+        if (board[rr][cc] === color) allies += Math.abs(dr) <= 1 && Math.abs(dc) <= 1 ? 2 : 1;
+        else if (board[rr][cc] === otherColor(color)) enemies++;
+      }
+    }
+    return { allies, enemies };
+  }
+
+  function quickMoveScore(move, color) {
+    board[move.r][move.c] = color;
+    let score;
+    if (isWin(move.r, move.c, color)) {
+      score = MATE_SCORE;
+    } else {
+      const base = evaluateStatic();
+      const conn = localConnectivity(move.r, move.c, color);
+      score = (color === WHITE ? base : -base) + conn.allies * 18 + conn.enemies * 5;
+    }
+    board[move.r][move.c] = EMPTY;
+    return score;
+  }
+
+  function orderedMoves(color, limit, radius = 2) {
+    const wins = immediateWins(color, radius);
+    if (wins.length) return wins.map(m => ({ ...m, quick: MATE_SCORE })).slice(0, limit);
+    const blocks = immediateWins(otherColor(color), radius);
+    if (blocks.length) {
+      return blocks.map(m => ({ ...m, quick: quickMoveScore(m, color) }))
+        .sort((a,b) => b.quick - a.quick).slice(0, limit);
+    }
+    return nearbyMoves(radius)
+      .map(m => ({ ...m, quick: quickMoveScore(m, color) }))
+      .sort((a, b) => b.quick - a.quick)
+      .slice(0, limit);
+  }
+
+  function boardCacheKey(toMove, depth) {
+    let key = `${toMove}:${depth}:`;
+    for (let r = 0; r < SIZE; r++) key += board[r].join('');
+    return key;
+  }
+
+  function alphaBeta(depth, alpha, beta, toMove, cfg, cache) {
+    if (depth <= 0) return evaluateStatic();
+    const key = boardCacheKey(toMove, depth);
+    if (cache.has(key)) return cache.get(key);
+
+    const immediate = immediateWins(toMove, cfg.radius);
+    if (immediate.length) {
+      const score = toMove === WHITE ? MATE_SCORE + depth : -MATE_SCORE - depth;
+      cache.set(key, score);
+      return score;
+    }
+
+    const limit = Math.max(4, cfg.branch - Math.max(0, cfg.depth - depth - 1));
+    const candidates = orderedMoves(toMove, limit, cfg.radius);
+    if (!candidates.length) return evaluateStatic();
+
+    let value = toMove === WHITE ? -Infinity : Infinity;
+    for (const m of candidates) {
+      board[m.r][m.c] = toMove;
+      let child;
+      if (isWin(m.r, m.c, toMove)) {
+        child = toMove === WHITE ? MATE_SCORE + depth : -MATE_SCORE - depth;
+      } else {
+        child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), cfg, cache);
+      }
+      board[m.r][m.c] = EMPTY;
+
+      if (toMove === WHITE) {
+        if (child > value) value = child;
+        if (value > alpha) alpha = value;
+      } else {
+        if (child < value) value = child;
+        if (value < beta) beta = value;
+      }
+      if (beta <= alpha) break;
+    }
+    cache.set(key, value);
+    return value;
+  }
+
+  function scoreRootMove(move, cfg, cache) {
+    board[move.r][move.c] = WHITE;
+    let score;
+    if (isWin(move.r, move.c, WHITE)) {
+      score = MATE_SCORE * 10;
+    } else {
+      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, BLACK, cfg, cache);
+      score += evaluateStatic() * .035;
+    }
+    board[move.r][move.c] = EMPTY;
+    return score;
+  }
+
+  function countForkCreators(color, limit = 10, radius = 2) {
+    let count = 0;
+    const points = [];
+    const candidates = orderedMoves(color, limit, radius);
+    for (const m of candidates) {
+      board[m.r][m.c] = color;
+      const wins = isWin(m.r, m.c, color) ? 2 : immediateWins(color, radius).length;
+      board[m.r][m.c] = EMPTY;
+      if (wins >= 2) {
+        count++;
+        points.push(m.key);
+      }
+    }
+    return { count, points };
+  }
+
+  function forcingExtensions(color, limit = 8, radius = 2) {
+    const out = [];
+    for (const m of orderedMoves(color, limit * 2, radius)) {
+      board[m.r][m.c] = color;
+      const n = isWin(m.r, m.c, color) ? 2 : immediateWins(color, radius).length;
+      board[m.r][m.c] = EMPTY;
+      if (n >= 1) out.push({ ...m, force: n });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  // VCF: limited-depth continuous-four proof search. It only follows genuinely
+  // forced single-point blocks, so a positive result is much stronger than a
+  // heuristic static score.
+  function searchVCF(attacker, turns, radius = 2, memo = new Map()) {
+    if (turns <= 0) return false;
+    const defender = otherColor(attacker);
+    if (immediateWins(attacker, radius).length) return true;
+    if (immediateWins(defender, radius).length) return false;
+    const memoKey = `VCF:${attacker}:${turns}:${boardCacheKey(attacker, 0)}`;
+    if (memo.has(memoKey)) return memo.get(memoKey);
+
+    const candidates = orderedMoves(attacker, 8, radius);
+    for (const m of candidates) {
+      board[m.r][m.c] = attacker;
+      if (isWin(m.r, m.c, attacker)) {
+        board[m.r][m.c] = EMPTY;
+        memo.set(memoKey, true);
+        return true;
+      }
+      if (immediateWins(defender, radius).length) {
+        board[m.r][m.c] = EMPTY;
+        continue;
+      }
+      const threats = immediateWins(attacker, radius);
+      if (threats.length >= 2) {
+        board[m.r][m.c] = EMPTY;
+        memo.set(memoKey, true);
+        return true;
+      }
+      if (threats.length === 1) {
+        const d = threats[0];
+        board[d.r][d.c] = defender;
+        const forced = !isWin(d.r, d.c, defender) && searchVCF(attacker, turns - 1, radius, memo);
+        board[d.r][d.c] = EMPTY;
+        board[m.r][m.c] = EMPTY;
+        if (forced) {
+          memo.set(memoKey, true);
+          return true;
+        }
+        continue;
+      }
+      board[m.r][m.c] = EMPTY;
+    }
+    memo.set(memoKey, false);
+    return false;
+  }
+
+  // VCT pressure search: extends VCF with open-three style extension points.
+  // Because Gomoku VCT defence can be broad, this is intentionally exposed to
+  // Jev as VCT_PRESSURE_FOUND rather than as a mathematical proof.
+  function searchVCTPressure(attacker, turns, radius = 2, memo = new Map()) {
+    if (turns <= 0) return false;
+    if (searchVCF(attacker, Math.min(2, turns), radius, new Map())) return true;
+    const defender = otherColor(attacker);
+    if (immediateWins(defender, radius).length) return false;
+    const memoKey = `VCT:${attacker}:${turns}:${boardCacheKey(attacker, 0)}`;
+    if (memo.
