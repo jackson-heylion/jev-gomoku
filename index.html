@@ -839,4 +839,261 @@
     const margin = 46;
     const span = (canvas.width - margin * 2) / (SIZE - 1);
     const c = Math.round((x - margin) / span);
-    const r
+    const r = Math.round((y - margin) / span);
+    if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return null;
+    const px = margin + c * span, py = margin + r * span;
+    if (Math.hypot(x - px, y - py) > span * .46) return null;
+    return { r, c };
+  }
+
+  function place(r, c, color, source) {
+    if (board[r][c] !== EMPTY) return false;
+    board[r][c] = color;
+    moves.push({ r, c, color, source, coord: coord(r, c) });
+    drawBoard();
+    updateHistory();
+    updateStatus();
+    return true;
+  }
+
+  function onBoardClick(e) {
+    if (gameOver || thinking || current !== BLACK) return;
+    if (!settings.apiKey) {
+      openSettings();
+      toast('请先配置 Jev API Key');
+      return;
+    }
+    const p = pointFromEvent(e);
+    if (!p || board[p.r][p.c] !== EMPTY) return;
+
+    place(p.r, p.c, BLACK, '你');
+    if (isWin(p.r, p.c, BLACK)) {
+      finish('你赢了', BLACK);
+      return;
+    }
+    if (moves.length === SIZE * SIZE) {
+      finish('平局', EMPTY);
+      return;
+    }
+    current = WHITE;
+    updateStatus();
+    setTimeout(jevTurn, 220);
+  }
+
+  function isWin(r, c, color) {
+    const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+    return dirs.some(([dr,dc]) => {
+      let n = 1;
+      for (const s of [-1, 1]) {
+        let rr = r + dr*s, cc = c + dc*s;
+        while (rr >= 0 && rr < SIZE && cc >= 0 && cc < SIZE && board[rr][cc] === color) {
+          n++; rr += dr*s; cc += dc*s;
+        }
+      }
+      return n >= 5;
+    });
+  }
+
+  function finish(text, winner) {
+    gameResult = { text, winner, endedAt: new Date() };
+    gameOver = true;
+    thinking = false;
+    canvas.classList.remove('disabled');
+    const cls = winner === BLACK ? 'black' : 'white';
+    turnText.innerHTML = winner === EMPTY
+      ? `<span>对局结束：${text}</span>`
+      : `<span class="stone-dot ${cls}"></span><span>对局结束：${text}</span>`;
+    gameMeta.textContent = `共 ${moves.length} 手`;
+    toast(text, 3500);
+  }
+
+  function restart() {
+    if (requestController) requestController.abort();
+    requestController = null;
+    board = makeBoard();
+    current = BLACK;
+    moves = [];
+    gameOver = false;
+    thinking = false;
+    lastJev = null;
+    gameResult = null;
+    gameStartedAt = new Date();
+    canvas.classList.remove('disabled');
+    jevMove.textContent = '—';
+    jevInfo.textContent = '等待 Jev 落子';
+    confidenceBar.style.width = '0%';
+    confidenceText.textContent = '—';
+    alternatives.innerHTML = '';
+    retryBtn.style.display = 'none';
+    drawBoard(); updateHistory(); updateStatus(); updateApiState();
+  }
+
+  function undo() {
+    if (thinking) { toast('Jev 正在思考，暂时不能悔棋'); return; }
+    if (!moves.length) return;
+    if (gameOver) gameOver = false;
+    gameResult = null;
+
+    let remove = current === BLACK ? 2 : 1;
+    remove = Math.min(remove, moves.length);
+    for (let i = 0; i < remove; i++) {
+      const m = moves.pop();
+      board[m.r][m.c] = EMPTY;
+    }
+    current = BLACK;
+    lastJev = null;
+    jevMove.textContent = '—';
+    jevInfo.textContent = '已悔棋，等待下一次 Jev 判断';
+    confidenceBar.style.width = '0%';
+    confidenceText.textContent = '—';
+    alternatives.innerHTML = '';
+    retryBtn.style.display = 'none';
+    drawBoard(); updateHistory(); updateStatus();
+  }
+
+  function updateStatus() {
+    if (gameOver) return;
+    const nextNo = moves.length + 1;
+    if (thinking) {
+      turnText.innerHTML = `<span class="stone-dot white"></span><span class="thinking">Jev 正在选择落点</span>`;
+      gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
+    } else if (current === BLACK) {
+      turnText.innerHTML = `<span class="stone-dot black"></span><span>你的回合</span>`;
+      gameMeta.textContent = `第 ${nextNo} 手 · 黑棋`;
+    } else {
+      turnText.innerHTML = `<span class="stone-dot white"></span><span>Jev 的回合</span>`;
+      gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
+    }
+    lastMoveText.textContent = moves.length ? `最后落子：${moves[moves.length - 1].coord}` : '尚未落子';
+  }
+
+  function updateHistory() {
+    if (!moves.length) {
+      historyEl.innerHTML = '<div class="empty">对局开始后，这里会记录每一步坐标。</div>';
+      return;
+    }
+    historyEl.innerHTML = moves.map((m, i) => `
+      <div class="move">
+        <span class="n">${i + 1}</span>
+        <span class="mini-stone ${m.color === BLACK ? 'black' : 'white'}"></span>
+        <span class="coord">${m.coord}</span>
+        <span class="who">${m.source}</span>
+      </div>`).reverse().join('');
+  }
+
+  function formatGameRecord() {
+    const result = gameResult?.text || (gameOver ? '对局结束' : '进行中');
+    const started = gameStartedAt instanceof Date ? gameStartedAt.toLocaleString() : '';
+    const lines = [
+      'Jev 五子棋棋谱',
+      `棋盘：${SIZE}×${SIZE}`,
+      '黑方：玩家',
+      '白方：Jev',
+      `结果：${result}`,
+      `开始：${started}`,
+      `手数：${moves.length}`,
+      '',
+      '【回合棋谱】'
+    ];
+
+    for (let i = 0; i < moves.length; i += 2) {
+      const black = moves[i]?.coord || '—';
+      const white = moves[i + 1]?.coord || '—';
+      lines.push(`${Math.floor(i / 2) + 1}. 黑 ${black}  白 ${white}`);
+    }
+
+    lines.push('', '【逐手记录】');
+    moves.forEach((m, i) => {
+      lines.push(`${i + 1}. ${m.color === BLACK ? '黑' : '白'} ${m.coord}${m.source ? ` (${m.source})` : ''}`);
+    });
+    lines.push('', `【紧凑序列】${moves.map(m => m.coord).join(' ') || '—'}`);
+    return lines.join('\n');
+  }
+
+  async function copyGameRecord() {
+    const text = formatGameRecord();
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        throw new Error('clipboard API unavailable');
+      }
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    const old = copyRecordBtn.textContent;
+    copyRecordBtn.textContent = '已复制';
+    toast(`已复制 ${moves.length} 手棋谱`);
+    setTimeout(() => { copyRecordBtn.textContent = old; }, 1200);
+  }
+
+  function boardRows() {
+    return board.map((row, r) => ({
+      row: r + 1,
+      cells: row.map(v => v === BLACK ? 'X' : v === WHITE ? 'O' : '.').join('')
+    }));
+  }
+
+  function legalMoves() {
+    const result = [];
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] === EMPTY) result.push({ r, c, key: coord(r, c) });
+      }
+    }
+    return result;
+  }
+
+  // ------------------------------
+  // V3 hybrid engine
+  // Deterministic code handles geometry, counting, tactical forcing and search.
+  // Jev receives semantic facts only, then performs narrow atomic judgements
+  // followed by a reverse-order pairwise tournament.
+  // ------------------------------
+
+  const WIN_SEGMENTS = (() => {
+    const result = [];
+    const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        for (const [dr, dc] of dirs) {
+          const er = r + dr * 4, ec = c + dc * 4;
+          if (er < 0 || er >= SIZE || ec < 0 || ec >= SIZE) continue;
+          const cells = [];
+          for (let k = 0; k < 5; k++) cells.push([r + dr*k, c + dc*k]);
+          result.push(cells);
+        }
+      }
+    }
+    return result;
+  })();
+
+  const LINE_WEIGHTS = [0, 2, 28, 520, 32000, 1000000000];
+  const ENGINE_PRESETS = {
+    strong: {
+      depth: 3, root: 10, branch: 7, semantic: 5, tournament: 3, radius: 2,
+      vcfDepth: 3, vctDepth: 1, localWeight: .66, pairWeight: .24, atomicWeight: .10
+    },
+    expert: {
+      depth: 5, root: 14, branch: 7, semantic: 6, tournament: 4, radius: 2,
+      vcfDepth: 4, vctDepth: 2, localWeight: .62, pairWeight: .27, atomicWeight: .11
+    }
+  };
+  const MATE_SCORE = 1e14;
+
+  function otherColor(color) { return color === WHITE ? BLACK : WHITE; }
+
+  function evaluateStatic() {
+    let score = 0;
+    for (const seg of WIN_SEGMENTS) {
+      let w = 0, b = 0;
+      for (const [r, c] of seg) {
+        if (board[r][c] === WHITE) w++;
+        else if (board[r][c] === BLACK)
