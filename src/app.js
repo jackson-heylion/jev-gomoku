@@ -1580,7 +1580,7 @@
     const msg = String(err?.message || err || '未知错误');
     if (err?.httpStatus === 429) return 'Jev 请求过于频繁（HTTP 429）。服务端已按 Retry-After / 指数退避重试，仍未恢复。';
     if (err?.httpStatus === 529) return 'TypeSafe 暂时过载（HTTP 529）。服务端已按 Retry-After / 指数退避重试，仍未恢复。';
-    if (err?.httpStatus === 503 && /not configured|未配置/i.test(msg)) return '服务端未配置 JEV_API_KEY。';
+    if (err?.httpStatus === 503 && /not configured|未配置/i.test(msg)) return '服务端未配置 Jev Secret。';
     if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) return '无法访问同源 /api/jev；本回合将使用本地引擎。';
     if (msg.length > 220) return msg.slice(0, 220) + '…';
     return msg;
