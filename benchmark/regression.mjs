@@ -78,6 +78,13 @@ async function testJevFinalDecisionAuthority() {
         throw new Error('Null deep-search state leaked into compact Jev payload');
       }
 
+      if (!payload?.state?.gomoku_doctrine?.threat_hierarchy) {
+        throw new Error('Compact Gomoku doctrine is missing from Jev payload');
+      }
+      if (!String(payload.state.gomoku_doctrine.evidence_order || '').includes('LEGALITY_AND_PROOF')) {
+        throw new Error('Gomoku doctrine must rank deterministic proof above heuristics');
+      }
+
       for (const candidate of Object.values(criteria)) {
         if (Object.values(candidate).some(value => value === null || value === undefined)) {
           throw new Error('Null candidate evidence leaked into compact Jev payload');
@@ -90,6 +97,9 @@ async function testJevFinalDecisionAuthority() {
         if (!('local_rank' in effectiveEvidence)) throw new Error('Local rank evidence missing');
         if (!('local_alpha_beta_score' in effectiveEvidence)) throw new Error('Local search evidence missing');
         if (!('tactical_safety' in effectiveEvidence)) throw new Error('Tactical safety evidence missing');
+        if (!('pattern_class' in effectiveEvidence)) throw new Error('Pattern-class evidence missing');
+        if (!('pattern_score' in effectiveEvidence)) throw new Error('Pattern score evidence missing');
+        if (!('blocks_opponent_pattern' in effectiveEvidence)) throw new Error('Opponent-pattern denial evidence missing');
 
         if (payload?.state?.deep_search?.status === 'skipped_opening') {
           if ('deep_search_rank' in candidate || 'deep_search_score' in candidate) {
@@ -203,6 +213,44 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   }
   if (full.localSearch.elapsedMs > 3800) {
     throw new Error('Local search exceeded its bounded budget by too much: ' + full.localSearch.elapsedMs + 'ms');
+  }
+}
+
+/**
+ * Cheap root pattern expert must recall obvious open-four builders without
+ * widening the configured Alpha-Beta root set.
+ */
+async function testThreatPatternCandidateRecall() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Pattern recall regression must not call Jev');
+    }
+  });
+
+  const position = positionFromStones({
+    white: ['E8', 'F8', 'G8'],
+    black: ['A1', 'A2', 'B1']
+  });
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const context = engine.candidates('expert');
+  const tactical = context.candidates.filter(candidate =>
+    ['OPEN_FOUR', 'FOUR_THREE', 'DOUBLE_FOUR'].includes(candidate.analysis?.facts?.pattern_class)
+  );
+
+  console.log('pattern recall regression:', JSON.stringify({
+    roots: context.candidates.map(candidate => ({
+      move: candidate.key,
+      pattern: candidate.analysis?.facts?.pattern_class,
+      patternScore: candidate.analysis?.facts?.pattern_score,
+      deny: candidate.analysis?.facts?.blocks_opponent_pattern
+    }))
+  }));
+
+  if (!tactical.length) {
+    throw new Error('Pattern expert failed to retain an obvious open-four candidate');
+  }
+  if (context.cfg.root !== 14) {
+    throw new Error('Pattern recall must not widen Expert root configuration');
   }
 }
 
@@ -838,6 +886,7 @@ await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
 await testJevFinalDecisionAuthority();
 await testLocalTimeBudgetAndOpeningThreshold();
+await testThreatPatternCandidateRecall();
 await testGrandmasterParallelThreatMode();
 await testGrandmasterRealGameThreatTrace();
 await testArbitrationOracle();
