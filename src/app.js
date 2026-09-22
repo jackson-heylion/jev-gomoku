@@ -1597,6 +1597,9 @@
     if (!move || board[move.r]?.[move.c] !== EMPTY) {
       return { className: 'OCCUPIED', score: 0, winningPoints: 0, fourDirections: 0, openThreeDirections: 0, twoDirections: 0, multiAxis: 0 };
     }
+    if (color === BLACK && !isLegalMoveForColor(move.r, move.c, color)) {
+      return { className: 'ILLEGAL_FOR_BLACK', score: 0, winningPoints: 0, fourDirections: 0, openThreeDirections: 0, twoDirections: 0, multiAxis: 0 };
+    }
     board[move.r][move.c] = color;
     const profile = threatPatternProfilePlaced(move.r, move.c, color);
     board[move.r][move.c] = EMPTY;
@@ -2108,8 +2111,11 @@
           roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
         } else {
           const primaryRoots = orderedMoves(side, cfg.root, cfg.radius);
-          const hotspots = localSearchExpired() ? [] : patternHotspots(side, 4, cfg.radius);
-          roots = mergeRootCandidates(primaryRoots, hotspots, cfg.root + 2);
+          const hotspots = localSearchExpired() ? [] : patternHotspots(side, 3, cfg.radius);
+          // Keep the original root width. Pattern hotspots replace low-priority
+          // roots instead of widening the tree, so candidate recall improves
+          // without spending more Alpha-Beta budget.
+          roots = mergeRootCandidates(primaryRoots, hotspots, cfg.root);
         }
       }
 
