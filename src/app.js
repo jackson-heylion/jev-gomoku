@@ -49,6 +49,13 @@
   const testConnectionBtn = document.getElementById('testConnectionBtn');
   const connectionTest = document.getElementById('connectionTest');
   const connectionTestText = document.getElementById('connectionTestText');
+  const sideOptionButtons = [...document.querySelectorAll('.side-option')];
+  const ruleOverlineInput = document.getElementById('ruleOverline');
+  const ruleFourFourInput = document.getElementById('ruleFourFour');
+  const ruleThreeThreeInput = document.getElementById('ruleThreeThree');
+  const gameConfigSummary = document.getElementById('gameConfigSummary');
+  const ruleHint = document.getElementById('ruleHint');
+  const runtimeRulesHint = document.getElementById('runtimeRulesHint');
 
   let board = makeBoard();
   let current = BLACK;
@@ -66,6 +73,7 @@
   let thinkingStartedAt = null;
   let lastThinkMs = null;
   let gameSeed = createGameSeed();
+  let gameStarted = false;
 
   const settings = loadSettings();
   modelInput.value = settings.model;
@@ -73,6 +81,71 @@
 
   function makeBoard() {
     return Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  }
+
+  function storedBool(key, fallback = true) {
+    const value = localStorage.getItem(key);
+    if (value == null) return fallback;
+    return value !== 'false';
+  }
+
+  function playerColor() {
+    return settings.playerColor === 'white' ? WHITE : BLACK;
+  }
+
+  function aiColor() {
+    return playerColor() === BLACK ? WHITE : BLACK;
+  }
+
+  function colorNameZh(color) {
+    return color === BLACK ? '黑棋' : '白棋';
+  }
+
+  function colorShortZh(color) {
+    return color === BLACK ? '黑' : '白';
+  }
+
+  function colorCss(color) {
+    return color === BLACK ? 'black' : 'white';
+  }
+
+  function activeRuleConfig() {
+    return {
+      overline: settings.forbidOverline !== false,
+      fourFour: settings.forbidFourFour !== false,
+      threeThree: settings.forbidThreeThree !== false
+    };
+  }
+
+  function enabledForbiddenLabels() {
+    const rules = activeRuleConfig();
+    return [
+      rules.overline && '长连',
+      rules.fourFour && '四四',
+      rules.threeThree && '三三'
+    ].filter(Boolean);
+  }
+
+  function ruleSummaryText() {
+    const enabled = enabledForbiddenLabels();
+    const blackWin = activeRuleConfig().overline ? '黑棋恰好五连胜' : '黑棋五连及以上胜';
+    return `你执${colorShortZh(playerColor())}${playerColor() === BLACK ? '先手' : '后手'} · 黑棋禁手：${enabled.length ? enabled.join(' / ') : '关闭'} · ${blackWin}`;
+  }
+
+  function renjuRuleDescription() {
+    const rules = activeRuleConfig();
+    const enabled = enabledForbiddenLabels();
+    const blackWin = rules.overline
+      ? 'BLACK wins only with an exact five; an overline is illegal.'
+      : 'BLACK wins with five or more in a row; overline is legal.';
+    const forbidden = enabled.length
+      ? `BLACK forbidden moves enabled: ${enabled.join(', ')}.`
+      : 'BLACK forbidden moves are disabled.';
+    return `${forbidden} ${blackWin} WHITE has no forbidden moves and wins with five or more in a row.`;
+  }
+
+  function workerRuleConfig() {
+    return { ...activeRuleConfig() };
   }
 
   function hashSeed32(text) {
@@ -152,6 +225,11 @@
   }
 
   function refreshTurnClock() {
+    if (!gameStarted) {
+      turnClockLabel.textContent = '对局状态';
+      turnClockValue.textContent = '等待开局';
+      return;
+    }
     if (gameOver) {
       turnClockLabel.textContent = '对局状态';
       turnClockValue.textContent = '已结束';
@@ -165,27 +243,58 @@
       const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
       turnClockLabel.textContent = `${actor} 已思考`;
       turnClockValue.textContent = formatElapsed(elapsed);
-      if (settings.strengthMode !== 'local') {
-        jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
-      }
+      if (settings.strengthMode !== 'local') jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
       return;
     }
 
-    if (current === BLACK) {
+    if (current === playerColor()) {
       turnClockLabel.textContent = '你已思考';
       turnClockValue.textContent = formatElapsed(now - turnStartedAt);
       return;
     }
-
     turnClockLabel.textContent = settings.strengthMode !== 'local' ? '等待 Jev' : '等待本地引擎';
     turnClockValue.textContent = formatElapsed(now - turnStartedAt);
   }
 
   function loadSettings() {
+    const player = localStorage.getItem('jev_gomoku_player_color');
     return {
       model: localStorage.getItem('jev_gomoku_model') || 'jev-latest',
-      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'grandmaster'
+      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'grandmaster',
+      playerColor: player === 'white' ? 'white' : 'black',
+      forbidOverline: storedBool('jev_gomoku_rule_overline', true),
+      forbidFourFour: storedBool('jev_gomoku_rule_four_four', true),
+      forbidThreeThree: storedBool('jev_gomoku_rule_three_three', true)
     };
+  }
+
+  function syncPreGameControls() {
+    sideOptionButtons.forEach(button => {
+      const selected = button.dataset.playerColor === settings.playerColor;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+    });
+    ruleOverlineInput.checked = settings.forbidOverline;
+    ruleFourFourInput.checked = settings.forbidFourFour;
+    ruleThreeThreeInput.checked = settings.forbidThreeThree;
+    gameConfigSummary.textContent = ruleSummaryText();
+  }
+
+  function readPreGameControls() {
+    const selected = sideOptionButtons.find(button => button.classList.contains('selected'));
+    settings.playerColor = selected?.dataset.playerColor === 'white' ? 'white' : 'black';
+    settings.forbidOverline = Boolean(ruleOverlineInput.checked);
+    settings.forbidFourFour = Boolean(ruleFourFourInput.checked);
+    settings.forbidThreeThree = Boolean(ruleThreeThreeInput.checked);
+  }
+
+  function persistSettings() {
+    localStorage.setItem('jev_gomoku_model', settings.model);
+    localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
+    localStorage.setItem('jev_gomoku_player_color', settings.playerColor);
+    localStorage.setItem('jev_gomoku_rule_overline', String(settings.forbidOverline));
+    localStorage.setItem('jev_gomoku_rule_four_four', String(settings.forbidFourFour));
+    localStorage.setItem('jev_gomoku_rule_three_three', String(settings.forbidThreeThree));
   }
 
   function saveSettings() {
@@ -194,12 +303,10 @@
     settings.strengthMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(strengthModeInput.value)
       ? strengthModeInput.value
       : 'grandmaster';
-    localStorage.setItem('jev_gomoku_model', settings.model);
-    localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
+    readPreGameControls();
+    persistSettings();
     settingsModal.classList.remove('show');
-    updateApiState();
-    toast(`已切换到 ${publicModeLabel(settings.strengthMode)}`);
-    if (current === WHITE && !thinking && !gameOver) setTimeout(jevTurn, 100);
+    startGame();
   }
 
   function setConnectionTest(kind, text) {
@@ -299,7 +406,7 @@
   }
 
   function renderLevelSelection(mode) {
-    const selectedMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(mode) ? mode : 'expert';
+    const selectedMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(mode) ? mode : 'grandmaster';
     strengthModeInput.value = selectedMode;
     levelOptionButtons.forEach(button => {
       const selected = button.dataset.mode === selectedMode;
@@ -335,12 +442,18 @@
     levelSummary.textContent = meta.summary;
   }
 
-  function openSettings() {
+  function openSettings(force = false) {
+    if (!force && gameStarted && moves.length > 0) {
+      toast('本局已开始。请点击“重开”后再修改棋色或禁手规则。', 3600);
+      return;
+    }
     modelInput.value = settings.model;
-    renderLevelSelection(settings.strengthMode || 'expert');
+    renderLevelSelection(settings.strengthMode || 'grandmaster');
+    syncPreGameControls();
     clearConnectionTest();
     settingsModal.classList.add('show');
-    const selected = levelOptionButtons.find(button => button.classList.contains('selected'));
+    const selected = sideOptionButtons.find(button => button.classList.contains('selected'))
+      || levelOptionButtons.find(button => button.classList.contains('selected'));
     setTimeout(() => selected?.focus(), 30);
   }
 
@@ -448,30 +561,33 @@
   }
 
   function onBoardClick(e) {
-    if (gameOver || thinking || current !== BLACK) return;
+    const human = playerColor();
+    if (!gameStarted || gameOver || thinking || current !== human) return;
     const p = pointFromEvent(e);
     if (!p || board[p.r][p.c] !== EMPTY) return;
 
-    const forbidden = blackForbiddenInfo(p.r, p.c);
-    if (forbidden.forbidden) {
-      const label = forbidden.type === 'OVERLINE' ? '长连'
-        : forbidden.type === 'FOUR_FOUR' ? '四四'
-        : forbidden.type === 'THREE_THREE' ? '三三'
-        : '禁手';
-      toast(`${coord(p.r, p.c)} 是黑棋${label}禁手，请选择其他落点。`, 3200);
-      return;
+    if (human === BLACK) {
+      const forbidden = blackForbiddenInfo(p.r, p.c);
+      if (forbidden.forbidden) {
+        const label = forbidden.type === 'OVERLINE' ? '长连'
+          : forbidden.type === 'FOUR_FOUR' ? '四四'
+          : forbidden.type === 'THREE_THREE' ? '三三'
+          : '禁手';
+        toast(`${coord(p.r, p.c)} 是黑棋${label}禁手，请选择其他落点。`, 3200);
+        return;
+      }
     }
 
-    place(p.r, p.c, BLACK, '你');
-    if (isWin(p.r, p.c, BLACK)) {
-      finish('你赢了', BLACK);
+    place(p.r, p.c, human, '你');
+    if (isWin(p.r, p.c, human)) {
+      finish('你赢了', human);
       return;
     }
     if (moves.length === SIZE * SIZE) {
       finish('平局', EMPTY);
       return;
     }
-    current = WHITE;
+    current = aiColor();
     resetTurnClock();
     updateStatus();
     setTimeout(jevTurn, 220);
@@ -507,7 +623,10 @@
   }
 
   function isWin(r, c, color) {
-    if (color === BLACK) return hasExactFiveAt(r, c, BLACK);
+    if (color === BLACK) {
+      if (activeRuleConfig().overline) return hasExactFiveAt(r, c, BLACK);
+      return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, BLACK, dr, dc) >= 5);
+    }
     return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, WHITE, dr, dc) >= 5);
   }
 
@@ -658,19 +777,22 @@
   }
 
   function blackForbiddenInfoPlaced(r, c, depth = 0) {
-    if (hasExactFiveAt(r, c, BLACK)) {
+    const rules = activeRuleConfig();
+    const exactFive = hasExactFiveAt(r, c, BLACK);
+    const overline = hasOverlineAt(r, c, BLACK);
+
+    if (exactFive || (!rules.overline && overline)) {
       return { forbidden: false, type: null, winningFive: true, fourCount: 0, threeCount: 0 };
     }
-    if (hasOverlineAt(r, c, BLACK)) {
+    if (rules.overline && overline) {
       return { forbidden: true, type: 'OVERLINE', winningFive: false, fourCount: 0, threeCount: 0 };
     }
 
-    const fours = collectBlackFoursThrough(r, c);
-    if (fours.length >= 2) {
+    const fours = rules.fourFour || rules.threeThree ? collectBlackFoursThrough(r, c) : [];
+    if (rules.fourFour && fours.length >= 2) {
       return { forbidden: true, type: 'FOUR_FOUR', winningFive: false, fourCount: fours.length, threeCount: 0 };
     }
-
-    if (depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
+    if (!rules.threeThree || depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
       return { forbidden: false, type: null, winningFive: false, fourCount: fours.length, threeCount: 0 };
     }
 
