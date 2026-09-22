@@ -3,6 +3,7 @@
 
   const CACHE_PREFIX = 'jev_gomoku_jev_cache_v3:';
   const ENDPOINT = '/api/jev';
+  const inflight = new Map();
 
   function hash(text) {
     let h = 2166136261 >>> 0;
@@ -49,36 +50,50 @@
       if (cached) return cached;
     }
 
-    const response = await fetch(ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal
-    });
+    // Reuse an identical request already in progress. This prevents UI races
+    // or repeated clicks from paying for the same Jev inference twice.
+    if (useCache && inflight.has(key)) return inflight.get(key);
 
-    const raw = await response.text();
-    let data = null;
-    try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+    const pending = (async () => {
+      const response = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal
+      });
 
-    if (!response.ok) {
-      const detail = data?.detail || data?.message || data?.error || raw || `HTTP ${response.status}`;
-      const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
-      err.httpStatus = response.status;
-      err.retryAfter = response.headers.get('retry-after');
-      throw err;
+      const raw = await response.text();
+      let data = null;
+      try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+
+      if (!response.ok) {
+        const detail = data?.detail || data?.message || data?.error || raw || `HTTP ${response.status}`;
+        const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        err.httpStatus = response.status;
+        err.retryAfter = response.headers.get('retry-after');
+        throw err;
+      }
+
+      const result = data || {};
+      result.__client = {
+        attempts: 1,
+        cached: false,
+        transport: 'same-origin-server'
+      };
+      if (useCache) writeCache(key, result);
+      return result;
+    })();
+
+    if (useCache) inflight.set(key, pending);
+    try {
+      return await pending;
+    } finally {
+      if (useCache && inflight.get(key) === pending) inflight.delete(key);
     }
-
-    const result = data || {};
-    result.__client = {
-      attempts: 1,
-      cached: false,
-      transport: 'same-origin-server'
-    };
-    if (useCache) writeCache(key, result);
-    return result;
   }
 
   function clearCache() {
+    inflight.clear();
     try {
       const keys = [];
       for (let i = 0; i < sessionStorage.length; i++) {
