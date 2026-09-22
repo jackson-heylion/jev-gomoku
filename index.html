@@ -28,8 +28,17 @@
     <section class="layout">
       <div class="card board-card">
         <div class="statusbar">
-          <div class="turn" id="turnText"><span class="stone-dot black"></span><span>你的回合</span></div>
-          <div class="meta" id="gameMeta">第 1 手 · 黑棋</div>
+          <div class="turn-area">
+            <div class="turn" id="turnText"><span class="stone-dot black"></span><span>你的回合</span></div>
+            <div class="turn-hint" id="turnHint">请落下一枚黑棋</div>
+          </div>
+          <div class="turn-side">
+            <div class="meta" id="gameMeta">第 1 手 · 黑棋</div>
+            <div class="turn-clock" id="turnClock">
+              <span id="turnClockLabel">本回合已用</span>
+              <strong id="turnClockValue">0.0 秒</strong>
+            </div>
+          </div>
         </div>
         <div class="board-wrap">
           <canvas id="board" width="760" height="760" aria-label="15乘15五子棋棋盘"></canvas>
@@ -60,6 +69,10 @@
           <div class="level-meta">
             <span class="level-badge" id="levelBadge">等级 3</span>
             <span class="level-summary" id="levelSummary">棋力优先：更深的本地搜索 + Jev 判断，响应会稍慢。</span>
+          </div>
+          <div class="jev-time-row">
+            <span>Jev 上一步思考</span>
+            <strong id="lastThinkDuration">—</strong>
           </div>
           <div class="runtime-hint">遇到明确的必胜或必防手时，本地战术引擎会直接执行，不额外调用 Jev。</div>
         </section>
