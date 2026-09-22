@@ -62,14 +62,32 @@ async function testJevFinalDecisionAuthority() {
       }
 
       const criteria = questions.best_move?.criteria || {};
+      const commonEvidence = payload?.state?.common_candidate_evidence || {};
       const candidateKeys = Object.keys(criteria);
       if (candidateKeys.length < 2) throw new Error('Need at least two candidates');
 
+      if (Object.values(payload?.state?.deep_search || {}).some(value => value === null || value === undefined)) {
+        throw new Error('Null deep-search state leaked into compact Jev payload');
+      }
+
       for (const candidate of Object.values(criteria)) {
-        if (!('local_rank' in candidate)) throw new Error('Local rank evidence missing');
-        if (!('local_alpha_beta_score' in candidate)) throw new Error('Local search evidence missing');
-        if (!('deep_search_rank' in candidate)) throw new Error('Deep-search evidence missing');
-        if (!('tactical_safety' in candidate)) throw new Error('Tactical safety evidence missing');
+        if (Object.values(candidate).some(value => value === null || value === undefined)) {
+          throw new Error('Null candidate evidence leaked into compact Jev payload');
+        }
+        if ('deep_search_depth' in candidate) {
+          throw new Error('Per-candidate deep_search_depth duplicates state.deep_search.depth_reached');
+        }
+
+        const effectiveEvidence = { ...commonEvidence, ...candidate };
+        if (!('local_rank' in effectiveEvidence)) throw new Error('Local rank evidence missing');
+        if (!('local_alpha_beta_score' in effectiveEvidence)) throw new Error('Local search evidence missing');
+        if (!('tactical_safety' in effectiveEvidence)) throw new Error('Tactical safety evidence missing');
+
+        if (payload?.state?.deep_search?.status === 'skipped_opening') {
+          if ('deep_search_rank' in candidate || 'deep_search_score' in candidate) {
+            throw new Error('Skipped opening should omit unavailable per-candidate deep-search evidence');
+          }
+        }
       }
 
       jevTarget = candidateKeys[1];
