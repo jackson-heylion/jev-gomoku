@@ -42,27 +42,34 @@
 
       <aside class="side">
         <section class="card opponent-card">
-          <h2 class="section-title">AI 对手</h2>
+          <div class="jev-profile">
+            <div class="jev-avatar" aria-hidden="true">J</div>
+            <div class="jev-profile-copy">
+              <div class="jev-name">Jev</div>
+              <div class="jev-tagline">你的白棋对手</div>
+            </div>
+            <span class="jev-live" id="jevLiveState">在线</span>
+          </div>
           <div class="api-state">
             <div class="api-state-left">
               <span class="indicator" id="apiIndicator"></span>
-              <span class="api-label" id="apiLabel">大师模式</span>
+              <span class="api-label" id="apiLabel">Jev 大师</span>
             </div>
             <button class="btn compact-btn" id="quickSettingsBtn" type="button">切换模式</button>
           </div>
-          <div class="runtime-hint">推荐使用大师模式。AI 服务暂不可用时，会自动切换到本地引擎继续对局。</div>
+          <div class="runtime-hint">Jev 会评估白棋的候选落点；遇到明确的必胜或必防手时，本地战术引擎会直接执行。</div>
         </section>
 
         <section class="card jev-card">
-          <h2 class="section-title">上一步 AI 判断</h2>
+          <h2 class="section-title">Jev 的上一步判断</h2>
           <div class="decision-head">
             <div>
-              <div class="decision-kicker" id="jevDecisionLabel">等待白棋判断</div>
+              <div class="decision-kicker" id="jevDecisionLabel">等待 Jev 判断</div>
               <div class="big" id="jevMove">—</div>
             </div>
             <span class="decision-badge" id="jevVerdict">等待</span>
           </div>
-          <div class="decision-summary" id="jevInfo">落子后，这里会用容易理解的文字说明为什么选择这一手。</div>
+          <div class="decision-summary" id="jevInfo">Jev 落子后，这里会解释它为什么考虑这一手。</div>
           <button class="btn" id="retryBtn" type="button" style="display:none;margin-top:10px;padding:6px 9px;min-height:30px;font-size:11px">重试 Jev 落子</button>
           <div class="confidence-row">
             <span>选择倾向</span>
@@ -87,21 +94,21 @@
   <div class="modal-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="modal">
       <h2 id="settingsTitle">对局设置</h2>
-      <p class="desc">选择白棋的思考方式。第一次体验建议使用大师模式。</p>
+      <p class="desc">选择 Jev 的下棋方式。第一次体验建议使用 Jev 大师。</p>
 
       <input id="model" type="hidden" value="jev-latest" />
 
       <div class="field">
-        <label for="strengthMode">AI 模式</label>
+        <label for="strengthMode">Jev 模式</label>
         <select id="strengthMode">
-          <option value="expert">大师模式（推荐）</option>
-          <option value="strong">快速模式（响应更快）</option>
-          <option value="local">本地模式（无需 AI 服务）</option>
-          <option value="jev">Jev 模式（实验）</option>
+          <option value="expert">Jev 大师（推荐）</option>
+          <option value="strong">Jev 快速（响应更快）</option>
+          <option value="jev">Jev 直觉（实验）</option>
+          <option value="local">本地引擎（不使用 Jev）</option>
         </select>
       </div>
 
-      <div class="settings-note">大师模式会结合本地搜索与 Jev 判断；如果 AI 服务暂时不可用，会自动使用本地引擎继续对局。</div>
+      <div class="settings-note"><strong>Jev 大师</strong>会先由本地引擎寻找高质量候选，再交给 Jev 判断取舍；<strong>Jev 直觉</strong>则让 Jev 更直接地选择落点。</div>
 
       <div class="connection-test" id="connectionTest" role="status" aria-live="polite">
         <span class="test-dot"></span>
@@ -109,7 +116,7 @@
       </div>
 
       <div class="modal-actions">
-        <button class="btn test-btn" id="testConnectionBtn" type="button">检查 AI 状态</button>
+        <button class="btn test-btn" id="testConnectionBtn" type="button">检查 Jev 状态</button>
         <button class="btn" id="closeSettingsBtn" type="button">取消</button>
         <button class="btn primary" id="saveSettingsBtn" type="button">保存</button>
       </div>
