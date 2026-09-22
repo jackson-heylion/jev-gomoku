@@ -65,6 +65,7 @@
   let turnStartedAt = performance.now();
   let thinkingStartedAt = null;
   let lastThinkMs = null;
+  let gameSeed = createGameSeed();
 
   const settings = loadSettings();
   modelInput.value = settings.model;
@@ -72,6 +73,49 @@
 
   function makeBoard() {
     return Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  }
+
+  function hashSeed32(text) {
+    let h = 2166136261 >>> 0;
+    const value = String(text || '');
+    for (let i = 0; i < value.length; i++) {
+      h ^= value.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h >>> 0;
+  }
+
+  function createGameSeed() {
+    const override = Number(globalThis.__JEV_GOMOKU_GAME_SEED__);
+    if (Number.isInteger(override)) return override >>> 0;
+
+    const cryptoApi = typeof window !== 'undefined' ? window.crypto : null;
+    if (cryptoApi?.getRandomValues) {
+      const values = new Uint32Array(1);
+      cryptoApi.getRandomValues(values);
+      return values[0] >>> 0;
+    }
+
+    // Headless benchmark environments intentionally omit browser crypto.
+    // Keep them deterministic so regression results stay reproducible.
+    return 0x6d2b79f5;
+  }
+
+  function mulberry32(seed) {
+    let value = seed >>> 0;
+    return () => {
+      value = (value + 0x6d2b79f5) >>> 0;
+      let t = value;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function seededPositionRandom(label = '') {
+    let material = `${gameSeed}|${moves.length}|${label}|`;
+    for (let r = 0; r < SIZE; r++) material += board[r].join('');
+    return mulberry32(hashSeed32(material));
   }
 
   function formatElapsed(ms) {
@@ -692,6 +736,7 @@
     jevDecisionLog = [];
     gameResult = null;
     gameStartedAt = new Date();
+    gameSeed = createGameSeed();
     turnStartedAt = performance.now();
     thinkingStartedAt = null;
     lastThinkMs = null;
@@ -959,6 +1004,7 @@
       '白方：Jev / 本地引擎',
       `结果：${result}`,
       `开始：${started}`,
+      `对局种子：${gameSeed}`,
       `手数：${moves.length}`,
       '',
       '【回合棋谱】'
@@ -1846,6 +1892,103 @@
     return String(answer?.choice || '').toUpperCase() === key ? 1 : 0;
   }
 
+  const DIVERSITY_POLICY = Object.freeze({
+    topK: 3,
+    dominantProbability: .72,
+    relativeProbabilityFloor: .55,
+    maxLocalRank: 4,
+    maxDeepRank: 2
+  });
+
+  function selectDiverseJevChoice(answer, candidates, forced) {
+    const jevChoice = String(answer?.choice || '').toUpperCase();
+    const deterministic = reason => ({
+      choice: jevChoice,
+      jevChoice,
+      samplingApplied: false,
+      changed: false,
+      reason,
+      draw: null,
+      pool: []
+    });
+
+    if (!jevChoice || candidates.length < 2) return deterministic('single_or_missing_choice');
+    if (forced) return deterministic('forced_tactical_role');
+
+    const tacticalLock = candidates.some(move => {
+      const facts = move.analysis?.facts || {};
+      return move.analysis?.winsNow
+        || move.analysis?.vcf
+        || ['WIN_NOW', 'MUST_DEFEND', 'MUST_DEFEND_FORK'].includes(facts.forced_role);
+    });
+    if (tacticalLock) return deterministic('tactical_lock');
+
+    const safe = candidates
+      .filter(move => move.analysis?.facts?.tactical_safety === 'SAFE')
+      .map(move => ({
+        move,
+        probability: probabilityFor(answer, move.key)
+      }))
+      .filter(item => item.probability > 0);
+
+    const primary = safe.find(item => item.move.key === jevChoice);
+    if (!primary || safe.length < 2) return deterministic('insufficient_safe_choices');
+    if (primary.probability >= DIVERSITY_POLICY.dominantProbability) {
+      return deterministic('jev_probability_dominant');
+    }
+
+    const hasDeepRanks = safe.some(item => Number.isFinite(item.move.deepSearchRank));
+    let pool = safe
+      .filter(item => {
+        const localRank = item.move.localRank ?? item.move.rank ?? Infinity;
+        if (localRank > DIVERSITY_POLICY.maxLocalRank && item.move.key !== jevChoice) return false;
+        if (
+          hasDeepRanks &&
+          Number.isFinite(item.move.deepSearchRank) &&
+          item.move.deepSearchRank > DIVERSITY_POLICY.maxDeepRank &&
+          item.move.key !== jevChoice
+        ) return false;
+        return item.probability >= primary.probability * DIVERSITY_POLICY.relativeProbabilityFloor;
+      })
+      .sort((a, b) => b.probability - a.probability)
+      .slice(0, DIVERSITY_POLICY.topK);
+
+    if (!pool.some(item => item.move.key === jevChoice)) {
+      pool = [primary, ...pool].slice(0, DIVERSITY_POLICY.topK);
+    }
+    if (pool.length < 2) return deterministic('no_near_best_alternative');
+
+    const total = pool.reduce((sum, item) => sum + item.probability, 0);
+    if (!(total > 0)) return deterministic('invalid_probability_mass');
+
+    const random = seededPositionRandom('jev-diversity-v1');
+    const draw = random();
+    let cursor = draw * total;
+    let selected = pool[pool.length - 1];
+    for (const item of pool) {
+      cursor -= item.probability;
+      if (cursor <= 0) {
+        selected = item;
+        break;
+      }
+    }
+
+    return {
+      choice: selected.move.key,
+      jevChoice,
+      samplingApplied: true,
+      changed: selected.move.key !== jevChoice,
+      reason: selected.move.key === jevChoice ? 'sample_kept_jev_choice' : 'sampled_safe_near_best',
+      draw,
+      pool: pool.map(item => ({
+        move: item.move.key,
+        probability: item.probability,
+        localRank: item.move.localRank ?? item.move.rank ?? null,
+        deepRank: Number.isFinite(item.move.deepSearchRank) ? item.move.deepSearchRank : null
+      }))
+    };
+  }
+
   function sumUsage(...items) {
     let input = 0, output = 0, has = false;
     for (const u of items) {
@@ -2212,22 +2355,32 @@
       throw new Error('Jev 响应中缺少 answers.best_move.choice');
     }
 
-    const finalChoice = rawAnswer.choice.toUpperCase();
+    const jevChoice = rawAnswer.choice.toUpperCase();
     const candidateKeys = new Set(candidates.map(move => move.key));
-    if (!candidateKeys.has(finalChoice)) {
+    if (!candidateKeys.has(jevChoice)) {
       throw new Error(`Jev 返回候选集之外的落点：${rawAnswer.choice}`);
     }
 
-    const final = candidates.find(move => move.key === finalChoice);
     const probabilities = rawAnswer.probabilities && typeof rawAnswer.probabilities === 'object'
       ? Object.fromEntries(
           Object.entries(rawAnswer.probabilities)
             .filter(([key]) => candidateKeys.has(String(key).toUpperCase()))
             .map(([key, value]) => [String(key).toUpperCase(), Number(value)])
         )
-      : { [finalChoice]: 1 };
+      : { [jevChoice]: 1 };
+
+    const jevAnswer = {
+      ...rawAnswer,
+      choice: jevChoice,
+      probabilities
+    };
+    const diversity = selectDiverseJevChoice(jevAnswer, candidates, context.forced);
+    const finalChoice = diversity.choice;
+    const final = candidates.find(move => move.key === finalChoice);
+    if (!final) throw new Error(`多样性选择产生非法候选：${finalChoice}`);
+
     const probabilityConfidence = Number(probabilities[finalChoice]);
-    const confidence = Number.isFinite(rawAnswer.confidence)
+    const confidence = finalChoice === jevChoice && Number.isFinite(rawAnswer.confidence)
       ? rawAnswer.confidence
       : Number.isFinite(probabilityConfidence)
         ? probabilityConfidence
@@ -2248,7 +2401,7 @@
       answer,
       finalChoice,
       localChoice: localChoice.key,
-      jevSuggested: finalChoice,
+      jevSuggested: jevChoice,
       mode,
       forced: context.forced,
       candidates: ranked,
@@ -2276,7 +2429,17 @@
           budgetMs: deepAnalysis.budgetMs ?? null,
           scores: deepRows.map(item => ({ move: item.move, score: item.score }))
         } : null,
-        finalDecision: compactAnswer(answer),
+        finalDecision: compactAnswer(jevAnswer),
+        diversity: {
+          gameSeed,
+          samplingApplied: diversity.samplingApplied,
+          changed: diversity.changed,
+          reason: diversity.reason,
+          draw: diversity.draw,
+          jevChoice: diversity.jevChoice,
+          selectedChoice: diversity.choice,
+          pool: diversity.pool
+        },
         localEvidence: candidates.map(move => ({
           move: move.key,
           localRank: move.localRank,
@@ -2286,7 +2449,9 @@
           facts: move.analysis?.facts || null
         }))
       },
-      stageNote: `Jev 最终决策：Local 提供 ${candidates.length} 个候选${deepAnalysis?.status === 'skipped_opening' ? '（开局跳过额外深搜）' : '及深搜证据'}，Jev 最终选择 ${finalChoice}（每回合 1 次 Jev 请求）`
+      stageNote: diversity.changed
+        ? `Jev 最终决策：Local 提供 ${candidates.length} 个候选${deepAnalysis?.status === 'skipped_opening' ? '（开局跳过额外深搜）' : '及深搜证据'}；Jev 首选 ${jevChoice}，安全近优候选受控采样后选择 ${finalChoice}（每回合最多 1 次 Jev 请求）`
+        : `Jev 最终决策：Local 提供 ${candidates.length} 个候选${deepAnalysis?.status === 'skipped_opening' ? '（开局跳过额外深搜）' : '及深搜证据'}，Jev 最终选择 ${finalChoice}（每回合最多 1 次 Jev 请求）`
     };
   }
 
@@ -2479,9 +2644,12 @@
       agreement = '这一手由 Jev 直接判断并选择。';
     } else {
       const finalDecision = result.decisionTrace?.finalDecision;
+      const diversity = result.decisionTrace?.diversity;
       const challenger = result.decisionTrace?.challenger;
       const verification = challenger?.verification;
-      if (finalDecision) {
+      if (diversity?.changed) {
+        agreement = `Jev 首选 ${diversity.jevChoice}；${finalChoice} 同属安全近优候选，本局按 Jev 概率进行受控采样后选择 ${finalChoice}。`;
+      } else if (finalDecision) {
         agreement = result.localChoice && result.localChoice !== finalChoice
           ? `Local 首选 ${result.localChoice}；Jev 综合棋盘、战术与搜索证据后，最终改选 ${finalChoice}。`
           : `Local 首选 ${result.localChoice || finalChoice}；Jev 综合棋盘、战术与搜索证据后，最终确认 ${finalChoice}。`;
