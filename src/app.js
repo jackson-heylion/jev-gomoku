@@ -184,7 +184,7 @@
   function loadSettings() {
     return {
       model: localStorage.getItem('jev_gomoku_model') || 'jev-latest',
-      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'expert'
+      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'grandmaster'
     };
   }
 
@@ -193,7 +193,7 @@
     settings.model = modelInput.value.trim() || 'jev-latest';
     settings.strengthMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(strengthModeInput.value)
       ? strengthModeInput.value
-      : 'expert';
+      : 'grandmaster';
     localStorage.setItem('jev_gomoku_model', settings.model);
     localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
     settingsModal.classList.remove('show');
