@@ -191,7 +191,7 @@
   function saveSettings() {
     if (testController) testController.abort();
     settings.model = modelInput.value.trim() || 'jev-latest';
-    settings.strengthMode = ['local', 'jev', 'strong', 'expert'].includes(strengthModeInput.value)
+    settings.strengthMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(strengthModeInput.value)
       ? strengthModeInput.value
       : 'expert';
     localStorage.setItem('jev_gomoku_model', settings.model);
@@ -275,6 +275,13 @@
         summary: '速度优先：本地搜索提供候选与证据，由 Jev 做最终落子决定。'
       };
     }
+    if (mode === 'grandmaster') {
+      return {
+        name: 'Jev 宗师',
+        badge: '等级 4',
+        summary: '战术增强：Alpha-Beta 深搜与强制威胁搜索并行；证据一致时直接落子，出现分歧时再由 Jev 裁决。'
+      };
+    }
     return {
       name: 'Jev 大师',
       badge: '等级 3',
@@ -292,7 +299,7 @@
   }
 
   function renderLevelSelection(mode) {
-    const selectedMode = ['local', 'jev', 'strong', 'expert'].includes(mode) ? mode : 'expert';
+    const selectedMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(mode) ? mode : 'expert';
     strengthModeInput.value = selectedMode;
     levelOptionButtons.forEach(button => {
       const selected = button.dataset.mode === selectedMode;
@@ -861,6 +868,7 @@
         atomicScore: Number.isFinite(m.atomicScore) ? m.atomicScore : null,
         pairScore: Number.isFinite(m.pairScore) ? m.pairScore : null,
         finalScore: Number.isFinite(m.finalScore) ? m.finalScore : null,
+        threatSearch: m.threatSearch ? JSON.parse(JSON.stringify(m.threatSearch)) : null,
         facts: m.analysis?.facts ? { ...m.analysis.facts } : null
       }));
 
@@ -892,6 +900,7 @@
     const modeLabel = d.mode === 'local' ? '本地引擎'
       : d.mode === 'jev' ? '纯 Jev'
       : d.mode === 'strong' ? 'Jev 强化'
+      : d.mode === 'grandmaster' ? 'Jev 宗师'
       : 'Jev 大师';
     lines.push(`第 ${d.moveNo} 手 · 白 ${d.chosen}`);
     lines.push(`  模式：${modeLabel}`);
@@ -904,6 +913,16 @@
       lines.push(`  Jev 前置深搜：source=${v.source || '—'}；status=${v.status || '—'}；depth=${v.depthReached ?? '—'}；elapsed=${v.elapsedMs ?? '—'}ms`);
       if (Array.isArray(v.scores) && v.scores.length) {
         lines.push(`    深搜评分：${v.scores.map(item => `${item.move}=${compactNumber(item.score, 1)}`).join('；')}`);
+      }
+    }
+    if (d.trace?.preJevThreatSearch) {
+      const t = d.trace.preJevThreatSearch;
+      lines.push(`  威胁空间搜索：source=${t.source || '—'}；status=${t.status || '—'}；maxTurns=${t.maxThreatTurns ?? '—'}；elapsed=${t.elapsedMs ?? '—'}ms`);
+      if (Array.isArray(t.analyses) && t.analyses.length) {
+        t.analyses.forEach(item => {
+          const line = Array.isArray(item.line) && item.line.length ? `；line=${item.line.join('>')}` : '';
+          lines.push(`    ${item.move}: ${item.forced ? 'OPPONENT_FORCED_WIN' : item.timedOut ? 'TIMEOUT' : 'NO_PROOF'}${line}`);
+        });
       }
     }
     if (d.trace?.finalDecision) {
@@ -1114,6 +1133,10 @@
     },
     expert: {
       depth: 5, root: 14, branch: 7, semantic: 6, tournament: 4, radius: 2,
+      vcfDepth: 4, vctDepth: 2, localWeight: .62, pairWeight: .27, atomicWeight: .11
+    },
+    grandmaster: {
+      depth: 4, root: 12, branch: 7, semantic: 6, tournament: 3, radius: 2,
       vcfDepth: 4, vctDepth: 2, localWeight: .62, pairWeight: .27, atomicWeight: .11
     }
   };
@@ -1552,7 +1575,7 @@
 
   function advancedEngineConfig(mode) {
     const base = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
-    if (mode === 'expert' && moves.length < 8) {
+    if ((mode === 'expert' || mode === 'grandmaster') && moves.length < 8) {
       // The opening has the widest search tree and very little tactical
       // information. Keep it shallow on the UI thread; Jev still owns the
       // final move decision.
@@ -1798,8 +1821,10 @@
     return { common, criteria: compactCriteria };
   }
 
-  function buildFinalJevPayload(context, candidates, deepAnalysis) {
+  function buildFinalJevPayload(context, candidates, deepAnalysis, threatAnalysis = null) {
     const deepRows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+    const threatRows = Array.isArray(threatAnalysis?.analyses) ? threatAnalysis.analyses : [];
+    const threatByMove = new Map(threatRows.map(item => [item.move, item]));
     const deepByMove = new Map(deepRows.map((item, index) => [
       item.move,
       {
@@ -1811,12 +1836,16 @@
 
     for (const move of candidates) {
       const deep = deepByMove.get(move.key) || null;
+      const threat = threatByMove.get(move.key) || move.threatSearch || null;
       const facts = move.analysis?.facts || {};
       criteria[move.key] = compactEvidence({
         local_rank: move.rank ?? null,
         local_alpha_beta_score: Number.isFinite(move.searchScore) ? Number(move.searchScore.toFixed(2)) : null,
         deep_search_rank: deep?.rank ?? null,
         deep_search_score: Number.isFinite(deep?.score) ? Number(deep.score.toFixed(2)) : null,
+        opponent_forcing_proof: threat?.forced === true ? 'FOUND' : threat?.timedOut ? 'TIMEOUT' : threat ? 'NOT_FOUND' : null,
+        opponent_forcing_line: Array.isArray(threat?.line) && threat.line.length ? threat.line.join(' > ') : null,
+        opponent_forcing_attacker_turns: Number.isFinite(threat?.attackerTurns) ? threat.attackerTurns : null,
         forced_role: facts.forced_role || 'NORMAL',
         tactical_safety: facts.tactical_safety || 'UNKNOWN',
         attack_shape: facts.attack_shape || 'POSITIONAL',
@@ -1851,13 +1880,21 @@
           depth_reached: deepAnalysis?.depthReached ?? null,
           timed_out: Boolean(deepAnalysis?.timedOut)
         }),
+        threat_space_search: threatAnalysis ? compactEvidence({
+          source: threatAnalysis.source || 'unavailable',
+          status: threatAnalysis.status || 'unavailable',
+          max_attacker_turns: threatAnalysis.maxThreatTurns ?? null,
+          timed_out: Boolean(threatAnalysis.timedOut),
+          elapsed_ms: threatAnalysis.elapsedMs ?? null
+        }) : undefined,
         ...(Object.keys(factoredEvidence.common).length
           ? { common_candidate_evidence: factoredEvidence.common }
           : {}),
         rules: 'Renju forbidden-move rules are enabled: BLACK cannot play overline, double-four, or real double-three; exact black five wins. WHITE has no forbidden moves and wins with five or more.',
         decision_policy: [
           'You are the FINAL decision maker. Choose exactly one supplied candidate.',
-          'Never ignore an immediate win, mandatory defense, or proven VCF sequence.',
+          'Never ignore an immediate win, mandatory defense, proven VCF sequence, or threat-space proof of an opponent forced win.',
+          'A threat-space FOUND result is deterministic tactical evidence and outranks heuristic or shallow-search preferences.',
           'Never choose an UNSAFE or LOSING move when a SAFE candidate is available.',
           'Treat local rank, Alpha-Beta score, and deep-search score as strong but finite-horizon evidence; do not mechanically choose local_rank=1.',
           'When tactically safe candidates have close search evidence, use board-wide strategic judgement: initiative, threat multiplicity, connectivity, future forcing potential, and opponent counterplay.'
@@ -2172,9 +2209,9 @@
     }
 
     const id = ++deepWorkerSequence;
-    const timeBudgetMs = mode === 'expert' ? 1500 : 1000;
-    const maxDepth = mode === 'expert' ? 7 : 5;
-    const branch = mode === 'expert' ? 7 : 6;
+    const timeBudgetMs = mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400) : mode === 'expert' ? 1500 : 1000;
+    const maxDepth = mode === 'grandmaster' ? 7 : mode === 'expert' ? 7 : 5;
+    const branch = mode === 'grandmaster' ? 7 : mode === 'expert' ? 7 : 6;
 
     return await new Promise(resolve => {
       let settled = false;
@@ -2247,6 +2284,7 @@
 
       worker.postMessage({
         id,
+        task: 'search',
         board: board.map(row => row.slice()),
         side: WHITE,
         candidates: uniqueMoves.map(move => move.key),
@@ -2255,6 +2293,346 @@
         branch
       });
     });
+  }
+
+  let threatWorkerSequence = 0;
+
+  async function runThreatWorkerAnalysis(candidateMoves, mode, trigger = 'parallel_threat_evidence') {
+    const uniqueMoves = [...new Map(
+      (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
+    ).values()].slice(0, 4);
+    if (!uniqueMoves.length) return null;
+
+    // Do not run a heavy synchronous fallback on the UI thread. The new mode
+    // stays bounded even on browsers that cannot create a Worker.
+    if (typeof Worker === 'undefined') {
+      return {
+        status: 'unavailable',
+        source: 'worker-unavailable',
+        trigger,
+        winner: uniqueMoves[0].key,
+        analyses: [],
+        timedOut: false
+      };
+    }
+
+    const id = ++threatWorkerSequence;
+    const timeBudgetMs = moves.length < 10 ? 800 : 1200;
+    const maxThreatTurns = moves.length < 10 ? 4 : 6;
+    const branch = 8;
+
+    return await new Promise(resolve => {
+      let settled = false;
+      let worker;
+      try {
+        worker = new Worker('/deep-worker.js', { type: 'module' });
+      } catch (error) {
+        resolve({
+          status: 'unavailable',
+          source: 'threat-worker',
+          trigger,
+          winner: uniqueMoves[0].key,
+          analyses: [],
+          error: String(error?.message || error || 'Threat Worker unavailable'),
+          timedOut: false
+        });
+        return;
+      }
+
+      const finish = result => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.terminate();
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        finish({
+          status: 'timeout',
+          source: 'threat-worker',
+          trigger,
+          winner: uniqueMoves[0].key,
+          analyses: [],
+          timedOut: true,
+          elapsedMs: timeBudgetMs,
+          budgetMs: timeBudgetMs,
+          maxThreatTurns
+        });
+      }, timeBudgetMs + 350);
+
+      worker.onmessage = event => {
+        const message = event.data || {};
+        if (message.id !== id) return;
+        if (!message.ok) {
+          finish({
+            status: 'error',
+            source: 'threat-worker',
+            trigger,
+            winner: uniqueMoves[0].key,
+            analyses: [],
+            error: message.error || 'threat worker failed',
+            timedOut: false
+          });
+          return;
+        }
+        finish({
+          ...(message.result || {}),
+          trigger
+        });
+      };
+
+      worker.onerror = event => {
+        finish({
+          status: 'error',
+          source: 'threat-worker',
+          trigger,
+          winner: uniqueMoves[0].key,
+          analyses: [],
+          error: event?.message || 'threat worker crashed',
+          timedOut: false
+        });
+      };
+
+      worker.postMessage({
+        id,
+        task: 'threat',
+        board: board.map(row => row.slice()),
+        side: WHITE,
+        candidates: uniqueMoves.map(move => move.key),
+        timeBudgetMs,
+        maxThreatTurns,
+        branch
+      });
+    });
+  }
+
+  function attachThreatEvidence(candidates, threatAnalysis) {
+    const rows = Array.isArray(threatAnalysis?.analyses) ? threatAnalysis.analyses : [];
+    const byMove = new Map(rows.map(item => [item.move, item]));
+    for (const move of candidates) {
+      const evidence = byMove.get(move.key) || null;
+      move.threatSearch = evidence;
+      if (!evidence || !move.analysis?.facts) continue;
+      move.analysis.facts.opponent_forcing_proof = evidence.forced
+        ? 'FOUND'
+        : evidence.timedOut ? 'TIMEOUT' : 'NOT_FOUND';
+      move.analysis.facts.opponent_forcing_line = Array.isArray(evidence.line) && evidence.line.length
+        ? evidence.line.join('>')
+        : 'NONE';
+      if (evidence.forced) move.analysis.facts.tactical_safety = 'LOSING';
+    }
+    return byMove;
+  }
+
+  function grandmasterCandidateFilter(candidates, threatAnalysis) {
+    const byMove = attachThreatEvidence(candidates, threatAnalysis);
+    const notProvenLosing = candidates.filter(move => byMove.get(move.key)?.forced !== true);
+    const filtered = notProvenLosing.length ? notProvenLosing : candidates;
+    return filtered.slice(0, Math.min(3, filtered.length));
+  }
+
+  function bestDeepCandidate(candidates, deepAnalysis) {
+    const allowed = new Set(candidates.map(move => move.key));
+    return (deepAnalysis?.scores || []).find(item => allowed.has(item.move))?.move || null;
+  }
+
+  function threatEvidenceSnapshot(threatAnalysis) {
+    if (!threatAnalysis) return null;
+    return {
+      status: threatAnalysis.status || null,
+      source: threatAnalysis.source || null,
+      maxThreatTurns: threatAnalysis.maxThreatTurns ?? null,
+      timedOut: Boolean(threatAnalysis.timedOut),
+      elapsedMs: threatAnalysis.elapsedMs ?? null,
+      budgetMs: threatAnalysis.budgetMs ?? null,
+      nodes: threatAnalysis.nodes ?? null,
+      winner: threatAnalysis.winner || null,
+      analyses: (threatAnalysis.analyses || []).map(item => ({
+        move: item.move,
+        forced: Boolean(item.forced),
+        timedOut: Boolean(item.timedOut),
+        attackerTurns: item.attackerTurns ?? null,
+        line: Array.isArray(item.line) ? item.line.slice(0, 16) : []
+      }))
+    };
+  }
+
+  function deterministicGrandmasterResult(context, candidates, choice, deepAnalysis, threatAnalysis, reason) {
+    const selected = candidates.find(move => move.key === choice) || candidates[0];
+    const ranked = [selected, ...candidates.filter(move => move.key !== selected.key)];
+    const deepRows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+    return {
+      answer: { choice: selected.key, confidence: 1, probabilities: { [selected.key]: 1 } },
+      finalChoice: selected.key,
+      localChoice: context.candidates[0]?.key || selected.key,
+      jevSuggested: null,
+      mode: 'grandmaster',
+      forced: context.forced,
+      candidates: ranked,
+      model: 'grandmaster-local-consensus',
+      usage: null,
+      client: null,
+      decisionTrace: {
+        requestShape: {
+          finalDecisionQuestions: 0,
+          candidateCount: candidates.length,
+          httpRequests: 0,
+          decisionAuthority: reason,
+          parallelEvidence: true
+        },
+        preJevDeepSearch: deepAnalysis ? {
+          status: deepAnalysis.status || null,
+          source: deepAnalysis.source || null,
+          depthReached: deepAnalysis.depthReached ?? null,
+          timedOut: Boolean(deepAnalysis.timedOut),
+          elapsedMs: deepAnalysis.elapsedMs ?? null,
+          budgetMs: deepAnalysis.budgetMs ?? null,
+          scores: deepRows.map(item => ({ move: item.move, score: item.score }))
+        } : null,
+        preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis)
+      },
+      stageNote: reason === 'threat_filter_single'
+        ? '宗师模式：威胁空间搜索排除已证明的强制败着，仅剩唯一安全候选（0 次 Jev 请求）'
+        : '宗师模式：Alpha-Beta 深搜与威胁空间搜索证据一致，直接落子（0 次 Jev 请求）'
+    };
+  }
+
+  async function grandmasterDecision() {
+    const context = buildAdvancedCandidates('grandmaster');
+    const allCandidates = context.candidates;
+    if (!allCandidates.length) throw new Error('宗师模式没有生成合法候选点');
+
+    allCandidates.forEach((move, index) => {
+      move.localRank = move.rank ?? index + 1;
+      move.localNorm = allCandidates.length === 1 ? 1 : 1 - (index / (allCandidates.length - 1));
+    });
+
+    if (allCandidates.length === 1) {
+      return deterministicGrandmasterResult(context, allCandidates, allCandidates[0].key, null, null, 'single_candidate');
+    }
+
+    const workerCandidates = allCandidates.slice(0, Math.min(4, allCandidates.length));
+    updateApiState('busy', '宗师模式：深搜与威胁空间搜索并行计算…');
+    const [deepAnalysis, threatAnalysis] = await Promise.all([
+      runDeepWorkerVerification(workerCandidates, 'grandmaster', 'grandmaster_parallel'),
+      runThreatWorkerAnalysis(workerCandidates, 'grandmaster', 'grandmaster_parallel')
+    ]);
+
+    const deepRows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+    const deepByMove = new Map(deepRows.map((item, index) => [
+      item.move,
+      { score: item.score, rank: index + 1 }
+    ]));
+    allCandidates.forEach(move => {
+      const deep = deepByMove.get(move.key);
+      move.deepSearchScore = Number.isFinite(deep?.score) ? deep.score : null;
+      move.deepSearchRank = deep?.rank ?? null;
+    });
+
+    const candidates = grandmasterCandidateFilter(allCandidates, threatAnalysis);
+    const localChoice = candidates[0];
+    const deepChoice = bestDeepCandidate(candidates, deepAnalysis);
+    const localThreat = localChoice?.threatSearch || null;
+
+    if (candidates.length === 1) {
+      return deterministicGrandmasterResult(
+        context, candidates, candidates[0].key, deepAnalysis, threatAnalysis, 'threat_filter_single'
+      );
+    }
+
+    const reliableDeep = deepAnalysis?.status === 'completed'
+      && !deepAnalysis?.timedOut
+      && Boolean(deepChoice);
+    const reliableThreat = threatAnalysis?.status === 'completed'
+      && !threatAnalysis?.timedOut
+      && localThreat
+      && !localThreat.timedOut
+      && !localThreat.forced;
+
+    if (reliableDeep && reliableThreat && deepChoice === localChoice.key) {
+      return deterministicGrandmasterResult(
+        context, candidates, localChoice.key, deepAnalysis, threatAnalysis, 'multi_engine_consensus'
+      );
+    }
+
+    const payload = buildFinalJevPayload(context, candidates, deepAnalysis, threatAnalysis);
+    updateApiState('busy', '宗师模式：多路证据有分歧，Jev 正在裁决…');
+    const data = await callJev(payload);
+    const rawAnswer = data?.answers?.best_move;
+    if (!rawAnswer || typeof rawAnswer.choice !== 'string') {
+      throw new Error('Jev 响应中缺少 answers.best_move.choice');
+    }
+
+    const finalChoice = rawAnswer.choice.toUpperCase();
+    const candidateKeys = new Set(candidates.map(move => move.key));
+    if (!candidateKeys.has(finalChoice)) {
+      throw new Error(`Jev 返回候选集之外的落点：${rawAnswer.choice}`);
+    }
+
+    const probabilities = rawAnswer.probabilities && typeof rawAnswer.probabilities === 'object'
+      ? Object.fromEntries(
+          Object.entries(rawAnswer.probabilities)
+            .filter(([key]) => candidateKeys.has(String(key).toUpperCase()))
+            .map(([key, value]) => [String(key).toUpperCase(), Number(value)])
+        )
+      : { [finalChoice]: 1 };
+    const probabilityConfidence = Number(probabilities[finalChoice]);
+    const answer = {
+      ...rawAnswer,
+      choice: finalChoice,
+      confidence: Number.isFinite(rawAnswer.confidence)
+        ? rawAnswer.confidence
+        : Number.isFinite(probabilityConfidence) ? probabilityConfidence : null,
+      probabilities
+    };
+    const final = candidates.find(move => move.key === finalChoice);
+    const ranked = [final, ...candidates.filter(move => move.key !== finalChoice)];
+
+    return {
+      answer,
+      finalChoice,
+      localChoice: context.candidates[0]?.key || localChoice.key,
+      jevSuggested: finalChoice,
+      mode: 'grandmaster',
+      forced: context.forced,
+      candidates: ranked,
+      model: data?.model || settings.model,
+      usage: data?.usage || null,
+      client: data?.__client || null,
+      decisionTrace: {
+        requestShape: {
+          finalDecisionQuestions: 1,
+          candidateCount: candidates.length,
+          httpRequests: data?.__client?.cached ? 0 : (data?.__client?.attempts || 1),
+          localEvidenceVisibleToJev: true,
+          threatEvidenceVisibleToJev: true,
+          decisionAuthority: 'jev_on_disagreement',
+          parallelEvidence: true
+        },
+        preJevDeepSearch: deepAnalysis ? {
+          status: deepAnalysis.status || null,
+          source: deepAnalysis.source || null,
+          depthReached: deepAnalysis.depthReached ?? null,
+          timedOut: Boolean(deepAnalysis.timedOut),
+          elapsedMs: deepAnalysis.elapsedMs ?? null,
+          budgetMs: deepAnalysis.budgetMs ?? null,
+          scores: deepRows.map(item => ({ move: item.move, score: item.score }))
+        } : null,
+        preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
+        finalDecision: compactAnswer(answer),
+        localEvidence: candidates.map(move => ({
+          move: move.key,
+          localRank: move.localRank,
+          localSearchScore: Number.isFinite(move.searchScore) ? move.searchScore : null,
+          deepSearchRank: move.deepSearchRank,
+          deepSearchScore: Number.isFinite(move.deepSearchScore) ? move.deepSearchScore : null,
+          threatSearch: move.threatSearch || null,
+          facts: move.analysis?.facts || null
+        }))
+      },
+      stageNote: `宗师模式：Alpha-Beta / Deep Search 与 Threat-space Search 出现分歧或证据不足，Jev 在 ${candidates.length} 个过滤候选中最终选择 ${finalChoice}（最多 1 次 Jev 请求）`
+    };
   }
 
   function shouldRunPreJevDeepSearch(mode, candidates) {
@@ -2277,6 +2655,7 @@
   }
 
   async function advancedDecision(mode) {
+    if (mode === 'grandmaster') return grandmasterDecision();
     const context = buildAdvancedCandidates(mode);
     const candidates = context.candidates;
     if (!candidates.length) throw new Error('本地引擎没有生成合法候选点');
