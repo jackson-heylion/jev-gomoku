@@ -585,6 +585,15 @@
       });
     }
 
+    if (d.trace?.challenger?.rescue?.length) {
+      lines.push('  Horizon 救援候选：');
+      d.trace.challenger.rescue.forEach(item => {
+        lines.push(
+          `    ${item.move} | deep=${compactNumber(item.searchScore, 1)} | safety=${item.safety || '—'} | oppDouble=${item.opponentDoubleThreat || '—'}`
+        );
+      });
+    }
+
     if (d.trace?.atomic?.length) {
       lines.push('  Jev Atomic 原始判断：');
       d.trace.atomic.forEach(item => {
@@ -1957,15 +1966,25 @@
       agreement = 'Jev 未介入：本地引擎发现了明确的必胜、必防或强制手。';
     } else if (result.mode === 'jev') {
       agreement = '这一手由 Jev 直接判断并选择。';
-    } else if (result.localChoice && result.jevSuggested && result.localChoice !== result.jevSuggested) {
-      const verification = result.decisionTrace?.challenger?.verification;
-      if (verification) {
-        agreement = `Local 首选 ${result.localChoice}，Jev 独立提出 ${result.jevSuggested}；更深搜索最终选择 ${finalChoice}。`;
-      } else {
-        agreement = `Local 首选 ${result.localChoice}，Jev 独立提出 ${result.jevSuggested}。`;
-      }
     } else {
-      agreement = 'Jev 与 Local 独立判断得到同一选择。';
+      const challenger = result.decisionTrace?.challenger;
+      if (challenger?.rescue?.length) {
+        if (finalChoice !== result.localChoice) {
+          agreement = `Local 首选 ${result.localChoice}，Jev 建议 ${result.jevSuggested || result.localChoice}；深搜发现败势风险，扩大候选后改走 ${finalChoice}。`;
+        } else {
+          agreement = `Local 与 Jev 都倾向 ${result.localChoice}；额外深搜发现败势风险并扩大候选复核，最终仍选择 ${finalChoice}。`;
+        }
+      } else if (result.localChoice && result.jevSuggested && result.localChoice !== result.jevSuggested) {
+        if (challenger?.verification) {
+          agreement = `Local 首选 ${result.localChoice}，Jev 独立提出 ${result.jevSuggested}；更深搜索最终选择 ${finalChoice}。`;
+        } else {
+          agreement = `Local 首选 ${result.localChoice}，Jev 独立提出 ${result.jevSuggested}。`;
+        }
+      } else if (challenger?.verificationTrigger === 'horizon_guard') {
+        agreement = `Jev 与 Local 都倾向 ${result.localChoice || finalChoice}；系统额外进行了战术地平线深搜复核。`;
+      } else {
+        agreement = 'Jev 与 Local 独立判断得到同一选择。';
+      }
     }
 
     return { verdict, reason, agreement, modeLabel };
@@ -1978,10 +1997,17 @@
     const human = buildHumanDecision(result, finalChoice);
 
     const jevParticipated = result.mode !== 'local' && !result.fallbackReason && !result.stageNote?.includes('0 次 Jev');
+    const challengerTrace = result.decisionTrace?.challenger;
     jevMove.textContent = finalChoice;
-    jevDecisionLabel.textContent = jevParticipated
-      ? `${human.modeLabel} · Jev 选择`
-      : '本地战术 · 白棋落在';
+    jevDecisionLabel.textContent = challengerTrace?.rescue?.length
+      ? `${human.modeLabel} · 深搜救援`
+      : challengerTrace?.verification && challengerTrace?.disagreed
+        ? `${human.modeLabel} · Jev 挑战裁决`
+        : challengerTrace?.verificationTrigger === 'horizon_guard'
+          ? `${human.modeLabel} · Horizon 复核`
+          : jevParticipated
+            ? `${human.modeLabel} · Jev 选择`
+            : '本地战术 · 白棋落在';
     jevVerdict.textContent = human.verdict;
     jevInfo.innerHTML = `<strong>${escapeHtml(human.reason)}</strong><span>${escapeHtml(human.agreement)}</span>`;
 
