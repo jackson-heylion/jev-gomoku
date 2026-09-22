@@ -825,16 +825,18 @@
 
   function showResultModal(text, winner) {
     const modeLabel = publicModeLabel(settings.strengthMode);
+    const human = playerColor();
+    const ai = aiColor();
 
     resultTitle.textContent = text;
     resultIcon.textContent = winner === BLACK ? '●' : winner === WHITE ? '○' : '＝';
-    resultIcon.className = `result-icon ${winner === BLACK ? 'player-win' : winner === WHITE ? 'ai-win' : 'draw'}`;
-    resultDesc.textContent = winner === BLACK
-      ? '你执黑完成五连，本局获胜。'
-      : winner === WHITE
-        ? 'Jev 执白完成五连，赢下了这一局。'
+    resultIcon.className = `result-icon ${winner === human ? 'player-win' : winner === ai ? 'ai-win' : 'draw'}`;
+    resultDesc.textContent = winner === human
+      ? `你执${colorShortZh(human)}完成五连，本局获胜。`
+      : winner === ai
+        ? `Jev 执${colorShortZh(ai)}完成五连，赢下了这一局。`
         : '棋盘已下满，你与 Jev 战成平局。';
-    resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel}`;
+    resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel} · ${ruleSummaryText()}`;
     resultCopyBtn.textContent = '复制棋谱';
     resultModal.classList.add('show');
   }
@@ -853,18 +855,19 @@
     showResultModal(text, winner);
   }
 
-  function restart() {
+  function resetGameState(started) {
     if (requestController) requestController.abort();
     requestController = null;
     board = makeBoard();
     current = BLACK;
     moves = [];
     gameOver = false;
+    gameStarted = Boolean(started);
     thinking = false;
     lastJev = null;
     jevDecisionLog = [];
     gameResult = null;
-    gameStartedAt = new Date();
+    gameStartedAt = started ? new Date() : null;
     gameSeed = createGameSeed();
     turnStartedAt = performance.now();
     thinkingStartedAt = null;
@@ -881,26 +884,46 @@
     alternativesTitle.textContent = '其他考虑';
     alternatives.innerHTML = '<div class="empty">暂无备选落点。</div>';
     retryBtn.style.display = 'none';
-    drawBoard(); updateHistory(); updateStatus(); updateApiState();
+    drawBoard();
+    updateHistory();
+    updateStatus();
+    updateApiState();
+  }
+
+  function startGame() {
+    resetGameState(true);
+    const enabled = enabledForbiddenLabels();
+    ruleHint.textContent = `${ruleSummaryText()}。点击交叉点落子。`;
+    runtimeRulesHint.textContent = `本局规则已锁定：你执${colorShortZh(playerColor())}，Jev 执${colorShortZh(aiColor())}；黑棋禁手：${enabled.length ? enabled.join('、') : '关闭'}。Local、Deep Worker、Threat-space 与 Jev 使用同一规则。`;
+    toast(`已开始：${ruleSummaryText()} · ${publicModeLabel(settings.strengthMode)}`, 3200);
+    if (aiColor() === BLACK) setTimeout(jevTurn, 180);
+  }
+
+  function restart() {
+    resetGameState(false);
+    ruleHint.textContent = '开局前可选择执黑 / 执白，并配置黑棋长连、四四、三三禁手。';
+    runtimeRulesHint.textContent = '规则将在开局时锁定，并同步应用于玩家、Local、Deep Worker、Threat-space 与 Jev。';
+    openSettings(true);
   }
 
   function undoPlyCount() {
     if (!moves.length) return 0;
+    const human = playerColor();
+    const ai = aiColor();
+    const lastMove = moves[moves.length - 1];
 
-    // During a finished game, current is intentionally not advanced after the
-    // winning move. Derive the rollback from the actual last stone instead of
-    // the stale side-to-move value.
     if (gameOver) {
-      const lastMove = moves[moves.length - 1];
-      return Math.min(lastMove?.color === WHITE ? 2 : 1, moves.length);
+      return Math.min(lastMove?.color === ai ? 2 : 1, moves.length);
     }
-
-    return Math.min(current === BLACK ? 2 : 1, moves.length);
+    if (current === human && lastMove?.color === ai) {
+      return Math.min(2, moves.length);
+    }
+    return 1;
   }
 
   function undo() {
     if (thinking) { toast('Jev 正在思考，暂时不能悔棋'); return; }
-    if (!moves.length) return;
+    if (!gameStarted || !moves.length) return;
 
     const remove = undoPlyCount();
     if (gameOver) gameOver = false;
@@ -911,7 +934,7 @@
       board[m.r][m.c] = EMPTY;
     }
     jevDecisionLog = jevDecisionLog.filter(item => item.moveNo <= moves.length);
-    current = BLACK;
+    current = moves.length % 2 === 0 ? BLACK : WHITE;
     turnStartedAt = performance.now();
     thinkingStartedAt = null;
     lastThinkMs = null;
@@ -926,27 +949,39 @@
     alternativesTitle.textContent = '其他考虑';
     alternatives.innerHTML = '<div class="empty">暂无备选落点。</div>';
     retryBtn.style.display = 'none';
-    drawBoard(); updateHistory(); updateStatus();
+    drawBoard();
+    updateHistory();
+    updateStatus();
+    if (current === aiColor()) setTimeout(jevTurn, 180);
   }
 
   function updateStatus() {
+    if (!gameStarted) {
+      turnText.innerHTML = '<span>等待开局</span>';
+      turnHint.textContent = '请先完成开局设置';
+      gameMeta.textContent = '尚未开始';
+      lastMoveText.textContent = '尚未落子';
+      refreshTurnClock();
+      return;
+    }
     if (gameOver) return;
+
     const nextNo = moves.length + 1;
+    const color = current;
+    const stoneClass = colorCss(color);
     if (thinking) {
       const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
-      turnText.innerHTML = `<span class="stone-dot white"></span><span class="thinking">${actor} 正在思考</span>`;
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span class="thinking">${actor} 正在思考</span>`;
       turnHint.textContent = '正在分析局面，请稍候';
-      gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
-    } else if (current === BLACK) {
-      turnText.innerHTML = '<span class="stone-dot black"></span><span>轮到你了</span>';
-      turnHint.textContent = '点击棋盘交叉点落下一枚黑棋';
-      gameMeta.textContent = `第 ${nextNo} 手 · 黑棋`;
+    } else if (current === playerColor()) {
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span>轮到你了</span>`;
+      turnHint.textContent = `点击棋盘交叉点落下一枚${colorNameZh(color)}`;
     } else {
       const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
-      turnText.innerHTML = `<span class="stone-dot white"></span><span>${actor} 的回合</span>`;
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span>${actor} 的回合</span>`;
       turnHint.textContent = `${actor} 即将开始思考`;
-      gameMeta.textContent = `第 ${nextNo} 手 · 白棋`;
     }
+    gameMeta.textContent = `第 ${nextNo} 手 · ${colorNameZh(color)}`;
     lastMoveText.textContent = moves.length ? `最后落子：${moves[moves.length - 1].coord}` : '尚未落子';
     refreshTurnClock();
   }
@@ -1024,7 +1059,7 @@
       : d.mode === 'strong' ? 'Jev 强化'
       : d.mode === 'grandmaster' ? 'Jev 宗师'
       : 'Jev 大师';
-    lines.push(`第 ${d.moveNo} 手 · 白 ${d.chosen}`);
+    lines.push(`第 ${d.moveNo} 手 · ${colorShortZh(aiColor())} ${d.chosen}`);
     lines.push(`  模式：${modeLabel}`);
     if (d.stageNote) lines.push(`  决策阶段：${d.stageNote}`);
     if (d.forced) lines.push(`  强制类型：${d.forced === 'win' ? '立即取胜' : d.forced === 'block' ? '必须防守' : d.forced}`);
@@ -1136,13 +1171,20 @@
   }
 
   function formatGameRecord() {
-    const result = gameResult?.text || (gameOver ? '对局结束' : '进行中');
+    const result = gameResult?.text || (gameOver ? '对局结束' : gameStarted ? '进行中' : '未开始');
     const started = gameStartedAt instanceof Date ? gameStartedAt.toLocaleString() : '';
+    const blackOwner = playerColor() === BLACK ? '玩家' : 'Jev / 本地引擎';
+    const whiteOwner = playerColor() === WHITE ? '玩家' : 'Jev / 本地引擎';
+    const rules = activeRuleConfig();
     const lines = [
       'Jev 五子棋棋谱',
       `棋盘：${SIZE}×${SIZE}`,
-      '黑方：玩家',
-      '白方：Jev / 本地引擎',
+      `黑方：${blackOwner}`,
+      `白方：${whiteOwner}`,
+      `玩家棋色：${colorNameZh(playerColor())}`,
+      `AI 棋色：${colorNameZh(aiColor())}`,
+      `黑棋禁手：长连=${rules.overline ? '开' : '关'}；四四=${rules.fourFour ? '开' : '关'}；三三=${rules.threeThree ? '开' : '关'}`,
+      `胜负规则：${rules.overline ? '黑棋恰好五连获胜；白棋五连及以上获胜' : '黑白双方五连及以上获胜'}`,
       `结果：${result}`,
       `开始：${started}`,
       `对局种子：${gameSeed}`,
@@ -1164,9 +1206,8 @@
 
     lines.push('', '【Jev / AI 决策过程】');
     const activeDecisions = jevDecisionLog.filter(d => d.moveNo <= moves.length);
-    if (!activeDecisions.length) {
-      lines.push('—');
-    } else {
+    if (!activeDecisions.length) lines.push('—');
+    else {
       activeDecisions.forEach((d, i) => {
         if (i) lines.push('');
         appendDecisionTrace(lines, d);
