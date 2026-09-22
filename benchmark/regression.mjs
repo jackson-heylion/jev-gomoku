@@ -746,6 +746,12 @@ async function testWorkerRulePropagation() {
   if (!disabled.ok || disabled.result?.winner !== 'E8') {
     throw new Error('Worker rejected legal BLACK overline after overline rule was disabled');
   }
+  if (disabled.result?.quiescenceDepth !== 2) {
+    throw new Error('Deep Worker must expose the bounded threat-quiescence extension');
+  }
+  if (!Number.isFinite(disabled.result?.transpositionEntries)) {
+    throw new Error('Deep Worker must expose bounded transposition-table usage');
+  }
 
   const enabled = await run({ overline: true, fourFour: true, threeThree: true });
   if (enabled.ok) {
