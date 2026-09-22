@@ -724,4 +724,209 @@
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
-   
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: testController.signal
+      });
+
+      const elapsed = Math.round(performance.now() - started);
+      const raw = await response.text();
+      let data = null;
+      try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+
+      if (!response.ok) {
+        const detail = data?.detail || data?.message || data?.error || raw || response.statusText || `HTTP ${response.status}`;
+        const detailText = typeof detail === 'string' ? detail : JSON.stringify(detail);
+        throw Object.assign(new Error(detailText), { httpStatus: response.status });
+      }
+
+      const answer = data?.answers?.connection_test;
+      if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') {
+        throw new Error('API 已响应，但返回结构不符合预期（缺少 answers.connection_test.choice）。');
+      }
+
+      const actualModel = data?.model || model;
+      const inTokens = data?.usage?.input_tokens;
+      const outTokens = data?.usage?.output_tokens;
+      const usage = Number.isFinite(inTokens) || Number.isFinite(outTokens)
+        ? ` · Token ${inTokens ?? '?'} in / ${outTokens ?? '?'} out`
+        : '';
+      setConnectionTest('ok', `连接成功 · HTTP ${response.status} · ${elapsed} ms · ${actualModel}${usage}`);
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        setConnectionTest('err', '检测超时（15 秒）或已取消。请检查网络、Endpoint 与 CORS。');
+      } else {
+        const status = err?.httpStatus;
+        let message = friendlyError(err);
+        if (status === 401) message = `API Key 无效或认证失败。${message ? ` ${message}` : ''}`;
+        else if (status === 403) message = `API Key 没有访问该模型或接口的权限。${message ? ` ${message}` : ''}`;
+        else if (status === 404) message = `Endpoint 不存在，请检查 API 地址。${message ? ` ${message}` : ''}`;
+        else if (status === 422 || status === 400) message = `API 已连通，但 Model 或请求参数未通过校验。${message ? ` ${message}` : ''}`;
+        else if (status === 429) message = `API 已连通，但当前被限流或额度不足。${message ? ` ${message}` : ''}`;
+        else if (status >= 500) message = `TypeSafe 服务端返回异常。${message ? ` ${message}` : ''}`;
+        if (!status && /浏览器无法|Failed to fetch|NetworkError|Load failed|CORS/i.test(message)) {
+          message = accessMode === 'proxy'
+            ? `无法连接本地代理。请运行 start-jev.command 或 node jev-proxy.mjs，并使用代理启动后显示/自动打开的地址。当前 Endpoint：${endpoint}`
+            : '浏览器直连被网络或 CORS 阻止。建议切换“本地代理（推荐）”；前端页面本身无法绕过服务端 CORS。';
+        }
+        setConnectionTest('err', `${status ? `HTTP ${status} · ` : ''}${message}`);
+      }
+    } finally {
+      clearTimeout(timeout);
+      testController = null;
+      testConnectionBtn.disabled = false;
+      testConnectionBtn.textContent = '检测连接';
+    }
+  }
+
+  function updateApiState(kind = null, text = null) {
+    apiIndicator.className = 'indicator';
+    if (kind === 'busy') apiIndicator.classList.add('busy');
+    else if (kind === 'err') apiIndicator.classList.add('err');
+    else if (settings.apiKey) apiIndicator.classList.add('ok');
+
+    if (text) apiLabel.textContent = text;
+    else {
+      const strengthLabel = settings.strengthMode === 'jev' ? '纯 Jev' : settings.strengthMode === 'strong' ? '强力混合' : '大师混合';
+      apiLabel.textContent = settings.apiKey ? `${settings.model} · ${strengthLabel} · ${settings.accessMode === 'proxy' ? '本地代理' : '浏览器直连'}` : '未配置 API Key';
+    }
+  }
+
+  function openSettings() {
+    apiKeyInput.value = settings.apiKey;
+    modelInput.value = settings.model;
+    strengthModeInput.value = settings.strengthMode || 'expert';
+    accessModeInput.value = settings.accessMode || 'proxy';
+    endpointInput.value = settings.endpoint;
+    rememberKeyInput.checked = settings.remember;
+    updateAccessModeUI(false);
+    clearConnectionTest();
+    settingsModal.classList.add('show');
+    setTimeout(() => apiKeyInput.focus(), 30);
+  }
+
+  function toast(msg, duration = 2600) {
+    clearTimeout(toastTimer);
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), duration);
+  }
+
+  function coord(r, c) { return `${COLS[c]}${r + 1}`; }
+
+  function drawBoard() {
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const margin = 46;
+    const span = (W - margin * 2) / (SIZE - 1);
+
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, '#d7ad6c');
+    grad.addColorStop(1, '#bd8d49');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = 'rgba(53, 33, 12, .72)';
+    ctx.lineWidth = 1.25;
+    for (let i = 0; i < SIZE; i++) {
+      const p = margin + i * span;
+      ctx.beginPath(); ctx.moveTo(margin, p); ctx.lineTo(W - margin, p); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p, margin); ctx.lineTo(p, H - margin); ctx.stroke();
+    }
+
+    ctx.fillStyle = 'rgba(54, 32, 10, .85)';
+    [[3,3],[3,11],[7,7],[11,3],[11,11]].forEach(([r,c]) => {
+      ctx.beginPath(); ctx.arc(margin + c*span, margin + r*span, 4.1, 0, Math.PI*2); ctx.fill();
+    });
+
+    ctx.fillStyle = 'rgba(55, 36, 18, .76)';
+    ctx.font = '15px ui-sans-serif, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let c = 0; c < SIZE; c++) ctx.fillText(COLS[c], margin + c * span, 19);
+    ctx.textAlign = 'right';
+    for (let r = 0; r < SIZE; r++) ctx.fillText(String(r + 1), 28, margin + r * span);
+
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) drawStone(r, c, board[r][c], margin, span);
+      }
+    }
+
+    if (moves.length) {
+      const m = moves[moves.length - 1];
+      const x = margin + m.c * span, y = margin + m.r * span;
+      ctx.strokeStyle = m.color === BLACK ? '#ffd166' : '#e34d59';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(x, y, span * .17, 0, Math.PI*2); ctx.stroke();
+    }
+  }
+
+  function drawStone(r, c, color, margin, span) {
+    const x = margin + c * span, y = margin + r * span;
+    const radius = span * .41;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,.35)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetY = 3;
+    const g = ctx.createRadialGradient(x - radius*.35, y - radius*.4, radius*.1, x, y, radius);
+    if (color === BLACK) {
+      g.addColorStop(0, '#4a515a'); g.addColorStop(.28, '#20252b'); g.addColorStop(1, '#060708');
+    } else {
+      g.addColorStop(0, '#ffffff'); g.addColorStop(.55, '#f2f4f6'); g.addColorStop(1, '#cbd1d6');
+    }
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  function pointFromEvent(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    const margin = 46;
+    const span = (canvas.width - margin * 2) / (SIZE - 1);
+    const c = Math.round((x - margin) / span);
+    const r = Math.round((y - margin) / span);
+    if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return null;
+    const px = margin + c * span, py = margin + r * span;
+    if (Math.hypot(x - px, y - py) > span * .46) return null;
+    return { r, c };
+  }
+
+  function place(r, c, color, source) {
+    if (board[r][c] !== EMPTY) return false;
+    board[r][c] = color;
+    moves.push({ r, c, color, source, coord: coord(r, c) });
+    drawBoard();
+    updateHistory();
+    updateStatus();
+    return true;
+  }
+
+  function onBoardClick(e) {
+    if (gameOver || thinking || current !== BLACK) return;
+    if (!settings.apiKey) {
+      openSettings();
+      toast('请先配置 Jev API Key');
+      return;
+    }
+    const p = pointFromEvent(e);
+    if (!p || board[p.r][p.c] !== EMPTY) return;
+
+    place(p.r, p.c, BLACK, '你');
+    if (isWin(p.r, p.c, BLACK)) {
+      finish('你赢了', BLACK);
+      return;
+    }
+    if (moves.length === SIZE * SIZE) {
+      finish('平局', EMPTY);
+      return;
+    }
+    current = WHITE;
+ 
