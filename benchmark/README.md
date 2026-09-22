@@ -4,7 +4,7 @@
 
 - **Local**：只使用当前生产版的本地 Alpha-Beta + VCF/VCT 引擎。
 - **Jev Blind**：不看 Local 候选和评分，Jev 直接根据完整棋盘和所有合法落点选棋。
-- **Hybrid**：使用当前生产版的 Local 候选过滤、Atomic + Pairwise Jev 判断和融合权重。
+- **Hybrid**：Local 负责候选过滤、战术分析与深搜证据，Jev 在过滤后的候选集中做最终落子决定。
 
 Benchmark 会让三种引擎两两自动对战，并对同一 opening 交换黑白，降低五子棋先手优势对结果的干扰。
 
@@ -92,9 +92,9 @@ benchmark/results/<timestamp>.md
 
 1. **Hybrid vs Local 换色后的得分率**：判断 Jev 是否真的带来棋力增益。
 2. **Jev 与 Local 的分歧率**：判断 Jev 有没有提供不同信息。
-3. **Hybrid override rate**：Jev 的不同意见最终有没有改变落子。
+3. **Hybrid override rate**：Jev 最终选择与 Local #1 不同时，实际改写 Local 的比例。
 4. **战术错误率**：是否漏必胜、漏必防。
 5. **每局 Jev 调用与 Token**：衡量棋力增益是否值得成本。
-6. **Blind 在 Local 候选集之外的落子**：用于发现候选生成器可能漏掉的好手。
+6. **Blind 在 Local 候选集之外的落子**：用于发现候选生成器可能漏掉的好手。\n\n当前 Hybrid 的决策权约定：Local 决定哪些候选可以进入最终决策，并提供 Alpha-Beta、VCF/VCT、战术安全和深搜证据；候选数大于 1 时，每个回合只向 Jev 发起一次请求，由 `answers.best_move.choice` 直接决定最终落子。
 
 Benchmark 不会输出或保存 `JEV_API_KEY`。
