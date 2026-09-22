@@ -131,7 +131,7 @@
       }
       const answer = data?.answers?.connection_test;
       if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') {
-        throw new Error('API 已响应，但返回结构不符合预期。');
+        throw new Error('AI 服务响应异常，请稍后重试。');
       }
       setConnectionTest('ok', `AI 服务正常 · ${elapsed} ms`);
     } catch (err) {
@@ -1645,13 +1645,13 @@
 
     let agreement;
     if (result.mode === 'local' || result.stageNote?.includes('0 次 Jev')) {
-      agreement = '这是本地确定性战术判断，本回合不需要调用 Jev。';
+      agreement = '这一手已有明确的战术结论，无需 Jev 再判断。';
     } else if (result.mode === 'jev') {
-      agreement = '这一手由 Jev 直接从合法落点中选择。';
+      agreement = '这一手由 Jev 直接判断并选择。';
     } else if (result.jevSuggested && result.jevSuggested !== finalChoice) {
       agreement = `Jev 更偏向 ${result.jevSuggested}，但综合本地搜索后最终仍选择 ${finalChoice}。`;
     } else {
-      agreement = 'Jev 与本地首选一致。';
+      agreement = 'Jev 与本地搜索意见一致。';
     }
 
     return { verdict, reason, agreement, modeLabel };
