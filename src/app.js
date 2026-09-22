@@ -1632,7 +1632,7 @@
         seed: fastPatternSeedScore(move, color) + fastPatternSeedScore(move, opponent) * .7
       }))
       .sort((a, b) => b.seed - a.seed)
-      .slice(0, Math.max(14, limit * 5));
+      .slice(0, Math.max(10, limit * 3));
 
     return shortlist
       .map(move => {
@@ -1650,13 +1650,30 @@
   }
 
   function mergeRootCandidates(primary, hotspots, limit) {
-    const map = new Map();
-    for (const move of [...hotspots, ...primary]) {
-      if (!move || map.has(move.key)) continue;
-      map.set(move.key, move);
-      if (map.size >= limit) break;
+    // Preserve the engine's proven move ordering at the front because Alpha-Beta
+    // pruning is extremely sensitive to root order. Pattern hotspots only replace
+    // the weakest tail entries when they are genuinely new candidates.
+    const result = primary.slice(0, limit);
+    const keys = new Set(result.map(move => move.key));
+    let replaceIndex = result.length - 1;
+
+    for (const move of hotspots) {
+      if (!move || keys.has(move.key)) continue;
+      if (result.length < limit) {
+        result.push(move);
+        keys.add(move.key);
+        continue;
+      }
+      while (replaceIndex >= Math.max(2, Math.floor(limit * .65))) {
+        const displaced = result[replaceIndex];
+        if (displaced) keys.delete(displaced.key);
+        result[replaceIndex] = move;
+        keys.add(move.key);
+        replaceIndex--;
+        break;
+      }
     }
-    return [...map.values()];
+    return result;
   }
 
   function quickMoveScore(move, color) {
