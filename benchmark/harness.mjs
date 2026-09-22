@@ -207,7 +207,17 @@ function injectBenchmarkHook(source) {
     "      return blackForbiddenInfo(point.r, point.c);",
     "    },",
     "    legalBlackMoves() { return legalMoves(BLACK).map(move => move.key); },",
-    "    orderedBlack(limit) { return orderedMoves(BLACK, limit || 64, 2).map(move => move.key); }",
+    "    orderedBlack(limit) { return orderedMoves(BLACK, limit || 64, 2).map(move => move.key); },",
+    "    setTurnState(color, ended) { current = color; gameOver = Boolean(ended); },",
+    "    undoTurn() {",
+    "      undo();",
+    "      return {",
+    "        current,",
+    "        gameOver,",
+    "        moves: moves.map(move => ({ ...move })),",
+    "        board: board.map(row => row.slice())",
+    "      };",
+    "    }",
     '  };',
     ''
   ].join('\n');

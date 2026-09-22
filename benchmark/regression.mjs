@@ -165,6 +165,66 @@ async function testMustBlockOpponentForkCreator() {
   }
 }
 
+async function testUndoAfterGameOver() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Undo regression must not call Jev');
+    }
+  });
+
+  // White just made the terminal move. The old implementation looked at
+  // current=WHITE and removed only one stone, leaving the player's previous
+  // black stone on the board.
+  {
+    const position = positionFromSequence(['H8', 'H9', 'G8', 'G9']);
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+    engine.setTurnState(2, true);
+    const state = engine.undoTurn();
+
+    if (state.gameOver) throw new Error('White-terminal undo must reopen the game');
+    if (state.current !== BLACK) throw new Error('White-terminal undo must return the turn to BLACK');
+    if (state.moves.length !== 2) {
+      throw new Error('White-terminal undo must remove two plies, got ' + state.moves.length);
+    }
+    if (state.moves.map(move => move.coord).join(',') !== 'H8,H9') {
+      throw new Error('White-terminal undo left the wrong move history');
+    }
+  }
+
+  // Black just made the terminal move. Only that black stone should be
+  // removed so the player can choose a different move.
+  {
+    const position = positionFromSequence(['H8', 'H9', 'G8']);
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+    engine.setTurnState(BLACK, true);
+    const state = engine.undoTurn();
+
+    if (state.gameOver) throw new Error('Black-terminal undo must reopen the game');
+    if (state.current !== BLACK) throw new Error('Black-terminal undo must return the turn to BLACK');
+    if (state.moves.length !== 2) {
+      throw new Error('Black-terminal undo must remove one ply, got ' + state.moves.length);
+    }
+    if (state.moves.map(move => move.coord).join(',') !== 'H8,H9') {
+      throw new Error('Black-terminal undo left the wrong move history');
+    }
+  }
+
+  // Normal player turn after Jev has replied: undo still rolls back the
+  // complete player+Jev turn pair.
+  {
+    const position = positionFromSequence(['H8', 'H9', 'G8', 'G9']);
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+    engine.setTurnState(BLACK, false);
+    const state = engine.undoTurn();
+
+    if (state.moves.length !== 2 || state.current !== BLACK || state.gameOver) {
+      throw new Error('Normal undo semantics regressed');
+    }
+  }
+
+  console.log('undo regression: terminal-white=2 plies, terminal-black=1 ply, normal=2 plies');
+}
+
 async function testRenjuForbiddenMoves() {
   const engine = await loadProductionEngine({
     request: async () => {
@@ -245,4 +305,5 @@ async function testRenjuForbiddenMoves() {
 await testJevFinalDecisionAuthority();
 await testMustBlockOpponentForkCreator();
 await testRenjuForbiddenMoves();
+await testUndoAfterGameOver();
 console.log('Engine regression tests passed.');
