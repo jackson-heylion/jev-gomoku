@@ -1606,10 +1606,35 @@
     return profile;
   }
 
+  function fastPatternSeedScore(move, color) {
+    let score = 0;
+    for (const [dr, dc] of RENJU_DIRS) {
+      for (let offset = -4; offset <= 4; offset++) {
+        if (!offset) continue;
+        const rr = move.r + dr * offset;
+        const cc = move.c + dc * offset;
+        if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE) continue;
+        const weight = 5 - Math.abs(offset);
+        if (board[rr][cc] === color) score += weight * 8;
+        else if (board[rr][cc] === otherColor(color)) score += weight * 3;
+      }
+    }
+    const centerDistance = Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7));
+    return score + Math.max(0, 7 - centerDistance) * 2;
+  }
+
   function patternHotspots(color, limit = 4, radius = 2) {
     const opponent = otherColor(color);
-    return nearbyMoves(radius)
+    const shortlist = nearbyMoves(radius)
       .filter(move => isLegalMoveForColor(move.r, move.c, color))
+      .map(move => ({
+        ...move,
+        seed: fastPatternSeedScore(move, color) + fastPatternSeedScore(move, opponent) * .7
+      }))
+      .sort((a, b) => b.seed - a.seed)
+      .slice(0, Math.max(14, limit * 5));
+
+    return shortlist
       .map(move => {
         const own = previewThreatPattern(move, color);
         const denial = previewThreatPattern(move, opponent);
@@ -1642,11 +1667,7 @@
     } else {
       const base = evaluateStatic();
       const conn = localConnectivity(move.r, move.c, color);
-      const shape = threatPatternProfilePlaced(move.r, move.c, color);
-      score = (color === aiColor() ? base : -base)
-        + conn.allies * 18
-        + conn.enemies * 5
-        + shape.score;
+      score = (color === aiColor() ? base : -base) + conn.allies * 18 + conn.enemies * 5;
     }
     board[move.r][move.c] = EMPTY;
     return score;
