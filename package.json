@@ -10,9 +10,10 @@
     "dev": "vite",
     "build": "vite build && node scripts/package-sites.mjs",
     "preview": "vite preview",
-    "check": "node --check src/jev-client.js && node --check src/app.js && node --check server/index.js && node --check jev-proxy.mjs && node --check scripts/package-sites.mjs && node --check benchmark/harness.mjs && node --check benchmark/run.mjs && npm run benchmark:smoke && npm run build",
+    "check": "node --check src/jev-client.js && node --check src/app.js && node --check server/index.js && node --check jev-proxy.mjs && node --check scripts/package-sites.mjs && node --check benchmark/harness.mjs && node --check benchmark/run.mjs && node --check benchmark/regression.mjs && npm run benchmark:smoke && npm run benchmark:regression && npm run build",
     "benchmark": "node benchmark/run.mjs",
-    "benchmark:smoke": "node benchmark/run.mjs --smoke"
+    "benchmark:smoke": "node benchmark/run.mjs --smoke",
+    "benchmark:regression": "node benchmark/regression.mjs"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
