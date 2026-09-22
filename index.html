@@ -412,4 +412,203 @@
 
       <div class="connection-test" id="connectionTest" role="status" aria-live="polite">
         <span class="test-dot"></span>
- 
+        <div class="test-detail" id="connectionTestText"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn test-btn" id="testConnectionBtn" type="button">检测连接</button>
+        <button class="btn" id="closeSettingsBtn" type="button">取消</button>
+        <button class="btn primary" id="saveSettingsBtn" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const SIZE = 15;
+  const COLS = 'ABCDEFGHIJKLMNO'.split('');
+  const EMPTY = 0, BLACK = 1, WHITE = 2;
+
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const turnText = document.getElementById('turnText');
+  const gameMeta = document.getElementById('gameMeta');
+  const lastMoveText = document.getElementById('lastMoveText');
+  const historyEl = document.getElementById('history');
+  const apiIndicator = document.getElementById('apiIndicator');
+  const apiLabel = document.getElementById('apiLabel');
+  const jevMove = document.getElementById('jevMove');
+  const jevInfo = document.getElementById('jevInfo');
+  const confidenceBar = document.getElementById('confidenceBar');
+  const confidenceText = document.getElementById('confidenceText');
+  const alternatives = document.getElementById('alternatives');
+  const retryBtn = document.getElementById('retryBtn');
+  const copyRecordBtn = document.getElementById('copyRecordBtn');
+  const toastEl = document.getElementById('toast');
+
+  const settingsModal = document.getElementById('settingsModal');
+  const apiKeyInput = document.getElementById('apiKey');
+  const modelInput = document.getElementById('model');
+  const strengthModeInput = document.getElementById('strengthMode');
+  const accessModeInput = document.getElementById('accessMode');
+  const endpointInput = document.getElementById('endpoint');
+  const accessWarning = document.getElementById('accessWarning');
+  const rememberKeyInput = document.getElementById('rememberKey');
+  const testConnectionBtn = document.getElementById('testConnectionBtn');
+  const connectionTest = document.getElementById('connectionTest');
+  const connectionTestText = document.getElementById('connectionTestText');
+
+  let board = makeBoard();
+  let current = BLACK;
+  let moves = [];
+  let gameOver = false;
+  let thinking = false;
+  let requestController = null;
+  let toastTimer = null;
+  let lastJev = null;
+  let testController = null;
+  let gameResult = null;
+  let gameStartedAt = new Date();
+
+  const settings = loadSettings();
+  apiKeyInput.value = settings.apiKey;
+  modelInput.value = settings.model;
+  strengthModeInput.value = settings.strengthMode;
+  accessModeInput.value = settings.accessMode;
+  endpointInput.value = settings.endpoint;
+  updateAccessModeUI(false);
+  rememberKeyInput.checked = settings.remember;
+
+  function makeBoard() {
+    return Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+  }
+
+  function isLocalProxyPage() {
+    return /^https?:$/.test(location.protocol) && ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
+  }
+
+  function defaultProxyEndpoint() {
+    return isLocalProxyPage() ? `${location.origin}/api/jev` : 'http://127.0.0.1:8787/api/jev';
+  }
+
+  function isKnownLocalProxyEndpoint(value) {
+    try {
+      const u = new URL(value);
+      return ['127.0.0.1', 'localhost', '::1'].includes(u.hostname) && u.pathname === '/api/jev';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function loadSettings() {
+    const localKey = localStorage.getItem('jev_gomoku_api_key') || '';
+    const sessionKey = sessionStorage.getItem('jev_gomoku_api_key') || '';
+    const remember = Boolean(localKey);
+    const savedMode = localStorage.getItem('jev_gomoku_access_mode');
+    const accessMode = savedMode || 'proxy';
+    const savedEndpoint = localStorage.getItem('jev_gomoku_endpoint');
+    // 通过本地代理页面打开时，自动跟随当前端口，例如代理从 8787 自动切到 8788。
+    // 仅覆盖旧的 localhost/127.0.0.1 本地代理地址；用户配置的自定义代理地址仍会保留。
+    let endpoint;
+    if (accessMode === 'proxy') {
+      endpoint = (!savedEndpoint || isKnownLocalProxyEndpoint(savedEndpoint))
+        ? defaultProxyEndpoint()
+        : savedEndpoint;
+    } else {
+      endpoint = savedEndpoint && !isKnownLocalProxyEndpoint(savedEndpoint)
+        ? savedEndpoint
+        : 'https://api.typesafe.ai/v1/systemone';
+    }
+    return {
+      apiKey: localKey || sessionKey,
+      model: localStorage.getItem('jev_gomoku_model') || 'jev-latest',
+      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'expert',
+      accessMode,
+      endpoint,
+      remember
+    };
+  }
+
+  function saveSettings() {
+    if (testController) testController.abort();
+    settings.apiKey = apiKeyInput.value.trim();
+    settings.model = modelInput.value.trim() || 'jev-latest';
+    settings.strengthMode = ['jev', 'strong', 'expert'].includes(strengthModeInput.value) ? strengthModeInput.value : 'expert';
+    settings.accessMode = accessModeInput.value === 'direct' ? 'direct' : 'proxy';
+    settings.endpoint = endpointInput.value.trim() || (settings.accessMode === 'proxy' ? defaultProxyEndpoint() : 'https://api.typesafe.ai/v1/systemone');
+    settings.remember = rememberKeyInput.checked;
+
+    localStorage.setItem('jev_gomoku_model', settings.model);
+    localStorage.setItem('jev_gomoku_strength', settings.strengthMode);
+    localStorage.setItem('jev_gomoku_access_mode', settings.accessMode);
+    localStorage.setItem('jev_gomoku_endpoint', settings.endpoint);
+
+    if (settings.remember) {
+      localStorage.setItem('jev_gomoku_api_key', settings.apiKey);
+      sessionStorage.removeItem('jev_gomoku_api_key');
+    } else {
+      localStorage.removeItem('jev_gomoku_api_key');
+      if (settings.apiKey) sessionStorage.setItem('jev_gomoku_api_key', settings.apiKey);
+      else sessionStorage.removeItem('jev_gomoku_api_key');
+    }
+
+    settingsModal.classList.remove('show');
+    updateApiState();
+    toast(settings.apiKey ? 'Jev 设置已保存' : '设置已保存，但尚未填写 API Key');
+    if (settings.apiKey && current === WHITE && !thinking && !gameOver) {
+      setTimeout(jevTurn, 100);
+    }
+  }
+
+
+  function updateAccessModeUI(changeEndpoint = true) {
+    const mode = accessModeInput.value === 'direct' ? 'direct' : 'proxy';
+    if (changeEndpoint) {
+      const current = endpointInput.value.trim();
+      const isDefaultLike = !current || current === 'https://api.typesafe.ai/v1/systemone' || isKnownLocalProxyEndpoint(current);
+      if (isDefaultLike) {
+        endpointInput.value = mode === 'proxy'
+          ? defaultProxyEndpoint()
+          : 'https://api.typesafe.ai/v1/systemone';
+      }
+    }
+    if (mode === 'proxy') {
+      accessWarning.textContent = `推荐使用本地代理：启动脚本会自动选择可用端口；当前代理地址会自动跟随页面端口${isLocalProxyPage() ? `（${location.origin}）` : ''}。浏览器不再直接跨域请求 TypeSafe。`;
+    } else {
+      accessWarning.textContent = '浏览器直连只有在 TypeSafe API 明确允许当前页面 Origin、Authorization 和 Content-Type 的 CORS 预检时才可用。前端代码无法绕过服务端 CORS。';
+    }
+    clearConnectionTest();
+  }
+
+  async function checkProxyHealth(endpoint, signal) {
+    try {
+      const u = new URL(endpoint);
+      const health = `${u.protocol}//${u.host}/health`;
+      const response = await fetch(health, { method: 'GET', signal, cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json().catch(() => ({}));
+      return data?.ok === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setConnectionTest(kind, text) {
+    connectionTest.className = `connection-test show ${kind || ''}`.trim();
+    connectionTestText.textContent = text;
+  }
+
+  function clearConnectionTest() {
+    connectionTest.className = 'connection-test';
+    connectionTestText.textContent = '';
+  }
+
+  async function testConnection() {
+    const apiKey = apiKeyInput.value.trim();
+    const model = modelInput.value.trim() || 'jev-latest';
+    const accessMode = accessModeInput.value === 'direct' ? 'direct' : 'proxy';
+    const endpoint = endpointInput.value.trim() || (accessMode === '
