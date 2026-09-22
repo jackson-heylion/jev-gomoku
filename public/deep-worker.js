@@ -250,13 +250,30 @@ function collectRealBlackThreesThrough(r, c, depth) {
   return threes.size;
 }
 
+function potentialBlackThreeDirections(r, c) {
+  let directions = 0;
+  for (const [dr, dc] of RENJU_DIRS) {
+    let nearbyBlack = 0;
+    for (let offset = -4; offset <= 4; offset++) {
+      if (!offset) continue;
+      const rr = r + offset * dr;
+      const cc = c + offset * dc;
+      if (inBounds(rr, cc) && board[rr][cc] === BLACK) nearbyBlack++;
+    }
+    if (nearbyBlack >= 2) directions++;
+  }
+  return directions;
+}
+
 function blackForbiddenInfoPlaced(r, c, depth = 0) {
   if (hasExactFiveAt(r, c, BLACK)) return { forbidden: false, type: null };
   if (hasOverlineAt(r, c, BLACK)) return { forbidden: true, type: 'OVERLINE' };
 
   const fourCount = collectBlackFoursThrough(r, c);
   if (fourCount >= 2) return { forbidden: true, type: 'FOUR_FOUR' };
-  if (depth >= RENJU_MAX_RECURSION) return { forbidden: false, type: null };
+  if (depth >= RENJU_MAX_RECURSION || potentialBlackThreeDirections(r, c) < 2) {
+    return { forbidden: false, type: null };
+  }
 
   const threeCount = collectRealBlackThreesThrough(r, c, depth);
   if (threeCount >= 2) return { forbidden: true, type: 'THREE_THREE' };
