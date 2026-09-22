@@ -4,7 +4,7 @@
 
 每局开始前会打开开局设置：选择执黑 / 执白，并分别开关长连、四四、三三。规则在开局后锁定，并同时应用于玩家落子、本地 Alpha-Beta/VCF/VCT、Deep Worker、Threat-space Search 与 Jev。长连禁手开启时黑棋恰好五连获胜；关闭时黑棋五连及以上均可获胜。白棋始终五连及以上获胜。
 
-## 白棋决策架构
+## AI 决策架构
 
 ```text
 Board
@@ -23,7 +23,8 @@ FINAL MOVE
 
 - 候选数 > 1 时，每个白棋回合最多调用 Jev **1 次**。
 - 候选唯一（强制必胜/必防/唯一防 fork）时 **0 次** Jev 调用，直接落子。
-- 开局性能保护：前 8 手使用较浅的 Local 搜索，前 10 手跳过额外 Deep Worker。
+- Local 主线程搜索增加墙钟时间预算：Strong 900ms、Expert 2200ms、Grandmaster 2400ms；根搜索采用迭代加深，超时保留最后一轮完整结果，再继续必要的一手战术安全检查。
+- 开局性能保护：仅 `moves.length < 4` 使用较浅的 Local 搜索；从第 5 个落子位置开始 Expert/Grandmaster 恢复完整本地参数。额外 Deep Worker 仍按原策略在前 10 手跳过。
 - Jev 返回非法落点或调用失败时，自动降级由 Local 接管本回合。
 
 ## 功能
@@ -78,8 +79,7 @@ npm run check
 ## 基准测试
 
 `benchmark/` 用于回答「Jev 作为最终落子决策者，是否真的比 Local 单独决策更强」，
-而不是旧的 challenger / fusion 思路。被测 arm 固定执白（生产引擎只实现白棋座位），
-黑棋是固定的 Ref Local 参照对手，两个 arm 面对同一对手、同一开局。
+而不是旧的 challenger / fusion 思路。生产引擎已支持 AI 执黑或执白；benchmark 的具体座位由对应测试场景决定。
 
 ```bash
 npm run benchmark:smoke       # 不调用 Jev，验证 harness / 裁判 / Deep Worker

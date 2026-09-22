@@ -153,6 +153,60 @@ async function testJevFinalDecisionAuthority() {
 }
 
 /**
+ * Expert/Grandmaster only keep the shallow opening profile for moves.length < 4,
+ * and every local candidate build reports its bounded wall-clock search budget.
+ */
+async function testLocalTimeBudgetAndOpeningThreshold() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Local budget regression must not call Jev');
+    }
+  });
+
+  const opening3 = positionFromSequence(['H8', 'H9', 'G8']);
+  engine.setPosition(opening3.board, opening3.moves, 'jev-latest');
+  const shallow = engine.candidates('expert');
+  if (shallow.cfg.openingAdaptive !== true || shallow.cfg.depth !== 3) {
+    throw new Error('Expert must keep the shallow opening profile while moves.length < 4');
+  }
+  if (shallow.localSearch?.budgetMs !== 2200) {
+    throw new Error('Expert local search budget must be 2200ms');
+  }
+
+  const opening4 = positionFromSequence(['H8', 'H9', 'G8', 'G9']);
+  engine.setPosition(opening4.board, opening4.moves, 'jev-latest');
+  const full = engine.candidates('expert');
+  console.log('local budget regression:', JSON.stringify({
+    opening3: {
+      adaptive: shallow.cfg.openingAdaptive,
+      depth: shallow.cfg.depth,
+      localSearch: shallow.localSearch
+    },
+    opening4: {
+      adaptive: full.cfg.openingAdaptive,
+      depth: full.cfg.depth,
+      localSearch: full.localSearch
+    }
+  }));
+
+  if (full.cfg.openingAdaptive !== false || full.cfg.depth !== 5) {
+    throw new Error('Expert must restore full depth at moves.length >= 4');
+  }
+  if (full.localSearch?.budgetMs !== 2200) {
+    throw new Error('Full Expert profile lost the 2200ms local search budget');
+  }
+  if (!Number.isFinite(full.localSearch?.elapsedMs) || full.localSearch.elapsedMs < 0) {
+    throw new Error('Local search trace must report elapsedMs');
+  }
+  if (!Number.isFinite(full.localSearch?.depthReached) || full.localSearch.depthReached > 5) {
+    throw new Error('Local search trace returned an invalid depthReached');
+  }
+  if (full.localSearch.elapsedMs > 3800) {
+    throw new Error('Local search exceeded its bounded budget by too much: ' + full.localSearch.elapsedMs + 'ms');
+  }
+}
+
+/**
  * Grandmaster runs two bounded background analyses. It may skip Jev when the
  * evidence converges, but disagreement/timeout may trigger at most one Jev call.
  */
@@ -783,6 +837,7 @@ function testCoordinateHelpers() {
 await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
 await testJevFinalDecisionAuthority();
+await testLocalTimeBudgetAndOpeningThreshold();
 await testGrandmasterParallelThreatMode();
 await testGrandmasterRealGameThreatTrace();
 await testArbitrationOracle();
