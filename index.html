@@ -1334,4 +1334,464 @@
     const defender = otherColor(attacker);
     if (immediateWins(defender, radius).length) return false;
     const memoKey = `VCT:${attacker}:${turns}:${boardCacheKey(attacker, 0)}`;
-    if (memo.
+    if (memo.has(memoKey)) return memo.get(memoKey);
+
+    const candidates = orderedMoves(attacker, 7, radius);
+    for (const m of candidates) {
+      board[m.r][m.c] = attacker;
+      if (isWin(m.r, m.c, attacker)) {
+        board[m.r][m.c] = EMPTY;
+        memo.set(memoKey, true);
+        return true;
+      }
+      if (immediateWins(defender, radius).length) {
+        board[m.r][m.c] = EMPTY;
+        continue;
+      }
+      const direct = immediateWins(attacker, radius);
+      if (direct.length >= 2) {
+        board[m.r][m.c] = EMPTY;
+        memo.set(memoKey, true);
+        return true;
+      }
+
+      let defenses;
+      if (direct.length === 1) {
+        defenses = direct;
+      } else {
+        const ext = forcingExtensions(attacker, 5, radius);
+        if (ext.length < 2) {
+          board[m.r][m.c] = EMPTY;
+          continue;
+        }
+        defenses = ext.slice(0, 4);
+      }
+
+      let allHold = defenses.length > 0;
+      for (const d of defenses) {
+        if (board[d.r][d.c] !== EMPTY) continue;
+        board[d.r][d.c] = defender;
+        const survives = !isWin(d.r, d.c, defender) && searchVCTPressure(attacker, turns - 1, radius, memo);
+        board[d.r][d.c] = EMPTY;
+        if (!survives) { allHold = false; break; }
+      }
+      board[m.r][m.c] = EMPTY;
+      if (allHold) {
+        memo.set(memoKey, true);
+        return true;
+      }
+    }
+    memo.set(memoKey, false);
+    return false;
+  }
+
+  function continuationVCFAfterCandidate(attacker, turns, radius = 2) {
+    const defender = otherColor(attacker);
+    if (immediateWins(defender, radius).length) return false;
+    const threats = immediateWins(attacker, radius);
+    if (threats.length >= 2) return true;
+    if (threats.length === 1) {
+      const d = threats[0];
+      board[d.r][d.c] = defender;
+      const result = !isWin(d.r, d.c, defender) && searchVCF(attacker, turns - 1, radius, new Map());
+      board[d.r][d.c] = EMPTY;
+      return result;
+    }
+    return false;
+  }
+
+  function continuationVCTAfterCandidate(attacker, turns, radius = 2) {
+    if (continuationVCFAfterCandidate(attacker, turns, radius)) return true;
+    const defender = otherColor(attacker);
+    if (immediateWins(defender, radius).length) return false;
+    const direct = immediateWins(attacker, radius);
+    let defenses = direct.length ? direct : forcingExtensions(attacker, 5, radius);
+    if (!direct.length && defenses.length < 2) return false;
+    defenses = defenses.slice(0, 4);
+    let allHold = defenses.length > 0;
+    for (const d of defenses) {
+      if (board[d.r][d.c] !== EMPTY) continue;
+      board[d.r][d.c] = defender;
+      const survives = !isWin(d.r, d.c, defender) && searchVCTPressure(attacker, turns - 1, radius, new Map());
+      board[d.r][d.c] = EMPTY;
+      if (!survives) { allHold = false; break; }
+    }
+    return allHold;
+  }
+
+  function semanticThreatLabel(winsNow, ownImmediate, forkCreators, vcf, vct) {
+    if (winsNow) return 'IMMEDIATE_WIN';
+    if (vcf) return 'VCF_FORCED_SEQUENCE';
+    if (ownImmediate >= 2) return 'OPEN_FOUR_OR_DOUBLE_FOUR';
+    if (ownImmediate === 1 && forkCreators >= 1) return 'FOUR_PLUS_FOLLOWUP';
+    if (vct) return 'VCT_PRESSURE_SEQUENCE';
+    if (forkCreators >= 2) return 'MULTIPLE_OPEN_THREE_PRESSURE';
+    if (forkCreators === 1) return 'OPEN_THREE_PRESSURE';
+    return 'POSITIONAL';
+  }
+
+  function connectionLabel(allies) {
+    if (allies >= 8) return 'VERY_HIGH';
+    if (allies >= 5) return 'HIGH';
+    if (allies >= 2) return 'MEDIUM';
+    return 'LOW';
+  }
+
+  function countLabel(n) {
+    if (n <= 0) return 'NONE';
+    if (n === 1) return 'ONE';
+    return 'MULTIPLE';
+  }
+
+  function analyzeAdvancedCandidate(move, forced, cfg) {
+    board[move.r][move.c] = WHITE;
+    const winsNow = isWin(move.r, move.c, WHITE);
+    const ownImmediate = winsNow ? 2 : immediateWins(WHITE, cfg.radius).length;
+    const oppImmediate = winsNow ? 0 : immediateWins(BLACK, cfg.radius).length;
+    const forks = winsNow ? {count: 0, points: []} : countForkCreators(WHITE, 10, cfg.radius);
+    const conn = localConnectivity(move.r, move.c, WHITE);
+    const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(WHITE, cfg.vcfDepth, cfg.radius));
+    const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(WHITE, cfg.vctDepth, cfg.radius);
+    const blackCounterVCF = !winsNow && !ownImmediate && searchVCF(BLACK, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
+    board[move.r][move.c] = EMPTY;
+
+    let safety = 'SAFE';
+    if (oppImmediate >= 2) safety = 'LOSING';
+    else if (oppImmediate === 1) safety = 'UNSAFE';
+    else if (blackCounterVCF) safety = 'TACTICALLY_RISKY';
+
+    const forcedRole = winsNow ? 'WIN_NOW'
+      : forced === 'block' ? 'MUST_DEFEND'
+      : forced === 'win' ? 'WIN_NOW'
+      : 'NORMAL';
+    const attack = semanticThreatLabel(winsNow, ownImmediate, forks.count, vcf, vct);
+    const initiative = winsNow || vcf || ownImmediate >= 1 ? 'FORCING'
+      : vct || forks.count >= 1 ? 'PRESSURE'
+      : 'BALANCED';
+
+    return {
+      winsNow,
+      ownImmediate,
+      oppImmediate,
+      forkCreators: forks.count,
+      vcf,
+      vct,
+      blackCounterVCF,
+      facts: {
+        forced_role: forcedRole,
+        tactical_safety: safety,
+        attack_shape: attack,
+        initiative,
+        own_immediate_winning_points_after_move: countLabel(ownImmediate),
+        opponent_immediate_winning_points_after_move: countLabel(oppImmediate),
+        vcf_status: vcf ? 'FORCED_SEQUENCE_FOUND' : 'NOT_FOUND',
+        vct_status: vct ? 'PRESSURE_SEQUENCE_FOUND' : 'NOT_FOUND',
+        connectivity: connectionLabel(conn.allies),
+        centrality: Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7)) <= 3 ? 'CENTRAL' : 'OUTER'
+      }
+    };
+  }
+
+  function buildAdvancedCandidates(mode) {
+    const cfg = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
+    const whiteWins = immediateWins(WHITE, cfg.radius);
+    const blackWins = immediateWins(BLACK, cfg.radius);
+    let forced = null;
+    let roots;
+    if (whiteWins.length) { forced = 'win'; roots = whiteWins; }
+    else if (blackWins.length) { forced = 'block'; roots = blackWins; }
+    else roots = orderedMoves(WHITE, cfg.root, cfg.radius);
+
+    const cache = new Map();
+    const scored = roots.map(m => ({ ...m, searchScore: scoreRootMove(m, cfg, cache) }))
+      .sort((a,b) => b.searchScore - a.searchScore);
+
+    let selected = scored.slice(0, Math.min(cfg.semantic, scored.length));
+    selected.forEach((m, i) => {
+      m.rank = i + 1;
+      m.analysis = analyzeAdvancedCandidate(m, forced, cfg);
+    });
+
+    // Hard tactical filters override every probabilistic judgement.
+    const immediate = selected.filter(m => m.analysis.winsNow);
+    if (immediate.length) selected = immediate;
+    else {
+      const safe = selected.filter(m => !['LOSING','UNSAFE'].includes(m.analysis.facts.tactical_safety));
+      if (safe.length) selected = safe;
+      const proven = selected.filter(m => m.analysis.vcf);
+      if (proven.length) selected = proven;
+    }
+    selected.forEach((m,i) => { m.rank = i + 1; m.analysis.facts.local_engine_grade = i === 0 ? 'TOP_CHOICE' : i === 1 ? 'STRONG' : i <= 3 ? 'SOLID' : 'SECONDARY'; });
+    return { mode, cfg, forced, candidates: selected };
+  }
+
+  function buildPureJevRequest() {
+    const legal = legalMoves();
+    const criteria = Object.fromEntries(legal.map(m => [m.key, null]));
+    const last = moves.length ? moves[moves.length - 1].coord : null;
+    return {
+      mode: 'jev',
+      candidates: legal,
+      payload: {
+        state: {
+          game: 'Gomoku / Five in a Row',
+          board_size: '15x15',
+          you_are: 'WHITE (O)',
+          opponent_is: 'BLACK (X)',
+          side_to_move: 'WHITE',
+          coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom; H8 is center.',
+          rules: 'Choose one empty intersection. Five or more consecutive stones horizontally, vertically, or diagonally wins.',
+          last_move: last,
+          board_legend: 'X=BLACK opponent, O=WHITE you, .=empty',
+          board_rows: boardRows()
+        },
+        model: settings.model || 'jev-latest',
+        questions: {
+          best_move: {
+            type: 'choice',
+            instructions: 'Choose the best legal move for WHITE. Never ignore an immediate win or an opponent one-move win.',
+            criteria
+          }
+        }
+      }
+    };
+  }
+
+  function candidateFactsMap(candidates) {
+    return Object.fromEntries(candidates.map(m => [m.key, {
+      ...m.analysis.facts,
+      local_rank: `RANK_${m.rank}`
+    }]));
+  }
+
+  function buildAtomicPayload(context) {
+    const questions = {};
+    for (const m of context.candidates) {
+      questions[`judge_${m.key}`] = {
+        type: 'choice',
+        instructions: `Judge candidate ${m.key} for WHITE using only candidate_facts.${m.key}. Do not reconstruct the board, count stones, or perform arithmetic. Deterministic code already handled geometry and tactical search.`,
+        criteria: {
+          EXCELLENT: 'The supplied facts indicate a strategically preferred move with strong initiative and tactical safety.',
+          GOOD: 'The move is sound and useful, but not clearly dominant.',
+          NEUTRAL: 'The move is playable but offers limited forcing value.',
+          RISKY: 'The move has meaningful strategic or tactical concerns.',
+          BAD: 'The supplied facts indicate this move should be avoided.'
+        }
+      };
+    }
+    return {
+      state: {
+        task: 'Gomoku candidate evaluation after deterministic tactical analysis.',
+        side: 'WHITE',
+        instruction: 'Treat supplied facts as ground truth. Do not infer board geometry. Priority: WIN_NOW > MUST_DEFEND > VCF_FORCED_SEQUENCE > tactical safety > forcing initiative > VCT pressure > connectivity.',
+        candidate_facts: candidateFactsMap(context.candidates)
+      },
+      model: settings.model || 'jev-latest',
+      questions
+    };
+  }
+
+  function atomicScore(answer) {
+    const weights = { EXCELLENT: 1, GOOD: .78, NEUTRAL: .5, RISKY: .22, BAD: 0 };
+    const probs = answer?.probabilities;
+    if (probs && typeof probs === 'object') {
+      let total = 0, mass = 0;
+      for (const [k,w] of Object.entries(weights)) {
+        const p = Number(probs[k] || 0);
+        total += p * w; mass += p;
+      }
+      if (mass > 0) return total / mass;
+    }
+    return weights[String(answer?.choice || '').toUpperCase()] ?? .5;
+  }
+
+  function buildPairwisePayload(candidates) {
+    const questions = {};
+    const pairs = [];
+    let n = 0;
+    const facts = candidateFactsMap(candidates);
+    const instruction = 'Choose the stronger move for WHITE using only the supplied deterministic semantic facts. Do not reconstruct the board. Priority: immediate win > mandatory defense > proven VCF > tactical safety > forcing initiative > VCT pressure > connectivity. If facts are close, prefer the higher local_engine_grade.';
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const a = candidates[i].key, b = candidates[j].key;
+        const id = n++;
+        questions[`duel_${id}_ab`] = { type: 'choice', instructions: instruction, criteria: { [a]: facts[a], [b]: facts[b] } };
+        questions[`duel_${id}_ba`] = { type: 'choice', instructions: instruction, criteria: { [b]: facts[b], [a]: facts[a] } };
+        pairs.push({ id, a, b });
+      }
+    }
+    return {
+      payload: {
+        state: {
+          task: 'Pairwise Gomoku move tournament.',
+          side: 'WHITE',
+          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias.',
+          candidate_facts: facts
+        },
+        model: settings.model || 'jev-latest',
+        questions
+      },
+      pairs
+    };
+  }
+
+  function probabilityFor(answer, key) {
+    const p = Number(answer?.probabilities?.[key]);
+    if (Number.isFinite(p)) return Math.max(0, Math.min(1, p));
+    return String(answer?.choice || '').toUpperCase() === key ? 1 : 0;
+  }
+
+  function sumUsage(...items) {
+    let input = 0, output = 0, has = false;
+    for (const u of items) {
+      if (!u) continue;
+      if (Number.isFinite(u.input_tokens)) { input += u.input_tokens; has = true; }
+      if (Number.isFinite(u.output_tokens)) { output += u.output_tokens; has = true; }
+    }
+    return has ? { input_tokens: input, output_tokens: output } : null;
+  }
+
+  async function callJev(payload) {
+    const response = await fetch(settings.endpoint, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: requestController.signal
+    });
+    const raw = await response.text();
+    let data = null;
+    try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+    if (!response.ok) {
+      const detail = data?.detail || data?.message || data?.error || raw || `HTTP ${response.status}`;
+      const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      err.httpStatus = response.status;
+      throw err;
+    }
+    return data || {};
+  }
+
+  function softmaxProbabilities(candidates, field = 'finalScore') {
+    if (!candidates.length) return {};
+    const values = candidates.map(m => Number(m[field] || 0));
+    const max = Math.max(...values);
+    const exps = values.map(v => Math.exp((v - max) / .13));
+    const sum = exps.reduce((a,b) => a+b, 0) || 1;
+    return Object.fromEntries(candidates.map((m,i) => [m.key, exps[i] / sum]));
+  }
+
+  async function advancedDecision(mode) {
+    const context = buildAdvancedCandidates(mode);
+    const candidates = context.candidates;
+    if (!candidates.length) throw new Error('本地引擎没有生成合法候选点');
+
+    // A single deterministic forced move should not be weakened by an LLM call.
+    if (candidates.length === 1) {
+      const only = candidates[0];
+      only.atomicScore = 1; only.pairScore = 1; only.finalScore = 1;
+      return {
+        answer: { choice: only.key, confidence: 1, probabilities: { [only.key]: 1 } },
+        finalChoice: only.key,
+        jevSuggested: only.key,
+        mode,
+        forced: context.forced,
+        candidates,
+        model: `${settings.model || 'jev-latest'} + local-forced`,
+        usage: null,
+        stageNote: '本地强制手'
+      };
+    }
+
+    updateApiState('busy', 'Jev 第 1/2 阶段：语义判断…');
+    const atomicData = await callJev(buildAtomicPayload(context));
+    for (const m of candidates) {
+      m.atomicScore = atomicScore(atomicData?.answers?.[`judge_${m.key}`]);
+      const localNorm = candidates.length === 1 ? 1 : 1 - ((m.rank - 1) / (candidates.length - 1));
+      m.preScore = localNorm * .84 + m.atomicScore * .16;
+    }
+
+    const tournament = [...candidates]
+      .sort((a,b) => b.preScore - a.preScore)
+      .slice(0, Math.min(context.cfg.tournament, candidates.length));
+
+    let pairData = null;
+    let pairStageFailed = false;
+    if (tournament.length >= 2) {
+      updateApiState('busy', 'Jev 第 2/2 阶段：双向 Pairwise 对决…');
+      const { payload, pairs } = buildPairwisePayload(tournament);
+      try {
+        pairData = await callJev(payload);
+        const points = new Map(tournament.map(m => [m.key, 0]));
+        const maxPoints = 2 * (tournament.length - 1);
+        for (const pair of pairs) {
+          for (const suffix of ['ab','ba']) {
+            const ans = pairData?.answers?.[`duel_${pair.id}_${suffix}`];
+            points.set(pair.a, points.get(pair.a) + probabilityFor(ans, pair.a));
+            points.set(pair.b, points.get(pair.b) + probabilityFor(ans, pair.b));
+          }
+        }
+        tournament.forEach(m => { m.pairScore = maxPoints > 0 ? points.get(m.key) / maxPoints : .5; });
+      } catch (err) {
+        console.warn('Pairwise stage failed, falling back to local + atomic.', err);
+        pairStageFailed = true;
+        tournament.forEach(m => { m.pairScore = .5; });
+      }
+    } else {
+      tournament.forEach(m => { m.pairScore = 1; });
+    }
+
+    candidates.forEach(m => {
+      if (!Number.isFinite(m.pairScore)) m.pairScore = tournament.includes(m) ? .5 : 0;
+      const localNorm = candidates.length === 1 ? 1 : 1 - ((m.rank - 1) / (candidates.length - 1));
+      m.localNorm = localNorm;
+      m.finalScore = context.cfg.localWeight * localNorm + context.cfg.atomicWeight * (m.atomicScore ?? .5) + context.cfg.pairWeight * m.pairScore;
+      if (m.analysis.winsNow) m.finalScore += 10;
+      if (m.analysis.vcf) m.finalScore += 1.2;
+      if (m.analysis.facts.tactical_safety === 'LOSING') m.finalScore -= 10;
+      else if (m.analysis.facts.tactical_safety === 'UNSAFE') m.finalScore -= 4;
+    });
+
+    const ranked = [...candidates].sort((a,b) => b.finalScore - a.finalScore);
+    const final = ranked[0];
+    const jevSuggested = [...tournament].sort((a,b) => (b.pairScore ?? 0) - (a.pairScore ?? 0))[0]?.key || final.key;
+    const probabilities = softmaxProbabilities(ranked);
+    const confidence = probabilities[final.key] ?? .5;
+    return {
+      answer: { choice: final.key, confidence, probabilities },
+      finalChoice: final.key,
+      jevSuggested,
+      mode,
+      forced: context.forced,
+      candidates: ranked.map((m,i) => ({ ...m, rank: i + 1 })),
+      model: pairData?.model || atomicData?.model || settings.model,
+      usage: sumUsage(atomicData?.usage, pairData?.usage),
+      stageNote: pairStageFailed ? 'Pairwise 降级：本地 + Atomic' : 'Atomic + 双向 Pairwise'
+    };
+  }
+
+  async function jevTurn() {
+    if (gameOver || current !== WHITE || thinking) return;
+    if (!settings.apiKey) {
+      updateStatus();
+      openSettings();
+      toast('请先配置 Jev API Key');
+      return;
+    }
+
+    thinking = true;
+    retryBtn.style.display = 'none';
+    canvas.classList.add('disabled');
+    updateStatus();
+    updateApiState('busy', '本地引擎：Alpha-Beta + VCF/VCT…');
+    requestController = new AbortController();
+
+    try {
+      let result;
+      if (settings.strengthMode === 'jev') {
+        updateApiState('busy', '正在请求纯 Jev…');
+        const decision = buildPureJevRequest();
+        const data = await callJev(decision.payload);
+        const answer = data?.answers?.best_move;
+        if (!answer || typeof answer.choice !== 'string') throw new Error('Jev 回应中缺少 answers.best_move.choice');
+        const finalChoice = answer.choice.toUpperCase();
+        const candidateKeys = new Set(decision.candidates.map(m => m.key));
+        if (!candidateKeys.has(finalChoice)) throw new Error(`Jev 返回非法候 
