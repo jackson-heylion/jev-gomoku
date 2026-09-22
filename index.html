@@ -611,4 +611,206 @@
     const apiKey = apiKeyInput.value.trim();
     const model = modelInput.value.trim() || 'jev-latest';
     const accessMode = accessModeInput.value === 'direct' ? 'direct' : 'proxy';
-    const endpoint = endpointInput.value.trim() || (accessMode === '
+    const endpoint = endpointInput.value.trim() || (accessMode === 'proxy' ? defaultProxyEndpoint() : 'https://api.typesafe.ai/v1/systemone');
+
+    if (!apiKey) {
+      setConnectionTest('err', '请先填写 API Key。');
+      apiKeyInput.focus();
+      return;
+    }
+
+    let parsedEndpoint;
+    try {
+      parsedEndpoint = new URL(endpoint);
+      if (!/^https?:$/.test(parsedEndpoint.protocol)) throw new Error('bad protocol');
+    } catch (_) {
+      setConnectionTest('err', 'Endpoint 格式不正确，请填写 http:// 或 https:// 地址。');
+      endpointInput.focus();
+      return;
+    }
+
+    if (testController) testController.abort();
+    testController = new AbortController();
+    const timeout = setTimeout(() => testController?.abort(), 15000);
+    testConnectionBtn.disabled = true;
+    testConnectionBtn.textContent = '检测中…';
+    setConnectionTest('busy', accessMode === 'proxy'
+      ? '正在检测本地代理，并通过代理验证 Jev API、API Key 与 Model…'
+      : '正在浏览器直连 Jev API，验证 Endpoint、API Key、Model 与 CORS…');
+    const started = performance.now();
+
+    if (accessMode === 'proxy') {
+      const healthy = await checkProxyHealth(endpoint, testController.signal);
+      if (!healthy) {
+        clearTimeout(timeout);
+        testController = null;
+        testConnectionBtn.disabled = false;
+        testConnectionBtn.textContent = '检测连接';
+        setConnectionTest('err', `未检测到本地代理。请运行 start-jev.command 或 node jev-proxy.mjs。若代理自动换了端口，请通过它自动打开的页面访问；当前 Endpoint：${endpoint}`);
+        return;
+      }
+    }
+
+    const payload = {
+      state: 'TypeSafe Jev API connection test from a Gomoku browser client.',
+      model,
+      questions: {
+        connection_test: {
+          type: 'choice',
+          instructions: 'Choose the option named ok. This is only an API connectivity test.',
+          criteria: {
+            ok: 'The connection test is operating normally.',
+            other: 'Any other result.'
+          }
+        }
+      }
+    };
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: testController.signal
+      });
+
+      const elapsed = Math.round(performance.now() - started);
+      const raw = await response.text();
+      let data = null;
+      try { data = raw ? JSON.parse(raw) : null; } catch (_) {}
+
+      if (!response.ok) {
+        const detail = data?.detail || data?.message || data?.error || raw || response.statusText || `HTTP ${response.status}`;
+        const detailText = typeof detail === 'string' ? detail : JSON.stringify(detail);
+        throw Object.assign(new Error(detailText), { httpStatus: response.status });
+      }
+
+      const answer = data?.answers?.connection_test;
+      if (!answer || answer.type !== 'choice' || typeof answer.choice !== 'string') {
+        throw new Error('API 已响应，但返回结构不符合预期（缺少 answers.connection_test.choice）。');
+      }
+
+      const actualModel = data?.model || model;
+      const inTokens = data?.usage?.input_tokens;
+      const outTokens = data?.usage?.output_tokens;
+      const usage = Number.isFinite(inTokens) || Number.isFinite(outTokens)
+        ? ` · Token ${inTokens ?? '?'} in / ${outTokens ?? '?'} out`
+        : '';
+      setConnectionTest('ok', `连接成功 · HTTP ${response.status} · ${elapsed} ms · ${actualModel}${usage}`);
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        setConnectionTest('err', '检测超时（15 秒）或已取消。请检查网络、Endpoint 与 CORS。');
+      } else {
+        const status = err?.httpStatus;
+        let message = friendlyError(err);
+        if (status === 401) message = `API Key 无效或认证失败。${message ? ` ${message}` : ''}`;
+        else if (status === 403) message = `API Key 没有访问该模型或接口的权限。${message ? ` ${message}` : ''}`;
+        else if (status === 404) message = `Endpoint 不存在，请检查 API 地址。${message ? ` ${message}` : ''}`;
+        else if (status === 422 || status === 400) message = `API 已连通，但 Model 或请求参数未通过校验。${message ? ` ${message}` : ''}`;
+        else if (status === 429) message = `API 已连通，但当前被限流或额度不足。${message ? ` ${message}` : ''}`;
+        else if (status >= 500) message = `TypeSafe 服务端返回异常。${message ? ` ${message}` : ''}`;
+        if (!status && /浏览器无法|Failed to fetch|NetworkError|Load failed|CORS/i.test(message)) {
+          message = accessMode === 'proxy'
+            ? `无法连接本地代理。请运行 start-jev.command 或 node jev-proxy.mjs，并使用代理启动后显示/自动打开的地址。当前 Endpoint：${endpoint}`
+            : '浏览器直连被网络或 CORS 阻止。建议切换“本地代理（推荐）”；前端页面本身无法绕过服务端 CORS。';
+        }
+        setConnectionTest('err', `${status ? `HTTP ${status} · ` : ''}${message}`);
+      }
+    } finally {
+      clearTimeout(timeout);
+      testController = null;
+      testConnectionBtn.disabled = false;
+      testConnectionBtn.textContent = '检测连接';
+    }
+  }
+
+  function updateApiState(kind = null, text = null) {
+    apiIndicator.className = 'indicator';
+    if (kind === 'busy') apiIndicator.classList.add('busy');
+    else if (kind === 'err') apiIndicator.classList.add('err');
+    else if (settings.apiKey) apiIndicator.classList.add('ok');
+
+    if (text) apiLabel.textContent = text;
+    else {
+      const strengthLabel = settings.strengthMode === 'jev' ? '纯 Jev' : settings.strengthMode === 'strong' ? '强力混合' : '大师混合';
+      apiLabel.textContent = settings.apiKey ? `${settings.model} · ${strengthLabel} · ${settings.accessMode === 'proxy' ? '本地代理' : '浏览器直连'}` : '未配置 API Key';
+    }
+  }
+
+  function openSettings() {
+    apiKeyInput.value = settings.apiKey;
+    modelInput.value = settings.model;
+    strengthModeInput.value = settings.strengthMode || 'expert';
+    accessModeInput.value = settings.accessMode || 'proxy';
+    endpointInput.value = settings.endpoint;
+    rememberKeyInput.checked = settings.remember;
+    updateAccessModeUI(false);
+    clearConnectionTest();
+    settingsModal.classList.add('show');
+    setTimeout(() => apiKeyInput.focus(), 30);
+  }
+
+  function toast(msg, duration = 2600) {
+    clearTimeout(toastTimer);
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), duration);
+  }
+
+  function coord(r, c) { return `${COLS[c]}${r + 1}`; }
+
+  function drawBoard() {
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const margin = 46;
+    const span = (W - margin * 2) / (SIZE - 1);
+
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, '#d7ad6c');
+    grad.addColorStop(1, '#bd8d49');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = 'rgba(53, 33, 12, .72)';
+    ctx.lineWidth = 1.25;
+    for (let i = 0; i < SIZE; i++) {
+      const p = margin + i * span;
+      ctx.beginPath(); ctx.moveTo(margin, p); ctx.lineTo(W - margin, p); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p, margin); ctx.lineTo(p, H - margin); ctx.stroke();
+    }
+
+    ctx.fillStyle = 'rgba(54, 32, 10, .85)';
+    [[3,3],[3,11],[7,7],[11,3],[11,11]].forEach(([r,c]) => {
+      ctx.beginPath(); ctx.arc(margin + c*span, margin + r*span, 4.1, 0, Math.PI*2); ctx.fill();
+    });
+
+    ctx.fillStyle = 'rgba(55, 36, 18, .76)';
+    ctx.font = '15px ui-sans-serif, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let c = 0; c < SIZE; c++) ctx.fillText(COLS[c], margin + c * span, 19);
+    ctx.textAlign = 'right';
+    for (let r = 0; r < SIZE; r++) ctx.fillText(String(r + 1), 28, margin + r * span);
+
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) drawStone(r, c, board[r][c], margin, span);
+      }
+    }
+
+    if (moves.length) {
+      const m = moves[moves.length - 1];
+      const x = margin + m.c * span, y = margin + m.r * span;
+      ctx.strokeStyle = m.color === BLACK ? '#ffd166' : '#e34d59';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(x, y, span * .17, 0, Math.PI*2); ctx.stroke();
+    }
+  }
+
+  function drawStone(r, c, color, margin, span) {
+    const x = margin + c * span, y = margin + r * spa
