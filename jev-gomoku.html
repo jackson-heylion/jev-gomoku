@@ -45,11 +45,11 @@
           <div class="api-state">
             <div class="api-state-left">
               <span class="indicator" id="apiIndicator"></span>
-              <span class="api-label" id="apiLabel">未配置 API Key</span>
+              <span class="api-label" id="apiLabel">同源服务端代理</span>
             </div>
             <button class="btn" id="quickSettingsBtn" type="button" style="padding:6px 9px;min-height:30px;font-size:11px">配置</button>
           </div>
-          <div class="runtime-hint">未配置 API Key 也可直接使用本地引擎；配置自己的 Jev Key 后可启用 Jev。公开页面不会内置或共享 API Key。</div>
+          <div class="runtime-hint">浏览器只请求同源 <code>/api/jev</code>；TypeSafe API Key 仅存在服务端 Secret。上游失败时自动降级到本地 Alpha-Beta + VCF/VCT。</div>
         </section>
 
         <section class="card jev-card">
@@ -79,15 +79,7 @@
   <div class="modal-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="modal">
       <h2 id="settingsTitle">Jev 设置</h2>
-      <p class="desc">按 TypeSafe 官方 HTTP API 调用 Jev。GitHub Pages 可直接玩本地引擎；若启用 Jev，请使用自己的 API Key。浏览器直连是否可用取决于 TypeSafe 的 CORS，稳定使用建议本地代理。</p>
-
-      <div class="field">
-        <label for="apiKey">Jev / TypeSafe API Key</label>
-        <div class="input-row">
-          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 API Key" />
-          <button class="btn" id="toggleKeyBtn" type="button">显示</button>
-        </div>
-      </div>
+      <p class="desc">Jev 通过同源服务端 <code>POST /api/jev</code> 调用 TypeSafe。浏览器不会接触 API Key，也不会直接跨域请求 TypeSafe。</p>
 
       <div class="field">
         <label for="model">Model</label>
@@ -104,21 +96,7 @@
         </select>
       </div>
 
-      <div class="field">
-        <label for="accessMode">访问方式</label>
-        <select id="accessMode">
-          <option value="proxy">本地代理（推荐，解决浏览器 CORS）</option>
-          <option value="direct">浏览器直连 TypeSafe API</option>
-        </select>
-      </div>
-
-      <div class="field">
-        <label for="endpoint">API Endpoint</label>
-        <input id="endpoint" type="text" value="http://127.0.0.1:8787/api/jev" spellcheck="false" />
-      </div>
-
-      <label class="check"><input id="rememberKey" type="checkbox" /> 在此浏览器中记住 API Key（localStorage）</label>
-      <div class="warning" id="accessWarning">推荐使用本地代理：浏览器只访问 127.0.0.1，再由本地 Node 服务请求 TypeSafe，可避开第三方 API 的 CORS 限制。API Key 仍由当前页面配置，只转发给 TypeSafe，不写入代理日志。</div>
+      <div class="warning">TypeSafe Key 由服务端环境变量 <code>JEV_API_KEY</code> 提供；不会写入 HTML、浏览器 JavaScript、localStorage/sessionStorage 或日志。</div>
 
       <div class="connection-test" id="connectionTest" role="status" aria-live="polite">
         <span class="test-dot"></span>
