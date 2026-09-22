@@ -818,3 +818,108 @@
         text-align: left;
       }
     }
+
+
+/* Pre-game side and Renju rule controls */
+.game-options {
+  display: grid;
+  gap: 12px;
+  margin: 4px 0 14px;
+}
+.game-option-group {
+  display: grid;
+  gap: 8px;
+}
+.game-option-label {
+  color: #cbd6e2;
+  font-size: 11px;
+  font-weight: 740;
+}
+.side-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.side-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid #303a47;
+  border-radius: 11px;
+  background: #111820;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.side-option:hover {
+  border-color: #465568;
+  background: #151e28;
+}
+.side-option.selected {
+  border-color: #58a6ff;
+  background: rgba(88,166,255,.09);
+  box-shadow: 0 0 0 1px rgba(88,166,255,.18);
+}
+.side-option > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+.side-option b {
+  font-size: 12px;
+}
+.side-option small,
+.rule-toggle small {
+  color: var(--muted);
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+.rule-toggles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.rule-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #303a47;
+  border-radius: 11px;
+  background: #111820;
+  cursor: pointer;
+}
+.rule-toggle:has(input:checked) {
+  border-color: rgba(88,166,255,.44);
+  background: rgba(88,166,255,.07);
+}
+.rule-toggle input {
+  margin: 2px 0 0;
+  accent-color: #58a6ff;
+}
+.rule-toggle > span {
+  display: grid;
+  gap: 3px;
+}
+.rule-toggle b {
+  color: #e3ebf4;
+  font-size: 11px;
+}
+.game-config-summary {
+  margin: 2px 0 13px;
+  padding: 8px 10px;
+  border: 1px solid #2d3946;
+  border-radius: 10px;
+  background: #0f151d;
+  color: #a9b8c8;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+@media (max-width: 560px) {
+  .side-picker,
+  .rule-toggles {
+    grid-template-columns: 1fr;
+  }
+}
