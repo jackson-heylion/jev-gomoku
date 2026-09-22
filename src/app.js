@@ -40,6 +40,8 @@
   const settingsModal = document.getElementById('settingsModal');
   const modelInput = document.getElementById('model');
   const strengthModeInput = document.getElementById('strengthMode');
+  const levelOptionButtons = [...document.querySelectorAll('.level-option')];
+  const currentLevelSummary = document.getElementById('currentLevelSummary');
   const testConnectionBtn = document.getElementById('testConnectionBtn');
   const connectionTest = document.getElementById('connectionTest');
   const connectionTestText = document.getElementById('connectionTestText');
@@ -182,6 +184,22 @@
     return publicModeMeta(mode).name;
   }
 
+  function publicSelectionLabel(mode) {
+    const meta = publicModeMeta(mode);
+    return `${meta.badge} · ${meta.name}`;
+  }
+
+  function renderLevelSelection(mode) {
+    const selectedMode = ['local', 'jev', 'strong', 'expert'].includes(mode) ? mode : 'expert';
+    strengthModeInput.value = selectedMode;
+    levelOptionButtons.forEach(button => {
+      const selected = button.dataset.mode === selectedMode;
+      button.classList.toggle('selected', selected);
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+    });
+    currentLevelSummary.textContent = publicSelectionLabel(selectedMode);
+  }
+
   function updateApiState(kind = null, text = null) {
     apiIndicator.className = 'indicator';
     jevLiveState.className = 'jev-live';
@@ -210,10 +228,11 @@
 
   function openSettings() {
     modelInput.value = settings.model;
-    strengthModeInput.value = settings.strengthMode || 'expert';
+    renderLevelSelection(settings.strengthMode || 'expert');
     clearConnectionTest();
     settingsModal.classList.add('show');
-    setTimeout(() => strengthModeInput.focus(), 30);
+    const selected = levelOptionButtons.find(button => button.classList.contains('selected'));
+    setTimeout(() => selected?.focus(), 30);
   }
 
   function toast(msg, duration = 2600) {
@@ -1761,6 +1780,9 @@
     settingsModal.classList.remove('show');
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+  levelOptionButtons.forEach(button => {
+    button.addEventListener('click', () => renderLevelSelection(button.dataset.mode));
+  });
   testConnectionBtn.addEventListener('click', testConnection);
   document.getElementById('restartBtn').addEventListener('click', restart);
   document.getElementById('undoBtn').addEventListener('click', undo);
@@ -1786,6 +1808,7 @@
     }
   });
 
+  renderLevelSelection(settings.strengthMode);
   drawBoard();
   updateHistory();
   updateStatus();
