@@ -518,6 +518,7 @@
       chosen: result?.finalChoice || result?.answer?.choice || '—',
       mode: result?.mode || 'unknown',
       forced: result?.forced || null,
+      localChoice: result?.localChoice || null,
       jevSuggested: result?.jevSuggested || null,
       stageNote: result?.stageNote || '',
       model: result?.model || '',
@@ -544,7 +545,14 @@
     lines.push(`  模式：${modeLabel}`);
     if (d.stageNote) lines.push(`  决策阶段：${d.stageNote}`);
     if (d.forced) lines.push(`  强制类型：${d.forced === 'win' ? '立即取胜' : d.forced === 'block' ? '必须防守' : d.forced}`);
+    if (d.localChoice) lines.push(`  Local 首选：${d.localChoice}`);
     if (d.jevSuggested) lines.push(`  Jev 建议：${d.jevSuggested}`);
+    if (d.trace?.challenger?.verification) {
+      const v = d.trace.challenger.verification;
+      lines.push(`  深度裁决：${v.local.move} vs ${v.challenger.move} -> ${v.winner}（${v.reason}）`);
+      lines.push(`    Local 深搜：search=${compactNumber(v.local.searchScore, 1)}；safety=${v.local.facts?.tactical_safety || '—'}；counterVCT=${v.local.facts?.opponent_counter_vct || '—'}`);
+      lines.push(`    Jev 挑战：search=${compactNumber(v.challenger.searchScore, 1)}；safety=${v.challenger.facts?.tactical_safety || '—'}；counterVCT=${v.challenger.facts?.opponent_counter_vct || '—'}`);
+    }
     if (d.model) lines.push(`  模型：${d.model}`);
     if (d.confidence != null) lines.push(`  最终置信度：${(d.confidence * 100).toFixed(1)}%`);
     if (d.usage) lines.push(`  Token：${d.usage.input_tokens ?? '?'} in / ${d.usage.output_tokens ?? '?'} out`);
@@ -567,6 +575,8 @@
           f.initiative && `initiative=${f.initiative}`,
           f.vcf_status && `VCF=${f.vcf_status}`,
           f.vct_status && `VCT=${f.vct_status}`,
+          f.opponent_counter_vcf && `oppVCF=${f.opponent_counter_vcf}`,
+          f.opponent_counter_vct && `oppVCT=${f.opponent_counter_vct}`,
           f.connectivity && `connectivity=${f.connectivity}`,
           f.centrality && `centrality=${f.centrality}`
         ].filter(Boolean).join('；');
@@ -1833,10 +1843,15 @@
       agreement = 'Jev 未介入：本地引擎发现了明确的必胜、必防或强制手。';
     } else if (result.mode === 'jev') {
       agreement = '这一手由 Jev 直接判断并选择。';
-    } else if (result.jevSuggested && result.jevSuggested !== finalChoice) {
-      agreement = `Jev 更偏向 ${result.jevSuggested}，最终结合本地搜索选择了 ${finalChoice}。`;
+    } else if (result.localChoice && result.jevSuggested && result.localChoice !== result.jevSuggested) {
+      const verification = result.decisionTrace?.challenger?.verification;
+      if (verification) {
+        agreement = `Local 首选 ${result.localChoice}，Jev 独立提出 ${result.jevSuggested}；更深搜索最终选择 ${finalChoice}。`;
+      } else {
+        agreement = `Local 首选 ${result.localChoice}，Jev 独立提出 ${result.jevSuggested}。`;
+      }
     } else {
-      agreement = 'Jev 与本地搜索意见一致。';
+      agreement = 'Jev 与 Local 独立判断得到同一选择。';
     }
 
     return { verdict, reason, agreement, modeLabel };
