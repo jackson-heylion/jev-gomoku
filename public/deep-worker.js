@@ -96,22 +96,185 @@ function assertTime() {
   if ((nodes & 127) === 0 && performance.now() >= deadline) throw TIMEOUT;
 }
 
-function isWin(r, c, color) {
-  const dirs = [[1,0],[0,1],[1,1],[1,-1]];
-  for (const [dr, dc] of dirs) {
-    let count = 1;
-    for (const sign of [-1, 1]) {
-      let rr = r + dr * sign;
-      let cc = c + dc * sign;
-      while (rr >= 0 && rr < SIZE && cc >= 0 && cc < SIZE && board[rr][cc] === color) {
-        count++;
-        rr += dr * sign;
-        cc += dc * sign;
-      }
+const RENJU_DIRS = [[1,0],[0,1],[1,1],[1,-1]];
+const RENJU_MAX_RECURSION = 4;
+
+function inBounds(r, c) {
+  return r >= 0 && r < SIZE && c >= 0 && c < SIZE;
+}
+
+function lineLength(r, c, color, dr, dc) {
+  let count = 1;
+  for (const sign of [-1, 1]) {
+    let rr = r + dr * sign;
+    let cc = c + dc * sign;
+    while (inBounds(rr, cc) && board[rr][cc] === color) {
+      count++;
+      rr += dr * sign;
+      cc += dc * sign;
     }
-    if (count >= 5) return true;
   }
-  return false;
+  return count;
+}
+
+function hasExactFiveAt(r, c, color) {
+  return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, color, dr, dc) === 5);
+}
+
+function hasOverlineAt(r, c, color) {
+  return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, color, dr, dc) >= 6);
+}
+
+function isWin(r, c, color) {
+  if (color === BLACK) return hasExactFiveAt(r, c, BLACK);
+  return RENJU_DIRS.some(([dr, dc]) => lineLength(r, c, WHITE, dr, dc) >= 5);
+}
+
+function contiguousRunCells(r, c, color, dr, dc) {
+  const negative = [];
+  let rr = r - dr;
+  let cc = c - dc;
+  while (inBounds(rr, cc) && board[rr][cc] === color) {
+    negative.push([rr, cc]);
+    rr -= dr;
+    cc -= dc;
+  }
+  negative.reverse();
+
+  const positive = [];
+  rr = r + dr;
+  cc = c + dc;
+  while (inBounds(rr, cc) && board[rr][cc] === color) {
+    positive.push([rr, cc]);
+    rr += dr;
+    cc += dc;
+  }
+  return [...negative, [r, c], ...positive];
+}
+
+function collectBlackFoursThrough(r, c) {
+  const fours = new Map();
+  RENJU_DIRS.forEach(([dr, dc], dirIndex) => {
+    for (let start = -4; start <= 0; start++) {
+      const cells = [];
+      let valid = true;
+      for (let k = 0; k < 5; k++) {
+        const rr = r + (start + k) * dr;
+        const cc = c + (start + k) * dc;
+        if (!inBounds(rr, cc)) {
+          valid = false;
+          break;
+        }
+        cells.push([rr, cc]);
+      }
+      if (!valid) continue;
+
+      const blackCells = [];
+      const emptyCells = [];
+      let blocked = false;
+      for (const [rr, cc] of cells) {
+        if (board[rr][cc] === BLACK) blackCells.push([rr, cc]);
+        else if (board[rr][cc] === EMPTY) emptyCells.push([rr, cc]);
+        else {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked || blackCells.length !== 4 || emptyCells.length !== 1) continue;
+
+      const [er, ec] = emptyCells[0];
+      board[er][ec] = BLACK;
+      const makesExactFive = lineLength(er, ec, BLACK, dr, dc) === 5;
+      board[er][ec] = EMPTY;
+      if (!makesExactFive) continue;
+
+      const stoneKey = blackCells
+        .map(([rr, cc]) => rr * SIZE + cc)
+        .sort((a, b) => a - b)
+        .join('-');
+      fours.set(dirIndex + ':' + stoneKey, true);
+    }
+  });
+  return fours.size;
+}
+
+function straightFourCreatedByExtension(originR, originC, extR, extC, dr, dc) {
+  const run = contiguousRunCells(extR, extC, BLACK, dr, dc);
+  if (run.length !== 4) return null;
+  if (!run.some(([rr, cc]) => rr === originR && cc === originC)) return null;
+
+  const first = run[0];
+  const last = run[run.length - 1];
+  const left = [first[0] - dr, first[1] - dc];
+  const right = [last[0] + dr, last[1] + dc];
+  if (!inBounds(left[0], left[1]) || !inBounds(right[0], right[1])) return null;
+  if (board[left[0]][left[1]] !== EMPTY || board[right[0]][right[1]] !== EMPTY) return null;
+
+  for (const [rr, cc] of [left, right]) {
+    board[rr][cc] = BLACK;
+    const exact = lineLength(rr, cc, BLACK, dr, dc) === 5;
+    board[rr][cc] = EMPTY;
+    if (!exact) return null;
+  }
+  return run;
+}
+
+function collectRealBlackThreesThrough(r, c, depth) {
+  const threes = new Map();
+  RENJU_DIRS.forEach(([dr, dc], dirIndex) => {
+    for (let offset = -4; offset <= 4; offset++) {
+      if (!offset) continue;
+      const er = r + offset * dr;
+      const ec = c + offset * dc;
+      if (!inBounds(er, ec) || board[er][ec] !== EMPTY) continue;
+
+      board[er][ec] = BLACK;
+      const makesFive = hasExactFiveAt(er, ec, BLACK);
+      const run = makesFive ? null : straightFourCreatedByExtension(r, c, er, ec, dr, dc);
+      let extensionLegal = Boolean(run);
+      if (extensionLegal) extensionLegal = !blackForbiddenInfoPlaced(er, ec, depth + 1).forbidden;
+
+      if (extensionLegal && run) {
+        const existing = run.filter(([rr, cc]) => !(rr === er && cc === ec));
+        if (existing.length === 3 && existing.some(([rr, cc]) => rr === r && cc === c)) {
+          const stoneKey = existing
+            .map(([rr, cc]) => rr * SIZE + cc)
+            .sort((a, b) => a - b)
+            .join('-');
+          threes.set(dirIndex + ':' + stoneKey, true);
+        }
+      }
+      board[er][ec] = EMPTY;
+    }
+  });
+  return threes.size;
+}
+
+function blackForbiddenInfoPlaced(r, c, depth = 0) {
+  if (hasExactFiveAt(r, c, BLACK)) return { forbidden: false, type: null };
+  if (hasOverlineAt(r, c, BLACK)) return { forbidden: true, type: 'OVERLINE' };
+
+  const fourCount = collectBlackFoursThrough(r, c);
+  if (fourCount >= 2) return { forbidden: true, type: 'FOUR_FOUR' };
+  if (depth >= RENJU_MAX_RECURSION) return { forbidden: false, type: null };
+
+  const threeCount = collectRealBlackThreesThrough(r, c, depth);
+  if (threeCount >= 2) return { forbidden: true, type: 'THREE_THREE' };
+  return { forbidden: false, type: null };
+}
+
+function blackForbiddenInfo(r, c) {
+  if (!inBounds(r, c) || board[r][c] !== EMPTY) return { forbidden: true, type: 'OCCUPIED_OR_INVALID' };
+  board[r][c] = BLACK;
+  const result = blackForbiddenInfoPlaced(r, c, 0);
+  board[r][c] = EMPTY;
+  return result;
+}
+
+function isLegalMoveForColor(r, c, color) {
+  if (!inBounds(r, c) || board[r][c] !== EMPTY) return false;
+  if (color !== BLACK) return true;
+  return !blackForbiddenInfo(r, c).forbidden;
 }
 
 function evaluateStatic() {
@@ -182,6 +345,7 @@ function immediateWins(color, radius = 2) {
   const result = [];
   for (const move of nearbyMoves(radius)) {
     assertTime();
+    if (!isLegalMoveForColor(move.r, move.c, color)) continue;
     if (wouldWin(move, color)) result.push(move);
   }
   return result;
@@ -222,7 +386,8 @@ function orderedMoves(color, limit, radius = 2) {
   const wins = immediateWins(color, radius);
   if (wins.length) return wins.slice(0, limit);
 
-  const blocks = immediateWins(otherColor(color), radius);
+  const blocks = immediateWins(otherColor(color), radius)
+    .filter(move => isLegalMoveForColor(move.r, move.c, color));
   if (blocks.length) {
     return blocks
       .map(move => ({ ...move, quick: quickMoveScore(move, color) }))
@@ -231,6 +396,7 @@ function orderedMoves(color, limit, radius = 2) {
   }
 
   return nearbyMoves(radius)
+    .filter(move => isLegalMoveForColor(move.r, move.c, color))
     .map(move => ({ ...move, quick: quickMoveScore(move, color) }))
     .sort((a, b) => b.quick - a.quick)
     .slice(0, limit);
