@@ -169,8 +169,8 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (shallow.cfg.openingAdaptive !== true || shallow.cfg.depth !== 3) {
     throw new Error('Expert must keep the shallow opening profile while moves.length < 4');
   }
-  if (shallow.localSearch?.budgetMs !== 1800) {
-    throw new Error('Expert local search budget must be 1800ms');
+  if (shallow.localSearch?.budgetMs !== 2200) {
+    throw new Error('Expert local search budget must be 2200ms');
   }
 
   const opening4 = positionFromSequence(['H8', 'H9', 'G8', 'G9']);
@@ -192,8 +192,8 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (full.cfg.openingAdaptive !== false || full.cfg.depth !== 5) {
     throw new Error('Expert must restore full depth at moves.length >= 4');
   }
-  if (full.localSearch?.budgetMs !== 1800) {
-    throw new Error('Full Expert profile lost the 1800ms local search budget');
+  if (full.localSearch?.budgetMs !== 2200) {
+    throw new Error('Full Expert profile lost the 2200ms local search budget');
   }
   if (!Number.isFinite(full.localSearch?.elapsedMs) || full.localSearch.elapsedMs < 0) {
     throw new Error('Local search trace must report elapsedMs');
@@ -201,7 +201,7 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (!Number.isFinite(full.localSearch?.depthReached) || full.localSearch.depthReached > 5) {
     throw new Error('Local search trace returned an invalid depthReached');
   }
-  if (full.localSearch.elapsedMs > 3200) {
+  if (full.localSearch.elapsedMs > 3800) {
     throw new Error('Local search exceeded its bounded budget by too much: ' + full.localSearch.elapsedMs + 'ms');
   }
 }
