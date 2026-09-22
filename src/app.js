@@ -2149,6 +2149,18 @@
     return result;
   }
 
+  function gomokuDecisionDoctrine() {
+    return {
+      evidence_order: 'LEGALITY_AND_PROOF > FORCED_THREAT > DEEP_SEARCH > PATTERN_HEURISTIC > POSITIONAL_STYLE',
+      threat_hierarchy: 'WIN > OPEN_FOUR / DOUBLE_FOUR / FOUR_THREE > FOUR > OPEN_THREE / VCT > MULTI_TWO > POSITION',
+      sequencing: 'Move order matters. Preserve latent three/four resources unless converting them creates a concrete forced gain; do not spend forcing moves just because they are available.',
+      defense: 'Prefer a defense that both removes the opponent strongest continuation and creates your own forcing threat or cuts a multi-line intersection.',
+      geometry: 'Inspect horizontal, vertical, and both diagonals equally. Multi-axis intersections and moves that reduce the opponent reply set are strategically important.',
+      opening: 'In the early game, value connected central influence, multiple two-to-three extension routes, and denying the opponent equivalent extension routes over isolated stones.',
+      caution: 'pattern_* fields are fast heuristic shape evidence, not mathematical proof. threat-space FOUND and proven VCF remain higher authority.'
+    };
+  }
+
   function buildPureJevRequest() {
     const side = aiColor();
     const opponent = otherColor(side);
@@ -2170,13 +2182,14 @@
           rules: renjuRuleDescription(),
           last_move: last,
           board_legend: boardLegendForAi(),
-          board_rows: boardRows()
+          board_rows: boardRows(),
+          gomoku_doctrine: gomokuDecisionDoctrine()
         },
         model: settings.model || 'jev-latest',
         questions: {
           best_move: {
             type: 'choice',
-            instructions: `Choose the best legal move for ${sideName}. Never ignore an immediate win or an opponent one-move win. Obey the configured BLACK forbidden-move rules exactly.`,
+            instructions: `Choose the best legal move for ${sideName}. Use state.gomoku_doctrine as strategic guidance, but concrete board tactics and legality are authoritative. Never ignore an immediate win or an opponent one-move win. Obey the configured BLACK forbidden-move rules exactly.`,
             criteria
           }
         }
@@ -2368,7 +2381,16 @@
         opponent_counter_vcf: facts.opponent_counter_vcf || 'NOT_FOUND',
         opponent_counter_vct: facts.opponent_counter_vct || 'NOT_FOUND',
         connectivity: facts.connectivity || 'LOW',
-        centrality: facts.centrality || 'OUTER'
+        centrality: facts.centrality || 'OUTER',
+        pattern_class: facts.pattern_class || 'POSITIONAL',
+        pattern_score: Number.isFinite(facts.pattern_score) ? facts.pattern_score : 0,
+        pattern_winning_points: Number.isFinite(facts.pattern_winning_points) ? facts.pattern_winning_points : 0,
+        pattern_four_directions: Number.isFinite(facts.pattern_four_directions) ? facts.pattern_four_directions : 0,
+        pattern_open_three_directions: Number.isFinite(facts.pattern_open_three_directions) ? facts.pattern_open_three_directions : 0,
+        pattern_two_directions: Number.isFinite(facts.pattern_two_directions) ? facts.pattern_two_directions : 0,
+        pattern_multi_axis: Number.isFinite(facts.pattern_multi_axis) ? facts.pattern_multi_axis : 0,
+        blocks_opponent_pattern: facts.blocks_opponent_pattern || 'POSITIONAL',
+        blocks_opponent_pattern_score: Number.isFinite(facts.blocks_opponent_pattern_score) ? facts.blocks_opponent_pattern_score : 0
       });
     }
 
@@ -2401,20 +2423,22 @@
           ? { common_candidate_evidence: factoredEvidence.common }
           : {}),
         rules: renjuRuleDescription(),
+        gomoku_doctrine: gomokuDecisionDoctrine(),
         decision_policy: [
           'You are the FINAL decision maker. Choose exactly one supplied candidate.',
           'Never ignore an immediate win, mandatory defense, proven VCF sequence, or threat-space proof of an opponent forced win.',
           'A threat-space FOUND result is deterministic tactical evidence and outranks heuristic or shallow-search preferences.',
           'Never choose an UNSAFE or LOSING move when a SAFE candidate is available.',
-          'Treat local rank, Alpha-Beta score, and deep-search score as strong but finite-horizon evidence; do not mechanically choose local_rank=1.',
-          'When tactically safe candidates have close search evidence, use board-wide strategic judgement: initiative, threat multiplicity, connectivity, future forcing potential, and opponent counterplay.'
+          'Treat local rank, Alpha-Beta score, deep-search score, and pattern_* fields as finite-horizon evidence; pattern evidence is useful for shape and move-order judgement but is not proof.',
+          'When safe candidates are close, explicitly compare forcing tempo, number of opponent replies, multi-axis threat growth, whether a latent threat should be preserved, and whether a defensive move also creates counter-pressure.',
+          'In quiet openings prefer connected multi-direction extension potential and denial of the opponent equivalent routes; avoid isolated cosmetic central moves with little continuation.'
         ]
       },
       model: settings.model || 'jev-latest',
       questions: {
         best_move: {
           type: 'choice',
-          instructions: `Make the final move decision for ${colorNameEn(aiColor())}. Inspect the full board and all candidate evidence, then choose exactly one candidate. Candidate criteria inherit state.common_candidate_evidence when present. Obey the configured BLACK forbidden rules. You have final selection authority within this already-filtered candidate set.`,
+          instructions: `Make the final move decision for ${colorNameEn(aiColor())}. Inspect the full board, state.gomoku_doctrine, and all candidate evidence, then choose exactly one candidate. Candidate criteria inherit state.common_candidate_evidence when present. Obey the configured BLACK forbidden rules. Prefer the move whose concrete forcing sequence and reply-control are strongest, not the move that merely looks most central. You have final selection authority within this already-filtered candidate set.`,
           criteria: factoredEvidence.criteria
         }
       }
@@ -3016,6 +3040,29 @@
     };
   }
 
+  function patternExpertSummary(candidates) {
+    const ranked = [...candidates]
+      .map(move => ({
+        move,
+        score: Number(move.analysis?.patternDecisionScore || 0),
+        className: move.analysis?.ownPattern?.className || 'POSITIONAL',
+        blockedClass: move.analysis?.blockedOpponentPattern?.className || 'POSITIONAL'
+      }))
+      .sort((a, b) => b.score - a.score);
+    const first = ranked[0] || null;
+    const second = ranked[1] || null;
+    const margin = first && second ? first.score - second.score : Infinity;
+    const tacticalClass = first && ['OPEN_FOUR','FOUR_THREE','DOUBLE_FOUR','FOUR','DOUBLE_OPEN_THREE'].includes(first.className);
+    return {
+      choice: first?.move?.key || null,
+      score: first?.score ?? null,
+      margin: Number.isFinite(margin) ? margin : null,
+      reliable: Boolean(first && (tacticalClass || margin >= 4500)),
+      className: first?.className || null,
+      blockedClass: first?.blockedClass || null
+    };
+  }
+
   async function grandmasterDecision() {
     const context = buildAdvancedCandidates('grandmaster');
     const allCandidates = context.candidates;
@@ -3052,6 +3099,7 @@
     const candidates = grandmasterCandidateFilter(allCandidates, threatAnalysis);
     const localChoice = candidates[0];
     const deepChoice = bestDeepCandidate(candidates, deepAnalysis);
+    const patternExpert = patternExpertSummary(candidates);
     const localThreat = localChoice?.threatSearch || null;
 
     if (candidates.length === 1) {
@@ -3069,10 +3117,13 @@
       && !localThreat.timedOut
       && !localThreat.forced;
 
-    if (reliableDeep && reliableThreat && deepChoice === localChoice.key) {
-      return deterministicGrandmasterResult(
+    const patternAllowsConsensus = !patternExpert.reliable || patternExpert.choice === localChoice.key;
+    if (reliableDeep && reliableThreat && deepChoice === localChoice.key && patternAllowsConsensus) {
+      const result = deterministicGrandmasterResult(
         context, candidates, localChoice.key, deepAnalysis, threatAnalysis, 'multi_engine_consensus'
       );
+      result.decisionTrace.patternExpert = patternExpert;
+      return result;
     }
 
     const payload = buildFinalJevPayload(context, candidates, deepAnalysis, threatAnalysis);
@@ -3144,6 +3195,7 @@
           scores: deepRows.map(item => ({ move: item.move, score: item.score }))
         } : null,
         preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
+        patternExpert,
         finalDecision: compactAnswer(answer),
         localEvidence: candidates.map(move => ({
           move: move.key,
