@@ -206,7 +206,8 @@ function injectBenchmarkHook(source) {
     "      if (!point) throw new Error('Invalid forbidden-test coordinate');",
     "      return blackForbiddenInfo(point.r, point.c);",
     "    },",
-    "    legalBlackMoves() { return legalMoves(BLACK).map(move => move.key); }",
+    "    legalBlackMoves() { return legalMoves(BLACK).map(move => move.key); },",
+    "    orderedBlack(limit) { return orderedMoves(BLACK, limit || 64, 2).map(move => move.key); }",
     '  };',
     ''
   ].join('\n');
