@@ -4139,6 +4139,13 @@
     return selected;
   }
 
+  function leavesCriticalDoubleOpenThree(move) {
+    const counter = move?.threatSearch?.counterThreat;
+    if (counter?.risk !== 'CRITICAL') return false;
+    return Array.isArray(counter.networkMoves)
+      && counter.networkMoves.some(item => item?.kind === 'DOUBLE_OPEN_THREE');
+  }
+
   function hardFilterMaxCandidates(candidates, threatAnalysis) {
     attachThreatEvidence(candidates, threatAnalysis);
     let filtered = candidates;
@@ -4151,6 +4158,14 @@
 
     const safeFromThreatProof = filtered.filter(move => move.threatSearch?.forced !== true);
     if (safeFromThreatProof.length) filtered = safeFromThreatProof;
+
+    // A DOUBLE_OPEN_THREE is one tempo earlier than an open-four fork. It is
+    // not always a mathematical forced loss because the defender may have a
+    // counter-forcing resource, so do not label it LOSING globally. But when
+    // at least one candidate prevents the CRITICAL junction, never let Jev
+    // prefer a move that voluntarily leaves that junction available.
+    const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
+    if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
 
     return filtered.slice(0, maxCandidateLimit());
   }
@@ -4644,7 +4659,7 @@
     });
   }
 
-  const MAX_CRITIC_POLICY = 'Assume the candidate is wrong and search for the strongest opponent refutation: immediate tactic, forcing sequence, multi-axis counterattack, residual threat network after a forced defense, premature spending of a forcing resource, or loss of initiative. If no concrete refutation is convincing, choose SURVIVES_BEST_REPLY.';
+  const MAX_CRITIC_POLICY = 'Assume the candidate is wrong and search for the strongest opponent refutation: immediate tactic, forcing sequence, double-open-three or other multi-axis counterattack, residual threat network after a forced defense, premature spending of a forcing resource, or loss of initiative. If no concrete refutation is convincing, choose SURVIVES_BEST_REPLY.';
 
   function addCriticQuestions(questions, candidates) {
     for (const move of candidates) {
