@@ -53,8 +53,9 @@ const RETRYABLE = new Set([429, 529]);
 const MAX_ATTEMPTS = 3;
 
 const ARM_LABELS = {
-  local: 'Local (0 次 Jev)',
-  'jev-final': 'Jev Final (Jev 最终落子)',
+  local: 'Local (内部基线)',
+  'jev-final': 'Jev Final (原高强度链路)',
+  'jev-max': 'Jev Max (多阶段最终裁决)',
   'jev-blind': 'Jev Blind (诊断基线)'
 };
 
@@ -73,7 +74,7 @@ const OPENINGS = [
   { name: 'balanced-four', moves: ['H8', 'I9', 'G9', 'I7'] }
 ];
 
-const DEFAULT_ARMS = ['local', 'jev-final'];
+const DEFAULT_ARMS = ['local', 'jev-final', 'jev-max'];
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -202,32 +203,52 @@ function createMockJev({ onRequest }) {
   return async function request({ payload }) {
     onRequest?.();
     call++;
-    const question = payload?.questions?.best_move;
-    const keys = Object.keys(question?.criteria || {});
-    if (!keys.length) throw new Error('Mock Jev received no candidate choices');
+    const questions = payload?.questions || {};
+    const answers = {};
 
-    const firstCriteria = question.criteria[keys[0]];
-    const isFinalDecision = firstCriteria !== null && typeof firstCriteria === 'object';
-    let choice;
-    if (isFinalDecision) {
-      choice = keys[Math.min(1, keys.length - 1)];
-    } else {
-      // Blind mode: every legal point is a choice whose criterion is null.
-      choice = keys.reduce((best, key) => (
-        chebyshevToCenter(key) < chebyshevToCenter(best) ? key : best
-      ), keys[0]);
+    for (const [id, question] of Object.entries(questions)) {
+      const keys = Object.keys(question?.criteria || {});
+      if (!keys.length) throw new Error('Mock Jev received no choices for ' + id);
+
+      let choice;
+      if (id === 'recall_check') {
+        choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+      } else if (id.startsWith('judge_')) {
+        const move = id.slice('judge_'.length);
+        const parity = [...move].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % 3;
+        choice = parity === 0 && keys.includes('EXCELLENT')
+          ? 'EXCELLENT'
+          : parity === 1 && keys.includes('GOOD')
+            ? 'GOOD'
+            : keys.includes('NEUTRAL') ? 'NEUTRAL' : keys[0];
+      } else if (id.startsWith('critic_')) {
+        choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+      } else if (id.startsWith('duel_') || id === 'wildcard_pick') {
+        choice = keys.reduce((best, key) => (
+          chebyshevToCenter(key) < chebyshevToCenter(best) ? key : best
+        ), keys[0]);
+      } else if (id === 'best_move') {
+        const isBlind = keys.every(key => question.criteria[key] == null);
+        choice = isBlind
+          ? keys.reduce((best, key) => (
+              chebyshevToCenter(key) < chebyshevToCenter(best) ? key : best
+            ), keys[0])
+          : keys[Math.min(1, keys.length - 1)];
+      } else {
+        choice = keys[0];
+      }
+
+      answers[id] = {
+        type: 'choice',
+        choice,
+        confidence: 1,
+        probabilities: Object.fromEntries(keys.map(key => [key, key === choice ? 1 : 0]))
+      };
     }
 
     return {
       model: 'mock-jev',
-      answers: {
-        best_move: {
-          type: 'choice',
-          choice,
-          confidence: 1,
-          probabilities: Object.fromEntries(keys.map(key => [key, key === choice ? 1 : 0]))
-        }
-      },
+      answers,
       usage: { input_tokens: 0, output_tokens: 0 },
       __client: { attempts: 1, cached: false, transport: 'benchmark-mock', latencyMs: 0 },
       __mock: { call }
@@ -254,6 +275,14 @@ const ARMS = {
     expectsJev: true,
     async run(engine, mode) {
       return engine.jevFinal(mode);
+    }
+  },
+  'jev-max': {
+    key: 'jev-max',
+    label: ARM_LABELS['jev-max'],
+    expectsJev: true,
+    async run(engine) {
+      return engine.jevMax();
     }
   },
   'jev-blind': {
@@ -348,7 +377,18 @@ function engineClientTrace(result) {
       httpRequests: client?.cached ? 0 : (shape.httpRequests ?? (client?.attempts || 0)),
       localOpeningAdaptive: shape.localOpeningAdaptive ?? null,
       deepSearchPolicy: shape.deepSearchPolicy ?? null,
-      localEvidenceVisibleToJev: shape.localEvidenceVisibleToJev ?? null
+      localEvidenceVisibleToJev: shape.localEvidenceVisibleToJev ?? null,
+      logicalRequests: shape.logicalRequests ?? null,
+      atomicCount: shape.atomicCount ?? null,
+      pairwiseCount: shape.pairwiseCount ?? null,
+      criticCount: shape.criticCount ?? null,
+      finalistCount: shape.finalistCount ?? null,
+      maxWorkers: shape.maxWorkers ?? null,
+      threatFilterCount: shape.threatFilterCount ?? 0,
+      payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens ?? null,
+      localSearchElapsedMs: shape.localSearchElapsedMs ?? null,
+      deepElapsedMs: shape.deepElapsedMs ?? null,
+      threatElapsedMs: shape.threatElapsedMs ?? null
     },
     deepSearch: deep
       ? {
@@ -367,6 +407,13 @@ function engineClientTrace(result) {
       transport: client?.transport || null,
       inputTokens: Number(usage?.input_tokens) || 0,
       outputTokens: Number(usage?.output_tokens) || 0
+    },
+    max: {
+      atomic: Array.isArray(result?.decisionTrace?.atomic) ? result.decisionTrace.atomic : [],
+      pairwise: Array.isArray(result?.decisionTrace?.pairwise) ? result.decisionTrace.pairwise : [],
+      critic: Array.isArray(result?.decisionTrace?.critic) ? result.decisionTrace.critic : [],
+      wildcard: result?.decisionTrace?.wildcard || null,
+      localEvidence: Array.isArray(result?.decisionTrace?.localEvidence) ? result.decisionTrace.localEvidence : []
     }
   };
 }
@@ -1406,7 +1453,7 @@ async function main() {
   const arms = parseArmList(values.arms);
   const maxPlies = Math.max(4, Math.min(SIZE * SIZE, Number(values['max-plies']) || 60));
   const delayMs = Math.max(0, Number(values['delay-ms']) || 0);
-  const mode = values.mode === 'strong' ? 'strong' : 'expert';
+  const mode = ['expert', 'grandmaster'].includes(values.mode) ? values.mode : 'expert';
   const model = values.model || 'jev-latest';
   const arbitrationDepth = Math.max(1, Math.min(11, Number(values['arbitration-depth']) || 7));
   const arbitrationBranch = Math.max(2, Math.min(12, Number(values['arbitration-branch']) || 6));
