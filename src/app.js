@@ -2070,7 +2070,7 @@
     return 'MULTIPLE';
   }
 
-  function analyzeAdvancedCandidate(move, forced, cfg) {
+  function analyzeAdvancedCandidate(move, forced, cfg, mode = 'expert') {
     const side = aiColor();
     const opponent = otherColor(side);
     const blockedOpponentPattern = previewThreatPattern(move, opponent);
@@ -2094,7 +2094,7 @@
 
     const tacticalVerificationComplete = opponentForks.complete !== false
       && !Boolean(activeLocalSearch?.timedOut);
-    let safety = tacticalVerificationComplete ? 'SAFE' : 'UNVERIFIED_BUDGET';
+    let safety = mode === 'max' && !tacticalVerificationComplete ? 'UNVERIFIED_BUDGET' : 'SAFE';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
     else if (opponentForks.count >= 1) safety = 'LOSING';
@@ -2329,7 +2329,7 @@
 
       selected.forEach((m, i) => {
         m.rank = i + 1;
-        m.analysis = analyzeAdvancedCandidate(m, forced, cfg);
+        m.analysis = analyzeAdvancedCandidate(m, forced, cfg, mode);
         m.analysis.facts.candidate_sources = [...(m.recallSources || [])];
         if (m.analysis.vcf) addRecallSource(m, 'VCF');
         if (m.analysis.vct) addRecallSource(m, 'VCT');
