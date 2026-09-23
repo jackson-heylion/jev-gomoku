@@ -153,3 +153,13 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 3. 黑 `I13` 后白 `K8` 必须被 Threat-space 硬证明为 forced loss，强制线从 `J7 -> J6` 开始，并经 `G10` 或 `K6` 转为双胜点。
 
 这些测试区分 hard proof 与 advisory threat network，避免为了增强二阶威胁识别而把启发式误当证明。
+
+
+## Straight-five wildcard bypass regression
+
+固定实战序列 `H8 G7 H7 G8 H6`：
+
+- `I7` 必须被 Threat-space 证明为 forced loss（黑 `H9` 起杀）。
+- `I7` 不得进入 `wildcard_pool`。
+- Jev Max 最终必须从 `H5/H9` 的存活防点中选择。
+- 若强制重放错误线到 `... I7 H5`，白方面对 `H4/H9` 两个立即胜点时必须标记 `forced_loss_double_win`，并保持 0 次 Jev 请求。
