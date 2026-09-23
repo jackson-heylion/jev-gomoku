@@ -354,3 +354,14 @@ Threat Worker 还会在每个候选根节点执行一次**直接双胜点 proof*
 - rescue individual：1.1s → 2.2s；rescue batch：1.45s → 2.9s；rescue retry：0.9s → 1.8s。
 
 其中 Threat 的总预算仍会按候选数切片，因此 6 个候选的 Max 中后盘首轮约从 241ms/候选提升到约 483ms/候选。
+
+### Direct open-four hard veto
+
+Jev Max 将“一手后制造两个合法立即成五点”的对手落子视为确定性硬战术证据，而不是普通 Pattern/Local 建议。例如对手已有连续斜三，下一手在开放端点形成双端活四：
+
+- 使用 `directDoubleWinCreators()` 全量扫描近邻合法点，不依赖 Alpha-Beta / Pattern 排名。
+- 对手 creator 落下后若存在 ≥2 个合法 immediate winning points，则该 creator 成立。
+- creator 对应的防守点以 `DIRECT_OPEN_FOUR_BLOCK` 最高优先级进入 Jev Max recall。
+- 若某候选既没有立即制造己方强制回复，又仍允许对手存在这种 creator，则 `tactical_safety=LOSING`，在 Atomic / Pairwise / Final 之前 hard-filter。
+- 因此 Jev 不能再覆盖 Local 已识别出的“斜三下一手变双端斜四”确定性防守。
+- 若己方候选自身制造立即强制回复，仍交给现有 counter-threat / Threat-space 逻辑继续判断，避免误杀合法反将。
