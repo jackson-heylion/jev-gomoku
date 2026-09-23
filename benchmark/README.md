@@ -8,7 +8,7 @@ Benchmark 直接复用生产 `src/app.js`、Renju 规则和 `public/deep-worker.
 |---|---|---:|
 | `local` | 内部 Local 基线，只用于测量/降级 | 0 |
 | `jev-final` | 现有高强度链路：Local/Deep 证据 → Jev Final | 每回合最多 1 |
-| `jev-max` | 异构候选 → Deep/Threat → Atomic → Pairwise/Critic → Final | 每回合最多 3 |
+| `jev-max` | 异构候选 → Deep/Threat → speculative fan-out → optional Final/Resolution | 每回合最多 2 |
 | `jev-blind` | 诊断基线：Jev 直接面对全部合法点 | 1 |
 
 默认运行 `local,jev-final,jev-max`。纯 Local 已从产品 UI 删除，但 benchmark 仍保留它作为内部对照组；这不会恢复用户可选的 Local 模式。
@@ -17,30 +17,43 @@ Benchmark 直接复用生产 `src/app.js`、Renju 规则和 `public/deep-worker.
 
 生产 Jev Max 的有界流程：
 
-```text
+~~~text
 Board
   ↓
-Local Alpha-Beta / Pattern / VCF / VCT / defensive recall
+Local Alpha-Beta
+  - Zobrist hash
+  - bounded persistent TT
+  - iterative-depth TT reuse
+  - PV / TT-best move ordering
   ↓
 6–8 heterogeneous candidates
   ↓
-Deep Worker (Top 4–5)  ─┐
-Threat Worker (Top ≤6) ─┴─ parallel, max 2 heavy Workers
+Persistent Worker Pool (max 2)
+  ├─ Deep Worker (Top 4–5)
+  ├─ Threat Worker (Top ≤6)
+  └─ queued speculative tail Threat (≤2, starts on first idle slot)
   ↓
 hard proof filter
   ↓
-Request 1: Atomic + MAIN_SET/OTHER
+Request 1: Speculative Fan-Out
+  - Atomic: all main candidates
+  - Pairwise: likely Top ≤6, reversed-order pairs
+  - Critic: same speculative pool
+  - global_best
+  - recall_check + bounded wildcard proposal
   ↓
-Atomic Top 4
+Atomic Top4 + deterministic Threat coverage closure
   ↓
-Request 2: 6 pairs × reversed order = ≤12 Pairwise questions
-           + Critic Top 4
-           + optional wildcard pick from 10–16 extra points
-  ↓
-Request 3: Final Judge when stage 2 has not already converged
-  ↓
+High-confidence agreement?
+  ├─ yes → FINAL MOVE (1 Jev request)
+  └─ no / finalist pool changed / wildcard entered
+       ↓
+Request 2:
+  - Final Judge, or
+  - Resolution Fan-Out for actual Top4 + final best_move
+       ↓
 FINAL MOVE
-```
+~~~
 
 硬约束仍由确定性代码执行：非法点、黑棋禁手、立即取胜、唯一必须防守、VCF/Threat-space 已证明的 forced result。普通 Local/Deep/Pattern 排名只能作为证据。
 
@@ -49,12 +62,12 @@ FINAL MOVE
 - 主候选：最多 8；低核心浏览器自动收紧。
 - Deep：最多重点分析 5 个候选。
 - Threat：最多 6 个候选。
-- 重型 Worker：最多 2 个并行。
-- Jev：最多 3 个逻辑请求/回合；确定性唯一解 0 次。
-- Pairwise：Top 4，最多 12 个双向 choice question。
-- Critic：最多 4 个。
+- 重型 Worker：最多 2 个并行，并复用整局长驻 Worker Pool。
+- Jev：最多 2 个逻辑请求/回合；普通未决局面目标 1 次；确定性唯一解 0 次。
+- Pairwise：Request 1 可对 likely Top ≤6 speculative fan-out（最多 30 个双向 choice question）；最终实际消费仍只取 Top4 的 ≤12 个问题。
+- Critic：Request 1 可 speculative 评估 ≤6 个；最终决策只消费实际 Top4 的 ≤4 个。
 - wildcard：额外池 10–16 个，只提议 1 个，必须重新通过本地合法性与一手败着检查。
-- Payload：目标 < 5000 input tokens / 请求，硬目标 < 7000。
+- Payload：共享 board / candidate facts / policy 去重；目标 < 5000 input tokens / 请求，硬目标 < 7000。
 - Deep 若没有完成任何有效 depth：`no_completed_depth + ranking_only`，不能把 `0/-1/-2` 当评估分。
 - mate-like sentinel：转换成结构化 `forced_result` 且标记 `proven=false / advisory=true`，不得把超大内部 score 当作数学证明发送给 Jev；VCF / Threat-space proof 仍单独标记为确定性证据。
 
@@ -85,9 +98,9 @@ FINAL MOVE
 5. `depth=0` 不得被序列化为真实 numeric score。
 6. forced-win sentinel 必须结构化。
 7. Jev Max Atomic 不得看到 `local_rank/local_engine_grade`。
-8. Top4 Pairwise 不得超过 12 个双向问题，候选 facts 通过共享 state 引用，不重复完整棋盘/证据。
+8. Speculative Pairwise 最多覆盖 Top6（≤30 个问题），实际 Top4 消费 ≤12 个；候选 facts 与 pairwise/critic policy 通过共享 state 引用。
 9. `OTHER` → bounded wildcard → 本地合法/一手败着校验 → final judge 的完整链路。
-10. Jev Max 每回合重型 Worker ≤2、Jev 请求 ≤3、候选 ≤8。
+10. Jev Max 每回合重型 Worker ≤2、Jev 请求 ≤2、候选 ≤8，并记录 persistent Worker / TT telemetry。
 11. 最近两盘真实棋谱固定位置：`D5 ↔ I6` Local/Deep 分歧召回、Threat-space forced-loss 过滤、VCF proof lock，以及历史 `depth=0` 语义回归。
 
 ## 运行
