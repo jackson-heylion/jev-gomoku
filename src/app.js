@@ -2106,7 +2106,7 @@
         depth: 3,
         root: Math.min(base.root, 10),
         branch: Math.min(base.branch, 6),
-        semantic: Math.min(base.semantic, 5),
+        semantic: mode === 'max' ? Math.min(base.semantic, 6) : Math.min(base.semantic, 5),
         vcfDepth: Math.min(base.vcfDepth, 3),
         vctDepth: Math.min(base.vctDepth, 1),
         openingAdaptive: true
@@ -3267,6 +3267,629 @@
       reliable: Boolean(first && (tacticalClass || margin >= 4500)),
       className: first?.className || null,
       blockedClass: first?.blockedClass || null
+    };
+  }
+
+  function estimatePayloadTokens(payload) {
+    try {
+      return Math.ceil(JSON.stringify(payload).length / 4);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function aggregateJevClient(...responses) {
+    const clients = responses.map(item => item?.__client).filter(Boolean);
+    const attempts = clients.reduce((sum, item) => sum + (Number(item.attempts) || 0), 0);
+    return {
+      attempts,
+      cached: clients.length > 0 && clients.every(item => item.cached === true),
+      logicalRequests: responses.filter(Boolean).length,
+      transport: 'same-origin-server'
+    };
+  }
+
+  function attachMaxDeepEvidence(candidates, deepAnalysis) {
+    const map = deepEvidenceMap(deepAnalysis);
+    for (const move of candidates) {
+      const deep = map.get(move.key);
+      move.deepSearchRank = deep?.rank ?? null;
+      move.deepSearchScore = deep?.rank && Number.isFinite(deep?.row?.score) && !isSentinelSearchScore(deep.row.score)
+        ? deep.row.score
+        : null;
+      move.deepEvidence = deep?.evidence || null;
+      if (move.analysis?.facts) {
+        move.analysis.facts.deep_search = deep?.evidence || {
+          status: deepAnalysis?.status || 'unavailable'
+        };
+      }
+      if (deep?.rank && deep.rank <= 2) addRecallSource(move, 'DEEP_SEARCH');
+    }
+  }
+
+  function hardFilterMaxCandidates(candidates, threatAnalysis) {
+    attachThreatEvidence(candidates, threatAnalysis);
+    let filtered = candidates;
+
+    const provenVcf = filtered.filter(move => move.analysis?.vcf === true);
+    if (provenVcf.length) filtered = provenVcf;
+
+    const safeFromThreatProof = filtered.filter(move => move.threatSearch?.forced !== true);
+    if (safeFromThreatProof.length) filtered = safeFromThreatProof;
+
+    return filtered.slice(0, maxCandidateLimit());
+  }
+
+  function extraWildcardPool(mainCandidates, limit = 12) {
+    const excluded = new Set(mainCandidates.map(move => move.key));
+    const side = aiColor();
+    const opponent = otherColor(side);
+    return nearbyMoves(2)
+      .filter(move => !excluded.has(move.key))
+      .filter(move => isLegalMoveForColor(move.r, move.c, side))
+      .map(move => ({
+        ...move,
+        wildcardPriority: fastPatternSeedScore(move, side)
+          + fastPatternSeedScore(move, opponent) * .75
+          + Math.max(0, 7 - Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7))) * 3
+      }))
+      .sort((a, b) => b.wildcardPriority - a.wildcardPriority)
+      .slice(0, Math.max(10, Math.min(16, limit)));
+  }
+
+  function validateWildcardCandidate(move) {
+    if (!move || board[move.r]?.[move.c] !== EMPTY || !isLegalMoveForColor(move.r, move.c, aiColor())) {
+      return null;
+    }
+
+    const side = aiColor();
+    const opponent = otherColor(side);
+    const blockedOpponentPattern = previewThreatPattern(move, opponent);
+    board[move.r][move.c] = side;
+    const ownPattern = threatPatternProfilePlaced(move.r, move.c, side);
+    const winsNow = isWin(move.r, move.c, side);
+    const opponentWins = winsNow ? [] : immediateWins(opponent, 2);
+    const ownWins = winsNow ? [] : immediateWins(side, 2);
+    const conn = localConnectivity(move.r, move.c, side);
+    board[move.r][move.c] = EMPTY;
+
+    // A Jev-proposed wildcard may enter the final comparison only if it passes
+    // exact legality and the one-ply loss guard. Deeper proof remains advisory
+    // unless Threat-space has explicitly established it.
+    if (!winsNow && opponentWins.length) return null;
+
+    return {
+      ...move,
+      rank: null,
+      localRank: null,
+      localNorm: null,
+      searchScore: null,
+      deepSearchRank: null,
+      deepSearchScore: null,
+      recallSources: ['JEV_WILDCARD'],
+      analysis: {
+        winsNow,
+        vcf: false,
+        vct: false,
+        ownPattern,
+        blockedOpponentPattern,
+        patternDecisionScore: ownPattern.score + blockedOpponentPattern.score * .72,
+        facts: {
+          candidate_sources: ['JEV_WILDCARD'],
+          forced_role: winsNow ? 'WIN_NOW' : 'NORMAL',
+          tactical_safety: 'SAFE',
+          attack_shape: winsNow ? 'IMMEDIATE_WIN' : ownWins.length ? 'FORCING_REPLY_SET' : ownPattern.className,
+          initiative: winsNow || ownWins.length ? 'FORCING' : ownPattern.openThreeDirections ? 'PRESSURE' : 'BALANCED',
+          own_immediate_winning_points_after_move: countLabel(ownWins.length),
+          opponent_immediate_winning_points_after_move: 'NONE',
+          opponent_fork_creators_after_move: 'UNKNOWN_LIGHT_SCAN',
+          vcf_status: 'NOT_RUN_WILDCARD',
+          vct_status: 'NOT_RUN_WILDCARD',
+          opponent_counter_vcf: 'NOT_RUN_WILDCARD',
+          opponent_counter_vct: 'NOT_RUN_WILDCARD',
+          connectivity: connectionLabel(conn.allies),
+          centrality: Math.max(Math.abs(move.r - 7), Math.abs(move.c - 7)) <= 3 ? 'CENTRAL' : 'OUTER',
+          pattern_class: ownPattern.className,
+          pattern_score: Math.round(ownPattern.score),
+          pattern_winning_points: ownPattern.winningPoints,
+          pattern_four_directions: ownPattern.fourDirections,
+          pattern_open_three_directions: ownPattern.openThreeDirections,
+          pattern_two_directions: ownPattern.twoDirections,
+          pattern_multi_axis: ownPattern.multiAxis,
+          blocks_opponent_pattern: blockedOpponentPattern.className,
+          blocks_opponent_pattern_score: Math.round(blockedOpponentPattern.score)
+        }
+      }
+    };
+  }
+
+  function maxSemanticEvidence(move, { includeRanks = false } = {}) {
+    const facts = move.analysis?.facts || {};
+    return compactEvidence({
+      move: move.key,
+      candidate_sources: Array.isArray(move.recallSources) ? move.recallSources : facts.candidate_sources,
+      ...(includeRanks ? {
+        local_rank: Number.isFinite(move.localRank) ? move.localRank : (Number.isFinite(move.rank) ? move.rank : null),
+        deep_rank: Number.isFinite(move.deepSearchRank) ? move.deepSearchRank : null
+      } : {}),
+      ...localScoreEvidence(move.searchScore),
+      deep_search: move.deepEvidence || facts.deep_search || null,
+      pattern_class: facts.pattern_class || null,
+      attack_shape: facts.attack_shape || null,
+      initiative: facts.initiative || null,
+      tactical_safety: facts.tactical_safety || null,
+      vcf_status: facts.vcf_status || null,
+      vct_status: facts.vct_status || null,
+      threat_search: move.threatSearch ? compactEvidence({
+        opponent_forced_win: Boolean(move.threatSearch.forced),
+        timed_out: Boolean(move.threatSearch.timedOut),
+        attacker_turns: move.threatSearch.attackerTurns ?? null,
+        line: Array.isArray(move.threatSearch.line) ? move.threatSearch.line.slice(0, 12) : null
+      }) : null,
+      principal_variation: Array.isArray(move.deepEvidence?.principal_variation)
+        ? move.deepEvidence.principal_variation
+        : null,
+      opponent_best_replies: Array.isArray(move.deepEvidence?.opponent_best_replies)
+        ? move.deepEvidence.opponent_best_replies
+        : null,
+      atomic_judgement: move.atomicJudgement || null,
+      pairwise_score: Number.isFinite(move.pairScore) ? Number(move.pairScore.toFixed(4)) : null,
+      critic_summary: move.criticSummary || null
+    });
+  }
+
+  function buildMaxAtomicPayload(context, candidates) {
+    const payload = buildAtomicPayload({ ...context, candidates });
+    payload.state.task = 'Jev Max stage 1: independent atomic candidate evaluation and candidate-recall audit.';
+    payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
+    payload.state.candidate_facts = Object.fromEntries(
+      candidates.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: false })])
+    );
+    payload.state.max_policy = 'Do not infer Local ranking. Judge board geometry, tactical safety, forcing resources, and opponent best replies independently.';
+    payload.questions.recall_check = {
+      type: 'choice',
+      instructions: 'Decide whether at least one supplied main candidate is sufficient for serious final consideration. Choose OTHER only if the board contains a materially stronger plausible move outside the supplied set.',
+      criteria: {
+        MAIN_SET: 'At least one supplied candidate is strong enough for final consideration.',
+        OTHER: 'The supplied set appears to miss a materially stronger legal alternative.'
+      }
+    };
+    return payload;
+  }
+
+  function atomicTraceFor(candidates, answers) {
+    return candidates.map(move => {
+      const answer = answers?.[`judge_${move.key}`] || null;
+      move.atomicScore = atomicScore(answer);
+      move.atomicJudgement = compactAnswer(answer);
+      return {
+        move: move.key,
+        score: move.atomicScore,
+        ...compactAnswer(answer)
+      };
+    });
+  }
+
+  function addCriticQuestions(questions, candidates) {
+    for (const move of candidates) {
+      questions[`critic_${move.key}`] = {
+        type: 'choice',
+        instructions: `Assume candidate ${move.key} is wrong. Inspect the full board and max_candidate_evidence.${move.key}. Find the strongest opponent refutation: immediate tactical reply, forcing sequence, multi-axis counterattack, premature spending of a forcing resource, or loss of initiative. If none is convincing, choose SURVIVES_BEST_REPLY.`,
+        criteria: {
+          SURVIVES_BEST_REPLY: 'No concrete refutation found; candidate remains robust against best play.',
+          TACTICAL_REFUTATION: 'Opponent has a concrete tactical or forcing refutation.',
+          MULTI_AXIS_COUNTERATTACK: 'Opponent gains a stronger multi-direction counterattack.',
+          FORCING_RESOURCE_SPENT_TOO_EARLY: 'Candidate wastes a forcing resource and weakens the continuation.',
+          LOSES_INITIATIVE: 'Candidate yields the initiative or expands the opponent reply set.'
+        }
+      };
+    }
+  }
+
+  function scorePairwiseTournament(candidates, pairs, answers) {
+    const byKey = new Map(candidates.map(move => [move.key, move]));
+    for (const move of candidates) {
+      move.pairMargin = 0;
+      move.pairWins = 0;
+      move.pairLosses = 0;
+      move.pairScore = 0;
+    }
+
+    const trace = [];
+    for (const pair of pairs) {
+      const ab = answers?.[`duel_${pair.id}_ab`] || null;
+      const ba = answers?.[`duel_${pair.id}_ba`] || null;
+      const pA = (probabilityFor(ab, pair.a) + probabilityFor(ba, pair.a)) / 2;
+      const pB = (probabilityFor(ab, pair.b) + probabilityFor(ba, pair.b)) / 2;
+      const margin = pA - pB;
+      const a = byKey.get(pair.a);
+      const b = byKey.get(pair.b);
+      if (a) a.pairMargin += margin;
+      if (b) b.pairMargin -= margin;
+      if (margin > .05) {
+        if (a) a.pairWins++;
+        if (b) b.pairLosses++;
+      } else if (margin < -.05) {
+        if (b) b.pairWins++;
+        if (a) a.pairLosses++;
+      }
+      trace.push({
+        left: pair.a,
+        right: pair.b,
+        choice: margin >= 0 ? pair.a : pair.b,
+        probabilities: { [pair.a]: pA, [pair.b]: pB },
+        margin
+      });
+    }
+
+    for (const move of candidates) {
+      move.pairScore = (move.pairWins - move.pairLosses) + move.pairMargin;
+    }
+    return trace;
+  }
+
+  function maxCriticTrace(candidates, answers) {
+    return candidates.map(move => {
+      const answer = answers?.[`critic_${move.key}`] || null;
+      move.criticSummary = compactAnswer(answer);
+      return { move: move.key, ...compactAnswer(answer) };
+    });
+  }
+
+  function criticSurvivalProbability(move) {
+    const answer = move?.criticSummary;
+    const p = Number(answer?.probabilities?.SURVIVES_BEST_REPLY);
+    if (Number.isFinite(p)) return p;
+    return answer?.choice === 'SURVIVES_BEST_REPLY' ? 1 : 0;
+  }
+
+  function pairwiseRank(candidates) {
+    return [...candidates].sort((a, b) =>
+      (b.pairScore || 0) - (a.pairScore || 0)
+      || (b.atomicScore || 0) - (a.atomicScore || 0)
+      || (a.localRank || a.rank || 999) - (b.localRank || b.rank || 999)
+    );
+  }
+
+  function highConfidenceMaxConvergence(ranked) {
+    if (ranked.length < 2) return false;
+    const first = ranked[0];
+    const second = ranked[1];
+    const pairLead = Number(first.pairScore || 0) - Number(second.pairScore || 0);
+    const expectedWins = Math.max(1, Math.min(3, ranked.length - 1));
+    return first.pairWins >= expectedWins
+      && pairLead >= 1.35
+      && Number(first.atomicScore || 0) >= .82
+      && criticSurvivalProbability(first) >= .72;
+  }
+
+  function pairwiseAnswer(ranked) {
+    const values = ranked.map(move => Number(move.pairScore || 0) + Number(move.atomicScore || 0) * .6);
+    const max = Math.max(...values);
+    const exps = values.map(value => Math.exp((value - max) / .85));
+    const sum = exps.reduce((a, b) => a + b, 0) || 1;
+    const probabilities = Object.fromEntries(ranked.map((move, index) => [move.key, exps[index] / sum]));
+    return {
+      choice: ranked[0].key,
+      confidence: probabilities[ranked[0].key] ?? null,
+      probabilities
+    };
+  }
+
+  function buildMaxFinalPayload(candidates, context, deepAnalysis, threatAnalysis) {
+    const candidateEvidence = Object.fromEntries(
+      candidates.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: true })])
+    );
+    return {
+      state: {
+        task: 'Jev Max final Gomoku judgement after independent atomic evaluation, order-balanced pairwise tournament, opponent-best-reply search, and adversarial critic analysis.',
+        side: colorNameEn(aiColor()),
+        board_size: '15x15',
+        coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
+        board_legend: boardLegendForAi(),
+        board_rows: boardRows(),
+        last_move: moves.length ? moves[moves.length - 1].coord : null,
+        rules: renjuRuleDescription(),
+        gomoku_doctrine: gomokuDecisionDoctrine(),
+        deterministic_engine_role: 'Deterministic engines are advisors, not authorities, except legality and proven forced results. You should disagree with Local / Deep when board geometry or opponent best-response analysis gives a stronger reason.',
+        priority: 'LEGALITY / proven forced result > forced tactical sequence > opponent best-response robustness > deep search > multi-axis strategic pressure > pattern heuristic > positional preference',
+        deep_search_status: compactEvidence({
+          status: deepAnalysis?.status || 'unavailable',
+          depth_reached: deepAnalysis?.depthReached ?? null,
+          ranking_only: Boolean(deepAnalysis?.rankingOnly),
+          timed_out: Boolean(deepAnalysis?.timedOut)
+        }),
+        threat_search_status: compactEvidence({
+          status: threatAnalysis?.status || 'unavailable',
+          timed_out: Boolean(threatAnalysis?.timedOut),
+          max_attacker_turns: threatAnalysis?.maxThreatTurns ?? null
+        }),
+        candidates: candidateEvidence
+      },
+      model: settings.model || 'jev-latest',
+      questions: {
+        best_move: {
+          type: 'choice',
+          instructions: 'Choose the FINAL legal move. Use the recorded Atomic, Pairwise, principal variation / opponent best replies, Threat-space proof, and critic result. Do not mechanically follow Local or Deep ranking. Never override a proven forced result or legality rule.',
+          criteria: Object.fromEntries(candidates.map(move => [
+            move.key,
+            `See state.candidates.${move.key}`
+          ]))
+        }
+      }
+    };
+  }
+
+  function deterministicMaxResult(context, candidates, choice, deepAnalysis, threatAnalysis, reason) {
+    const selected = candidates.find(move => move.key === choice) || candidates[0];
+    return {
+      answer: { choice: selected.key, confidence: 1, probabilities: { [selected.key]: 1 } },
+      finalChoice: selected.key,
+      localChoice: context.candidates[0]?.key || selected.key,
+      jevSuggested: null,
+      mode: 'max',
+      forced: context.forced,
+      candidates: [selected, ...candidates.filter(move => move.key !== selected.key)],
+      model: 'jev-max-deterministic-proof',
+      usage: null,
+      client: null,
+      decisionTrace: {
+        candidateSources: context.recall || null,
+        preJevDeepSearch: deepAnalysis || null,
+        preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
+        requestShape: {
+          decisionAuthority: reason,
+          candidateCount: candidates.length,
+          logicalRequests: 0,
+          httpRequests: 0,
+          maxWorkers: 2,
+          localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
+          localSearchElapsedMs: context.localSearch?.elapsedMs ?? null
+        }
+      },
+      stageNote: `Jev Max：确定性规则直接裁决（${reason}，0 次 Jev 请求）`
+    };
+  }
+
+  async function jevMaxDecision() {
+    const context = buildAdvancedCandidates('max');
+    let candidates = context.candidates;
+    if (!candidates.length) throw new Error('Jev Max 没有生成合法候选点');
+
+    candidates.forEach((move, index) => {
+      move.localRank = move.rank ?? index + 1;
+      move.localNorm = candidates.length === 1 ? 1 : 1 - (index / Math.max(1, candidates.length - 1));
+    });
+
+    const allImmediateWins = candidates.length && candidates.every(move => move.analysis?.winsNow);
+    if (allImmediateWins || candidates.length === 1) {
+      return deterministicMaxResult(
+        context, candidates, candidates[0].key, null, null,
+        allImmediateWins ? 'immediate_win' : 'single_forced_candidate'
+      );
+    }
+
+    const deepCandidates = candidates.slice(0, Math.min(5, candidates.length));
+    const threatCandidates = candidates.slice(0, Math.min(6, candidates.length));
+    updateApiState('busy', 'Jev Max：Deep 与 Threat Worker 并行准备证据…');
+    const [deepAnalysis, threatAnalysis] = await Promise.all([
+      runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel'),
+      runThreatWorkerAnalysis(threatCandidates, 'max', 'jev_max_parallel')
+    ]);
+
+    attachMaxDeepEvidence(candidates, deepAnalysis);
+    candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
+
+    // A proven VCF set or Threat-space filter may collapse to one exact choice.
+    if (candidates.length === 1) {
+      return deterministicMaxResult(
+        context, candidates, candidates[0].key, deepAnalysis, threatAnalysis,
+        candidates[0].analysis?.vcf ? 'proven_vcf_single' : 'threat_filter_single'
+      );
+    }
+
+    const atomicPayload = buildMaxAtomicPayload(context, candidates);
+    const atomicTokens = estimatePayloadTokens(atomicPayload);
+    updateApiState('busy', 'Jev Max：Atomic 独立评估候选…');
+    const atomicData = await callJev(atomicPayload);
+    const atomic = atomicTraceFor(candidates, atomicData?.answers || {});
+    const recallChoice = String(atomicData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
+
+    const atomicTop4 = [...candidates]
+      .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
+        || (a.localRank || 999) - (b.localRank || 999))
+      .slice(0, Math.min(4, candidates.length));
+
+    const tournament = buildPairwisePayload(atomicTop4);
+    tournament.payload.state.task = 'Jev Max stage 2: order-balanced pairwise tournament plus adversarial refutation analysis.';
+    tournament.payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
+    tournament.payload.state.max_candidate_evidence = Object.fromEntries(
+      atomicTop4.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: false })])
+    );
+    addCriticQuestions(tournament.payload.questions, atomicTop4);
+
+    let wildcardPool = [];
+    if (recallChoice === 'OTHER') {
+      wildcardPool = extraWildcardPool(candidates, 12);
+      if (wildcardPool.length) {
+        tournament.payload.state.wildcard_pool = wildcardPool.map(move => move.key);
+        tournament.payload.questions.wildcard_pick = {
+          type: 'choice',
+          instructions: 'The Atomic recall audit requested OTHER. Choose one alternative from this bounded legal wildcard pool by inspecting the shared full board. This is a proposal only; deterministic legality and immediate-loss checks run afterward.',
+          criteria: Object.fromEntries(wildcardPool.map(move => [
+            move.key,
+            'Unranked legal alternative; inspect board geometry directly.'
+          ]))
+        };
+      }
+    }
+
+    const pairwiseTokens = estimatePayloadTokens(tournament.payload);
+    updateApiState('busy', 'Jev Max：Pairwise 双向对决与 Critic 反驳分析…');
+    const pairwiseData = await callJev(tournament.payload);
+    const pairwise = scorePairwiseTournament(atomicTop4, tournament.pairs, pairwiseData?.answers || {});
+    const critic = maxCriticTrace(atomicTop4, pairwiseData?.answers || {});
+    let ranked = pairwiseRank(atomicTop4);
+
+    let wildcard = null;
+    const wildcardChoice = String(pairwiseData?.answers?.wildcard_pick?.choice || '').toUpperCase();
+    if (wildcardChoice) {
+      const proposed = wildcardPool.find(move => move.key === wildcardChoice);
+      wildcard = validateWildcardCandidate(proposed);
+      if (wildcard) {
+        wildcard.atomicScore = .5;
+        wildcard.pairScore = 0;
+      }
+    }
+
+    let finalists = ranked.slice(0, Math.min(2, ranked.length));
+    if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
+      finalists = [...finalists, wildcard].slice(0, 3);
+    }
+
+    const converged = !wildcard && highConfidenceMaxConvergence(ranked);
+    let finalData = null;
+    let answer;
+    let finalChoice;
+
+    if (converged) {
+      answer = pairwiseAnswer(ranked);
+      finalChoice = answer.choice;
+    } else {
+      const finalPayload = buildMaxFinalPayload(finalists, context, deepAnalysis, threatAnalysis);
+      const finalTokens = estimatePayloadTokens(finalPayload);
+      updateApiState('busy', 'Jev Max：汇总证据并进行最终裁决…');
+      finalData = await callJev(finalPayload);
+      const raw = finalData?.answers?.best_move;
+      if (!raw || typeof raw.choice !== 'string') {
+        throw new Error('Jev Max 最终响应中缺少 answers.best_move.choice');
+      }
+      finalChoice = raw.choice.toUpperCase();
+      const finalistKeys = new Set(finalists.map(move => move.key));
+      if (!finalistKeys.has(finalChoice)) {
+        throw new Error(`Jev Max 返回候选集之外的落点：${raw.choice}`);
+      }
+      const probabilities = raw.probabilities && typeof raw.probabilities === 'object'
+        ? Object.fromEntries(Object.entries(raw.probabilities)
+            .filter(([key]) => finalistKeys.has(String(key).toUpperCase()))
+            .map(([key, value]) => [String(key).toUpperCase(), Number(value)]))
+        : { [finalChoice]: 1 };
+      answer = {
+        ...raw,
+        choice: finalChoice,
+        confidence: Number.isFinite(raw.confidence)
+          ? raw.confidence
+          : Number.isFinite(Number(probabilities[finalChoice])) ? Number(probabilities[finalChoice]) : null,
+        probabilities
+      };
+      finalData.__maxEstimatedTokens = finalTokens;
+    }
+
+    const final = finalists.find(move => move.key === finalChoice)
+      || ranked.find(move => move.key === finalChoice);
+    if (!final) throw new Error('Jev Max 最终选择无法映射到合法候选');
+
+    const finalCandidates = [
+      final,
+      ...candidates.filter(move => move.key !== final.key),
+      ...(wildcard && !candidates.some(move => move.key === wildcard.key) && wildcard.key !== final.key ? [wildcard] : [])
+    ].slice(0, maxCandidateLimit());
+
+    const usage = sumUsage(atomicData?.usage, pairwiseData?.usage, finalData?.usage);
+    const client = aggregateJevClient(atomicData, pairwiseData, finalData);
+    const logicalRequests = finalData ? 3 : 2;
+    const estimatedInputTokens = [
+      atomicTokens,
+      pairwiseTokens,
+      finalData?.__maxEstimatedTokens ?? null
+    ].filter(Number.isFinite);
+
+    return {
+      answer,
+      finalChoice,
+      localChoice: context.candidates[0]?.key || candidates[0]?.key || finalChoice,
+      jevSuggested: finalChoice,
+      mode: 'max',
+      forced: context.forced,
+      candidates: finalCandidates,
+      model: finalData?.model || pairwiseData?.model || atomicData?.model || settings.model,
+      usage,
+      client,
+      decisionTrace: {
+        candidateSources: context.recall || candidates.map(move => ({
+          move: move.key,
+          sources: [...(move.recallSources || [])]
+        })),
+        atomic,
+        recallCheck: compactAnswer(atomicData?.answers?.recall_check),
+        pairwise,
+        critic,
+        wildcard: {
+          requested: recallChoice === 'OTHER',
+          pool: wildcardPool.map(move => move.key),
+          proposed: wildcardChoice || null,
+          accepted: wildcard?.key || null,
+          enteredFinalists: Boolean(wildcard && finalists.some(move => move.key === wildcard.key)),
+          chosen: finalChoice === wildcard?.key
+        },
+        preJevDeepSearch: deepAnalysis ? {
+          status: deepAnalysis.status || null,
+          source: deepAnalysis.source || null,
+          depthReached: deepAnalysis.depthReached ?? null,
+          rankingOnly: Boolean(deepAnalysis.rankingOnly),
+          timedOut: Boolean(deepAnalysis.timedOut),
+          elapsedMs: deepAnalysis.elapsedMs ?? null,
+          budgetMs: deepAnalysis.budgetMs ?? null,
+          scores: (deepAnalysis.scores || []).map(item => ({
+            move: item.move,
+            score: Number.isFinite(item.score) && !isSentinelSearchScore(item.score) ? item.score : null,
+            fallbackRank: item.fallbackRank ?? null,
+            forcedResult: item.forcedResult || structuredForcedResult(item.score, 'DEEP_SEARCH'),
+            principalVariation: Array.isArray(item.principalVariation) ? item.principalVariation.slice(0, 8) : [],
+            opponentBestReplies: Array.isArray(item.opponentBestReplies) ? item.opponentBestReplies.slice(0, 2) : []
+          }))
+        } : null,
+        preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
+        finalDecision: finalData ? compactAnswer(answer) : null,
+        requestShape: {
+          decisionAuthority: finalData ? 'jev_max_final' : 'jev_max_pairwise_convergence',
+          candidateCount: candidates.length,
+          atomicCount: candidates.length,
+          pairwiseCount: tournament.pairs.length * 2,
+          criticCount: atomicTop4.length,
+          finalistCount: finalists.length,
+          logicalRequests,
+          httpRequests: client.attempts,
+          maxWorkers: 2,
+          payloadEstimatedInputTokens: estimatedInputTokens,
+          payloadTokenBudgetTarget: 5000,
+          payloadTokenBudgetHard: 7000,
+          localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
+          localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
+          localSearchTimedOut: Boolean(context.localSearch?.timedOut),
+          deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
+          threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
+          threatFilterCount: context.candidates.length - candidates.length
+        },
+        localEvidence: finalCandidates.map(move => ({
+          move: move.key,
+          sources: [...(move.recallSources || [])],
+          localRank: move.localRank ?? null,
+          localSearchScore: Number.isFinite(move.searchScore) && !isSentinelSearchScore(move.searchScore) ? move.searchScore : null,
+          localForcedResult: structuredForcedResult(move.searchScore, 'LOCAL_ALPHA_BETA'),
+          deepSearchRank: move.deepSearchRank ?? null,
+          deepSearchScore: Number.isFinite(move.deepSearchScore) ? move.deepSearchScore : null,
+          deepEvidence: move.deepEvidence || null,
+          atomicScore: Number.isFinite(move.atomicScore) ? move.atomicScore : null,
+          pairScore: Number.isFinite(move.pairScore) ? move.pairScore : null,
+          criticSummary: move.criticSummary || null,
+          threatSearch: move.threatSearch || null,
+          facts: move.analysis?.facts || null
+        }))
+      },
+      stageNote: converged
+        ? `Jev Max：Atomic + 双向 Pairwise + Critic 高置信收敛，${logicalRequests} 次 Jev 请求后选择 ${finalChoice}`
+        : `Jev Max：异构候选 → Atomic → 双向 Pairwise/Critic → Final Judge，${logicalRequests} 次 Jev 请求后选择 ${finalChoice}`
     };
   }
 
