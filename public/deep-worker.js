@@ -1060,34 +1060,64 @@ function directForkCreator(color, radius = 2) {
 
 function residualForkRescueMoves(attacker, defender, fork, radius, maxReplies = 10) {
   // Hard-proof rescue enumeration is currently enabled only when WHITE is the
-  // defender. BLACK forbidden-move rules can make a remote stone alter future
-  // move legality, so those positions stay advisory rather than risking a false
-  // proof.
+  // defender. BLACK forbidden-move interactions remain advisory until this
+  // exhaustive audit is separately regression-tested for Renju legality.
   if (defender !== WHITE || !fork) {
     return { complete: false, moves: [], reason: 'unsupported_defender_rules' };
   }
 
+  const forkPoint = coordToPoint(fork.move);
+  if (!forkPoint) return { complete: false, moves: [], reason: 'invalid_fork_creator' };
+
   const byKey = new Map();
   const add = move => {
     if (!move || byKey.has(move.key)) return;
-    if (board[move.r]?.[move.c] !== EMPTY) return;
-    if (!isLegalMoveForColor(move.r, move.c, defender)) return;
     byKey.set(move.key, move);
   };
 
-  for (const key of [fork.move, ...(fork.winningPoints || [])]) {
-    add(coordToPoint(key));
-  }
+  // A hard proof must account for every legal WHITE move that either creates
+  // forcing tempo or prevents the known fork creator from still yielding two
+  // legal immediate winning points. Scanning the whole 15x15 board is rare but
+  // complete; if too many rescue branches exist we return UNKNOWN, never proof.
+  for (let r = 0; r < SIZE; r++) {
+    for (let col = 0; col < SIZE; col++) {
+      assertTime();
+      if (board[r][col] !== EMPTY || !isLegalMoveForColor(r, col, defender)) continue;
+      const move = { r, c: col, key: coord(r, col) };
 
-  // Any other legal rescue must create forcing tempo immediately; otherwise
-  // the attacker can play the known fork creator next. Enumerate those forcing
-  // counter-moves exhaustively within the tactical radius.
-  for (const move of nearbyMoves(radius)) {
-    assertTime();
-    if (!isLegalMoveForColor(move.r, move.c, defender)) continue;
-    playMove(move, defender);
-    try {
-      if (isWin(move.r, move.c, defender)) {
+      playMove(move, defender);
+      let winningDefense = false;
+      let createsTempo = false;
+      let forkStillWins = false;
+      try {
+        if (isWin(move.r, move.c, defender)) {
+          winningDefense = true;
+        } else {
+          createsTempo = immediateWins(defender, radius).length > 0;
+
+          if (
+            board[forkPoint.r]?.[forkPoint.c] === EMPTY
+            && isLegalMoveForColor(forkPoint.r, forkPoint.c, attacker)
+          ) {
+            playMove(forkPoint, attacker);
+            try {
+              if (isWin(forkPoint.r, forkPoint.c, attacker)) {
+                forkStillWins = true;
+              } else {
+                const legalWins = immediateWins(attacker, radius);
+                const defenderWins = immediateWins(defender, radius);
+                forkStillWins = legalWins.length >= 2 && defenderWins.length === 0;
+              }
+            } finally {
+              undoMove(forkPoint, attacker);
+            }
+          }
+        }
+      } finally {
+        undoMove(move, defender);
+      }
+
+      if (winningDefense) {
         return {
           complete: true,
           winningDefense: move.key,
@@ -1095,16 +1125,17 @@ function residualForkRescueMoves(attacker, defender, fork, radius, maxReplies = 
           reason: 'defender_can_win_immediately'
         };
       }
-      if (immediateWins(defender, radius).length) add(move);
-    } finally {
-      undoMove(move, defender);
-    }
-    if (byKey.size > maxReplies) {
-      return {
-        complete: false,
-        moves: [...byKey.values()],
-        reason: 'rescue_branch_limit'
-      };
+
+      if (createsTempo || !forkStillWins) {
+        add(move);
+        if (byKey.size > maxReplies) {
+          return {
+            complete: false,
+            moves: [...byKey.values()],
+            reason: 'rescue_branch_limit'
+          };
+        }
+      }
     }
   }
 
