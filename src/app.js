@@ -5256,6 +5256,11 @@
       speculativePool = candidates.slice(0, Math.min(6, candidates.length));
       fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
       fanoutTokens = estimatePayloadTokens(fanout.payload);
+      if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
+        speculativePool = candidates.slice(0, 4);
+        fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+        fanoutTokens = estimatePayloadTokens(fanout.payload);
+      }
     }
 
     updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / Critic…');
