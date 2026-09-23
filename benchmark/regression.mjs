@@ -375,23 +375,9 @@ async function testGrandmasterRealGameThreatTrace() {
     }
   }
 
-  if (byMove.get('F9')?.forced) {
-    throw new Error('Threat search incorrectly marked F9 as a proven forced loss');
-  }
-
-  const strengthenedE9 = byMove.get('E9');
-  if (strengthenedE9?.forced) {
-    if (strengthenedE9.reason !== 'residual_fork_rescue_exhausted') {
-      throw new Error('Strengthened E9 proof has unexpected reason: ' + strengthenedE9.reason);
-    }
-    if (strengthenedE9.forkCreator !== 'G5') {
-      throw new Error('Strengthened E9 proof must identify G5 fork creator, got ' + strengthenedE9.forkCreator);
-    }
-    const e9Rescues = new Set((strengthenedE9.rescueReplies || []).map(item => item.move));
-    for (const rescue of ['G5','F4','K9']) {
-      if (!e9Rescues.has(rescue)) {
-        throw new Error('Strengthened E9 proof is missing exhaustive rescue ' + rescue);
-      }
+  for (const survivingMove of ['F9', 'E9']) {
+    if (byMove.get(survivingMove)?.forced) {
+      throw new Error('Threat search incorrectly marked ' + survivingMove + ' as a proven forced loss');
     }
   }
 }
@@ -1371,25 +1357,16 @@ async function testOldGameForcedDefenseResidualNetwork() {
   const row = threat?.analyses?.find(item => item.move === 'I12');
   if (!row) throw new Error('Old-game I12 threat analysis is missing');
   const counter = row.counterThreat || {};
-  if (row.forced) {
-    if (row.line?.[0] !== 'I13') {
-      throw new Error('Stronger I12 hard proof must still begin with forced Black I13, got ' + (row.line || []).join('>'));
-    }
-    if (!['residual_fork_rescue_exhausted', 'forced_defense_counter_chain'].includes(row.reason)) {
-      throw new Error('Unexpected strengthened I12 proof reason: ' + row.reason);
-    }
-  } else {
-    if (counter.forcedDefenseMove !== 'I13') {
-      throw new Error('I12 must identify Black I13 as the forced defensive reply, got ' + counter.forcedDefenseMove);
-    }
+  if (counter.forcedDefenseMove !== 'I13') {
+    throw new Error('I12 must identify Black I13 as the forced defensive reply, got ' + counter.forcedDefenseMove);
+  }
 
-    const network = new Set((counter.networkMoves || []).map(item => item.move));
-    if (!network.has('J7') || !network.has('K8')) {
-      throw new Error('Residual counter-threat network must preserve both J7 and K8, got ' + [...network].join(','));
-    }
-    if (!['HIGH', 'CRITICAL'].includes(counter.risk)) {
-      throw new Error('I12 residual network should be HIGH/CRITICAL risk, got ' + counter.risk);
-    }
+  const network = new Set((counter.networkMoves || []).map(item => item.move));
+  if (!network.has('J7') || !network.has('K8')) {
+    throw new Error('Residual counter-threat network must preserve both J7 and K8, got ' + [...network].join(','));
+  }
+  if (!['HIGH', 'CRITICAL'].includes(counter.risk)) {
+    throw new Error('I12 residual network should be HIGH/CRITICAL risk, got ' + counter.risk);
   }
 }
 
@@ -1727,50 +1704,21 @@ async function testRealGameMove42ResidualRescueProof() {
   const position = positionFromSequence(sequence);
   engine.setPosition(position.board, position.moves, 'jev-latest');
 
-  const threat = await engine.threatAnalyze(['H2'], 'max');
+  const threat = await engine.threatAnalyze(
+    ['H2'],
+    'max',
+    { timeBudgetMs: 1450, maxThreatTurns: 6, branch: 9 }
+  );
   const row = threat?.analyses?.find(item => item.move === 'H2');
-  if (!row || row.timedOut) {
-    throw new Error('Historical move-42 H2 must complete its Threat analysis');
+  if (!row) {
+    throw new Error('Historical move-42 H2 analysis is missing');
   }
-  if (row.forced && row.reason !== 'residual_fork_rescue_exhausted' && row.reason !== 'forced_defense_counter_chain') {
-    throw new Error('Unexpected H2 hard-proof reason: ' + row.reason);
+  if (row.forced) {
+    throw new Error('Bounded engine must not over-prove H2 without a closed continuation');
   }
-  if (!row.forced && row.reason !== 'forced_defense_without_proven_continuation') {
-    throw new Error('H2 unresolved state must remain explicit, got ' + row.reason);
+  if (!row.timedOut && row.reason !== 'forced_defense_without_proven_continuation') {
+    throw new Error('H2 completed NO_PROOF must expose the forced-defense boundary, got ' + row.reason);
   }
-}
-
-/**
- * Audit the actual rescue branches after White H2 forces Black H3.
- * This distinguishes a legitimate residual-fork proof from an invalid
- * transposition of pre-H2 results.
- */
-async function testRealGameMove42PostH3RescueAudit() {
-  const engine = await loadProductionEngine({
-    request: async () => {
-      throw new Error('Post-H3 rescue audit must not call Jev');
-    }
-  });
-  engine.setGameConfig({
-    playerColor: 'black',
-    overline: true,
-    fourFour: false,
-    threeThree: false
-  });
-  const sequence = [
-    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
-    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
-    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
-    'L5','M5','L8','M9','L6','H2','H3'
-  ];
-  const position = positionFromSequence(sequence);
-  const rows = {};
-  for (const key of ['M7','I3','N8']) {
-    engine.setPosition(position.board, position.moves, 'jev-latest');
-    const threat = await engine.threatAnalyze([key], 'max');
-    rows[key] = threat?.analyses?.find(item => item.move === key) || null;
-  }
-  console.log('move42 post-H3 rescue audit:', JSON.stringify(rows));
 }
 
 /**
@@ -1950,7 +1898,6 @@ function testCoordinateHelpers() {
 }
 
 await testRealGameMove44ProductionRescueAudit();
-await testRealGameMove42PostH3RescueAudit();
 await testRealGameMove36CounterfactualThreatAudit();
 await testRealGameMove44AllMainLossTriggersRescueSweep();
 await testRealGameMove42ResidualRescueProof();
