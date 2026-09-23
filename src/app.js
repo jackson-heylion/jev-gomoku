@@ -74,6 +74,19 @@
   let lastThinkMs = null;
   let gameSeed = createGameSeed();
   let gameStarted = false;
+  let browserLongTaskCount = null;
+
+  if (typeof PerformanceObserver !== 'undefined') {
+    try {
+      browserLongTaskCount = 0;
+      const longTaskObserver = new PerformanceObserver(list => {
+        browserLongTaskCount += list.getEntries().length;
+      });
+      longTaskObserver.observe({ entryTypes: ['longtask'] });
+    } catch (_) {
+      browserLongTaskCount = null;
+    }
+  }
 
   const settings = loadSettings();
   modelInput.value = settings.model;
@@ -1229,7 +1242,7 @@
 
     if (d.trace?.requestShape) {
       const s = d.trace.requestShape;
-      lines.push(`  性能：local=${s.localSearchElapsedMs ?? '—'}ms；deep=${s.deepElapsedMs ?? '—'}ms；threat=${s.threatElapsedMs ?? '—'}ms；workers<=${s.maxWorkers ?? '—'}`);
+      lines.push(`  性能：local=${s.localSearchElapsedMs ?? '—'}ms；deep=${s.deepElapsedMs ?? '—'}ms；threat=${s.threatElapsedMs ?? '—'}ms；workers<=${s.maxWorkers ?? '—'}；browserLongTasks=${s.browserLongTasks ?? 'unsupported'}`);
       if (Array.isArray(s.payloadEstimatedInputTokens)) {
         lines.push(`  Payload 估算：${s.payloadEstimatedInputTokens.join(' / ')} tokens（target<${s.payloadTokenBudgetTarget ?? 5000}，hard<${s.payloadTokenBudgetHard ?? 7000}）`);
       }
@@ -4298,6 +4311,7 @@
     if (!gameStarted || gameOver || current !== side || thinking) return;
 
     thinking = true;
+    const longTaskBaseline = browserLongTaskCount;
     beginThinkingClock();
     retryBtn.style.display = 'none';
     canvas.classList.add('disabled');
@@ -4344,6 +4358,12 @@
         throw new Error(`最终决策产生非法落点：${result.finalChoice}`);
       }
       captureThinkingDuration(result);
+      if (result?.decisionTrace?.requestShape) {
+        result.decisionTrace.requestShape.browserLongTasks = Number.isFinite(browserLongTaskCount)
+          && Number.isFinite(longTaskBaseline)
+          ? Math.max(0, browserLongTaskCount - longTaskBaseline)
+          : null;
+      }
       lastJev = result;
       renderJevResult(lastJev);
       const moveSource = result.mode === 'local' || result.fallbackReason || result.stageNote?.includes('0 次 Jev')
