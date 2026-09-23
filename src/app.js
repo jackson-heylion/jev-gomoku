@@ -256,8 +256,12 @@
   }
 
   function prepareHumanThreatForAi() {
-    const threats = immediateWins(playerColor(), 2);
     const humanMoves = playerMovesInGame();
+    if (humanMoves.length < 4) {
+      pendingHumanThreat = null;
+      return;
+    }
+    const threats = immediateWins(playerColor(), 2);
     pendingHumanThreat = threats.length
       ? {
           points: threats.map(move => move.key),
