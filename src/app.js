@@ -3332,7 +3332,7 @@
         move.analysis.facts.tactical_safety === 'UNVERIFIED_BUDGET'
         && !evidence.timedOut
       ) {
-        move.analysis.facts.tactical_safety = 'THREAT_VETTED_NO_FORCED_LOSS';
+        move.analysis.facts.tactical_safety = 'THREAT_SEARCH_NO_PROOF';
       }
     }
     return byMove;
