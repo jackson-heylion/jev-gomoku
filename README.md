@@ -300,3 +300,8 @@ ChatGPT Sites 配置：
 ```
 
 所有部署形态都应保持浏览器只访问同源 `/api/jev`，不得把 `JEV_API_KEY` 暴露到前端。
+
+
+### Wildcard Threat-proof 安全边界
+
+Jev 的 `OTHER` 只能扩大候选召回，不能绕过确定性安全规则。主候选被 VCF / Threat-space / deterministic fork proof 判定为必败后，同一落点不能通过 wildcard 再次进入 Final。若对手已经存在两个不同的立即胜点，则记为 `forced_loss_double_win`，Jev Max 直接 0 请求短路，不再让 Atomic / Pairwise / Final 在多个必败防点之间投票。
