@@ -990,7 +990,7 @@ function accumulate(volume, record, options) {
   }
 
   if (options.mode === 'expert' && record.engine === 'jev-final') {
-    const expectShallow = plies < 8;
+    const expectShallow = plies < 4;
     if (expectShallow && shape.localOpeningAdaptive !== true) {
       volume.violations.push({
         kind: 'opening_adaptive_profile',
