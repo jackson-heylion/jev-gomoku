@@ -1,7 +1,8 @@
 (() => {
   'use strict';
 
-  const SIZE = 15;
+  const TIMEOUT_SCALE = 2;
+const SIZE = 15;
   const COLS = 'ABCDEFGHIJKLMNO'.split('');
   const EMPTY = 0, BLACK = 1, WHITE = 2;
 
@@ -370,7 +371,7 @@
   async function testConnection() {
     if (testController) testController.abort();
     testController = new AbortController();
-    const timeout = setTimeout(() => testController?.abort(), 15000);
+    const timeout = setTimeout(() => testController?.abort(), 15000 * TIMEOUT_SCALE);
     testConnectionBtn.disabled = true;
     testConnectionBtn.textContent = '检查中…';
     setConnectionTest('busy', '正在检查 Jev 服务…');
@@ -1445,7 +1446,7 @@
 
   function beginLocalSearchBudget(cfg) {
     const startedAt = performance.now();
-    const budgetMs = Math.max(250, Number(cfg.localTimeMs) || 1200);
+    const budgetMs = Math.max(250, (Number(cfg.localTimeMs) || 1200) * TIMEOUT_SCALE);
     const rootShare = Math.max(.50, Math.min(.90, Number(cfg.localRootShare) || .75));
     const runtime = {
       startedAt,
@@ -3085,10 +3086,10 @@
     }
 
     const id = ++deepWorkerSequence;
-    const timeBudgetMs = mode === 'max'
+    const timeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1300 : 1800)
       : mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400)
-        : 1500;
+        : 1500);
     const maxDepth = mode === 'max' ? 8 : 7;
     const branch = mode === 'max' ? 8 : 7;
 
@@ -3128,7 +3129,7 @@
           elapsedMs: timeBudgetMs,
           budgetMs: timeBudgetMs
         });
-      }, timeBudgetMs + 350);
+      }, timeBudgetMs + 350 * TIMEOUT_SCALE);
 
       worker.onmessage = event => {
         const message = event.data || {};
@@ -3197,11 +3198,11 @@
     }
 
     const id = ++threatWorkerSequence;
-    const defaultTimeBudgetMs = mode === 'max'
+    const defaultTimeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1100 : 1450)
-      : (moves.length < 10 ? 800 : 1200);
+      : (moves.length < 10 ? 800 : 1200));
     const timeBudgetMs = Number.isFinite(overrides.timeBudgetMs)
-      ? Math.max(250, Math.min(defaultTimeBudgetMs, overrides.timeBudgetMs))
+      ? Math.max(250, Math.min(defaultTimeBudgetMs, overrides.timeBudgetMs * TIMEOUT_SCALE))
       : defaultTimeBudgetMs;
     const maxThreatTurns = Number.isFinite(overrides.maxThreatTurns)
       ? Math.max(2, Math.min(8, overrides.maxThreatTurns))
@@ -3248,7 +3249,7 @@
           budgetMs: timeBudgetMs,
           maxThreatTurns
         });
-      }, timeBudgetMs + 350);
+      }, timeBudgetMs + 350 * TIMEOUT_SCALE);
 
       worker.onmessage = event => {
         const message = event.data || {};
