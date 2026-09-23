@@ -66,6 +66,7 @@
             </div>
             <button class="btn compact-btn" id="quickSettingsBtn" type="button">切换等级</button>
           </div>
+          <div class="api-phase" id="apiPhase" aria-live="polite">准备就绪</div>
           <div class="level-meta">
             <span class="level-badge" id="levelBadge">MAX</span>
             <span class="level-summary" id="levelSummary">多算法异构召回 + Atomic + Pairwise + 对手最强回复 + Critic，由 Jev 做最终裁决。</span>
@@ -188,6 +189,7 @@
       </div>
 
       <div class="selection-summary">当前选择：<strong id="currentLevelSummary">MAX · Jev Max</strong></div>
+      <div class="easter-progress" id="easterEggProgress" hidden>彩蛋 0 / ??</div>
 
       <div class="modal-actions">
         <button class="btn test-btn" id="testConnectionBtn" type="button">检查 Jev 状态</button>
@@ -204,6 +206,10 @@
       <h2 id="resultTitle">对局结束</h2>
       <p class="desc result-desc" id="resultDesc">本局已结束。</p>
       <div class="result-stats" id="resultStats"></div>
+      <div class="result-summary-block" aria-label="本局总结">
+        <div class="result-summary-title">本局总结</div>
+        <div class="result-summary" id="resultSummary">等待对局结束。</div>
+      </div>
       <div class="modal-actions result-actions">
         <button class="btn" id="resultCloseBtn" type="button">查看棋盘</button>
         <button class="btn" id="resultCopyBtn" type="button">复制棋谱</button>

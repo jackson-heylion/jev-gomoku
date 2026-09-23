@@ -17,6 +17,7 @@
   const historyEl = document.getElementById('history');
   const apiIndicator = document.getElementById('apiIndicator');
   const apiLabel = document.getElementById('apiLabel');
+  const apiPhase = document.getElementById('apiPhase');
   const levelBadge = document.getElementById('levelBadge');
   const levelSummary = document.getElementById('levelSummary');
   const jevLiveState = document.getElementById('jevLiveState');
@@ -38,6 +39,7 @@
   const resultTitle = document.getElementById('resultTitle');
   const resultDesc = document.getElementById('resultDesc');
   const resultStats = document.getElementById('resultStats');
+  const resultSummary = document.getElementById('resultSummary');
   const resultCloseBtn = document.getElementById('resultCloseBtn');
   const resultCopyBtn = document.getElementById('resultCopyBtn');
   const resultRestartBtn = document.getElementById('resultRestartBtn');
@@ -55,6 +57,7 @@
   const ruleFourFourInput = document.getElementById('ruleFourFour');
   const ruleThreeThreeInput = document.getElementById('ruleThreeThree');
   const gameConfigSummary = document.getElementById('gameConfigSummary');
+  const easterEggProgress = document.getElementById('easterEggProgress');
   const ruleHint = document.getElementById('ruleHint');
   const runtimeRulesHint = document.getElementById('runtimeRulesHint');
 
@@ -76,6 +79,17 @@
   let gameSeed = createGameSeed();
   let gameStarted = false;
   let browserLongTaskCount = null;
+  let gameEggs = new Set();
+  let undoCount = 0;
+  let copyCount = 0;
+  let openingSaved = false;
+  let pendingHumanThreat = null;
+  let missedDefensePendingWin = false;
+  let jevWasInDanger = false;
+  let jevBlockStreak = 0;
+  let thinkEgg20 = false;
+  let thinkEgg40 = false;
+  let maxBadgeTimer = null;
 
   if (typeof PerformanceObserver !== 'undefined') {
     try {
@@ -92,6 +106,235 @@
   const settings = loadSettings();
   modelInput.value = settings.model;
   strengthModeInput.value = settings.strengthMode;
+
+  const EASTER_UNLOCK_KEY = 'jev_gomoku_easter_eggs_v1';
+  const OPENING_HISTORY_KEY = 'jev_gomoku_opening_history_v1';
+  const EASTER_EGG_META = Object.freeze({
+    center_opening: { label: '天元执念' },
+    lightning: { label: '闪电战' },
+    straight_win: { label: '直线狂魔' },
+    straight_blocked: { label: '意图已读' },
+    jev_miss: { label: 'Jev 看漏了' },
+    comeback: { label: '绝地求生' },
+    familiar_opening: { label: '你被研究了' },
+    copy_3: { label: '复制狂魔' },
+    copy_5: { label: '棋谱背诵者' },
+    undo_3: { label: '时间线波动' },
+    undo_6: { label: '平行棋局' },
+    undo_overload: { label: '悔棋过多' },
+    undo_multiverse: { label: '多元宇宙' },
+    long_think_20: { label: '深度沉思' },
+    long_think_40: { label: '超长沉思' },
+    forced_chain: { label: '强制变化' },
+    center_universe: { label: '正中央宇宙' },
+    edge_artist: { label: '边角艺术家' },
+    perfect_defense: { label: '完美封杀' },
+    changed_mind: { label: '概率嘴硬' },
+    max_true_form: { label: 'MAX 真身' }
+  });
+  const unlockedEasterEggs = loadUnlockedEasterEggs();
+
+  function readStoredArray(key) {
+    try {
+      const value = JSON.parse(localStorage.getItem(key) || '[]');
+      return Array.isArray(value) ? value : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function loadUnlockedEasterEggs() {
+    return new Set(readStoredArray(EASTER_UNLOCK_KEY).filter(id => EASTER_EGG_META[id]));
+  }
+
+  function persistUnlockedEasterEggs() {
+    try {
+      localStorage.setItem(EASTER_UNLOCK_KEY, JSON.stringify([...unlockedEasterEggs]));
+    } catch (_) {}
+  }
+
+  function updateEasterProgress() {
+    if (!easterEggProgress) return;
+    const count = unlockedEasterEggs.size;
+    easterEggProgress.hidden = count === 0;
+    easterEggProgress.textContent = `彩蛋 ${count} / ??`;
+  }
+
+  function triggerEasterEgg(id, message, options = {}) {
+    if (!EASTER_EGG_META[id] || gameEggs.has(id)) return false;
+    gameEggs.add(id);
+    if (!unlockedEasterEggs.has(id)) {
+      unlockedEasterEggs.add(id);
+      persistUnlockedEasterEggs();
+    }
+    updateEasterProgress();
+    if (gameOver && gameResult && resultSummary) {
+      resultSummary.textContent = buildGameSummary(gameResult.winner);
+    }
+    if (options.toast !== false) toast(`彩蛋 · ${message}`, options.duration || 3600);
+    return true;
+  }
+
+  function gameEggLabels() {
+    return [...new Set([...gameEggs].map(id => EASTER_EGG_META[id]?.label).filter(Boolean))];
+  }
+
+  function playerMovesInGame() {
+    return moves.filter(move => move.color === playerColor());
+  }
+
+  function sameMoveLine(items) {
+    if (!Array.isArray(items) || items.length < 4) return false;
+    const rows = new Set(items.map(move => move.r));
+    const cols = new Set(items.map(move => move.c));
+    const diag = new Set(items.map(move => move.r - move.c));
+    const anti = new Set(items.map(move => move.r + move.c));
+    return rows.size === 1 || cols.size === 1 || diag.size === 1 || anti.size === 1;
+  }
+
+  function isCenterFive(move) {
+    return move && move.r >= 5 && move.r <= 9 && move.c >= 5 && move.c <= 9;
+  }
+
+  function isEdgeZone(move) {
+    if (!move) return false;
+    return Math.min(move.r, move.c, SIZE - 1 - move.r, SIZE - 1 - move.c) <= 2;
+  }
+
+  function openingsSimilar(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length < 4 || b.length < 4) return false;
+    let close = 0;
+    for (let i = 0; i < 4; i++) {
+      const x = parseCoord(a[i]);
+      const y = parseCoord(b[i]);
+      if (x && y && Math.max(Math.abs(x.r - y.r), Math.abs(x.c - y.c)) <= 1) close++;
+    }
+    return close >= 3;
+  }
+
+  function maybeRecognizeOpening() {
+    const opening = playerMovesInGame().slice(0, 4).map(move => move.coord);
+    if (opening.length !== 4) return;
+    const history = readStoredArray(OPENING_HISTORY_KEY).filter(item => Array.isArray(item) && item.length >= 4);
+    if (history.length >= 3 && history.slice(-3).every(previous => openingsSimilar(previous, opening))) {
+      triggerEasterEgg('familiar_opening', '这个开局……Jev 好像见过。');
+    }
+  }
+
+  function saveOpeningHistory() {
+    if (openingSaved) return;
+    const opening = playerMovesInGame().slice(0, 4).map(move => move.coord);
+    if (opening.length < 4) return;
+    openingSaved = true;
+    const history = readStoredArray(OPENING_HISTORY_KEY)
+      .filter(item => Array.isArray(item) && item.length >= 4)
+      .slice(-7);
+    history.push(opening);
+    try {
+      localStorage.setItem(OPENING_HISTORY_KEY, JSON.stringify(history));
+    } catch (_) {}
+  }
+
+  function trackPlacedMoveEasterEggs(move) {
+    if (!move) return;
+    if (move.color === playerColor()) {
+      const humanMoves = playerMovesInGame();
+      if (humanMoves.length === 1 && move.coord === 'H8') {
+        triggerEasterEgg('center_opening', '天元开局。Jev 似乎认真了一点。');
+      }
+      if (humanMoves.length === 4) maybeRecognizeOpening();
+      if (humanMoves.length === 5 && humanMoves.every(isEdgeZone)) {
+        triggerEasterEgg('edge_artist', '你对棋盘中央似乎没有兴趣。');
+      }
+    }
+
+    if (moves.length === 8 && moves.every(isCenterFive)) {
+      triggerEasterEgg('center_universe', '整个宇宙暂时只有中央这 25 个点。');
+      canvas.classList.add('easter-pulse');
+      setTimeout(() => canvas.classList.remove('easter-pulse'), 1200);
+    }
+  }
+
+  function prepareHumanThreatForAi() {
+    const humanMoves = playerMovesInGame();
+    if (humanMoves.length < 4) {
+      pendingHumanThreat = null;
+      return;
+    }
+    const threats = immediateWins(playerColor(), 2);
+    pendingHumanThreat = threats.length
+      ? {
+          points: threats.map(move => move.key),
+          straight: sameMoveLine(humanMoves.slice(-4))
+        }
+      : null;
+    if (threats.length) jevWasInDanger = true;
+  }
+
+  function resolveHumanThreatAfterAiMove(aiMove) {
+    if (!pendingHumanThreat) {
+      jevBlockStreak = 0;
+      missedDefensePendingWin = false;
+      return;
+    }
+
+    const remaining = immediateWins(playerColor(), 2);
+    const blocked = pendingHumanThreat.points.includes(aiMove) && remaining.length === 0;
+    if (blocked) {
+      jevBlockStreak++;
+      missedDefensePendingWin = false;
+      if (pendingHumanThreat.straight) {
+        triggerEasterEgg('straight_blocked', 'Jev：这个我还是看得见的。');
+      }
+      if (jevBlockStreak >= 3) {
+        triggerEasterEgg('perfect_defense', '防守模式：已读。连续三次直接威胁都被 Jev 挡住了。');
+      }
+    } else {
+      jevBlockStreak = 0;
+      missedDefensePendingWin = remaining.length > 0;
+    }
+    pendingHumanThreat = null;
+  }
+
+  function afterJevDecisionEasterEggs(result) {
+    const finalChoice = result?.finalChoice || result?.answer?.choice;
+    const probabilities = result?.answer?.probabilities;
+    if (finalChoice && probabilities && typeof probabilities === 'object') {
+      const top = Object.entries(probabilities)
+        .filter(([, probability]) => Number.isFinite(Number(probability)))
+        .sort((a, b) => Number(b[1]) - Number(a[1]))[0];
+      if (top && top[0] !== finalChoice) {
+        triggerEasterEgg('changed_mind', `Jev 最后改变了主意：${top[0]} → ${finalChoice}。`);
+      }
+    } else if (result?.jevSuggested && finalChoice && result.jevSuggested !== finalChoice) {
+      triggerEasterEgg('changed_mind', `Jev 最后改变了主意：${result.jevSuggested} → ${finalChoice}。`);
+    }
+
+    let forcedTail = 0;
+    for (let i = jevDecisionLog.length - 1; i >= 0 && jevDecisionLog[i]?.forced; i--) forcedTail++;
+    if (forcedTail >= 3) {
+      triggerEasterEgg('forced_chain', `连续 ${forcedTail} 个 Jev 回合进入强制战术变化。`);
+    }
+  }
+
+  function prepareFinishEasterEggs(winner) {
+    if (moves.length <= 9) {
+      triggerEasterEgg('lightning', '闪电战：这局结束得比完整分析流程还快。', { toast: false });
+    }
+
+    if (winner === playerColor()) {
+      if (sameMoveLine(playerMovesInGame().slice(-5))) {
+        triggerEasterEgg('straight_win', '你甚至没有掩饰自己的意图。', { toast: false });
+      }
+      if (missedDefensePendingWin) {
+        triggerEasterEgg('jev_miss', '上一回合仍存在直接防守点，但 Jev 没有处理掉。', { toast: false });
+      }
+    } else if (winner === aiColor() && jevWasInDanger) {
+      triggerEasterEgg('comeback', 'Jev 曾进入直接失分危险，但最终完成翻盘。', { toast: false });
+    }
+
+    saveOpeningHistory();
+  }
 
   function makeBoard() {
     return Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
@@ -240,6 +483,8 @@
   function beginThinkingClock() {
     thinkingStartedAt = performance.now();
     turnStartedAt = thinkingStartedAt;
+    thinkEgg20 = false;
+    thinkEgg40 = false;
     refreshTurnClock();
   }
 
@@ -270,7 +515,16 @@
       const elapsed = Math.max(0, now - started);
       turnClockLabel.textContent = 'Jev 已思考';
       turnClockValue.textContent = formatElapsed(elapsed);
-      jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
+      if (elapsed >= 20000 && !thinkEgg20) {
+        thinkEgg20 = true;
+        triggerEasterEgg('long_think_20', 'Jev 正在怀疑上一轮计算。');
+        apiPhase.textContent = 'Jev 正在怀疑上一轮计算。';
+      }
+      if (elapsed >= 40000 && !thinkEgg40) {
+        thinkEgg40 = true;
+        triggerEasterEgg('long_think_40', '它最好是真的算到了什么。');
+        apiPhase.textContent = '它最好是真的算到了什么。';
+      }
       return;
     }
 
@@ -469,23 +723,26 @@
     apiIndicator.className = 'indicator';
     jevLiveState.className = 'jev-live';
 
+    const meta = publicModeMeta(settings.strengthMode);
+    apiLabel.textContent = meta.name;
+    levelBadge.textContent = meta.badge;
+    levelSummary.textContent = meta.summary;
+
     if (kind === 'busy') {
       apiIndicator.classList.add('busy');
       jevLiveState.classList.add('busy');
       jevLiveState.textContent = '思考中';
+      apiPhase.textContent = text || '正在分析局面…';
     } else if (kind === 'err') {
       apiIndicator.classList.add('err');
       jevLiveState.classList.add('fallback');
       jevLiveState.textContent = '本地接管';
+      apiPhase.textContent = text || 'Jev 暂不可用，本回合由本地引擎接管。';
     } else {
       apiIndicator.classList.add('ok');
       jevLiveState.textContent = '在线';
+      apiPhase.textContent = text || '准备就绪';
     }
-
-    const meta = publicModeMeta(settings.strengthMode);
-    apiLabel.textContent = text || meta.name;
-    levelBadge.textContent = meta.badge;
-    levelSummary.textContent = meta.summary;
   }
 
   function openSettings(force = false) {
@@ -599,7 +856,9 @@
   function place(r, c, color, source) {
     if (board[r][c] !== EMPTY) return false;
     board[r][c] = color;
-    moves.push({ r, c, color, source, coord: coord(r, c) });
+    const move = { r, c, color, source, coord: coord(r, c) };
+    moves.push(move);
+    trackPlacedMoveEasterEggs(move);
     drawBoard();
     updateHistory();
     updateStatus();
@@ -629,10 +888,12 @@
       finish('你赢了', human);
       return;
     }
+    missedDefensePendingWin = false;
     if (moves.length === SIZE * SIZE) {
       finish('平局', EMPTY);
       return;
     }
+    prepareHumanThreatForAi();
     current = aiColor();
     resetTurnClock();
     updateStatus();
@@ -865,6 +1126,65 @@
     return !blackForbiddenInfo(r, c).forbidden;
   }
 
+  function winningLineCoords(winner) {
+    if (winner === EMPTY || !moves.length) return [];
+    const last = moves[moves.length - 1];
+    if (!last || last.color !== winner) return [];
+
+    for (const [dr, dc] of RENJU_DIRS) {
+      const run = contiguousRunCells(last.r, last.c, winner, dr, dc);
+      const wins = winner === BLACK && activeRuleConfig().overline
+        ? run.length === 5
+        : run.length >= 5;
+      if (wins) return run.map(([r, c]) => coord(r, c));
+    }
+    return [];
+  }
+
+  function buildGameSummary(winner) {
+    const human = playerColor();
+    const ai = aiColor();
+    const lengthLabel = moves.length <= 20 ? '短局' : moves.length <= 45 ? '中盘结束' : '长局';
+    const lines = [];
+
+    if (winner === human) {
+      lines.push(`你执${colorShortZh(human)}获胜，共 ${moves.length} 手，属于${lengthLabel}。`);
+    } else if (winner === ai) {
+      lines.push(`Jev 执${colorShortZh(ai)}获胜，共 ${moves.length} 手，属于${lengthLabel}。`);
+    } else {
+      lines.push(`本局共 ${moves.length} 手，双方战成平局。`);
+    }
+
+    const winLine = winningLineCoords(winner);
+    if (winLine.length) {
+      const last = moves[moves.length - 1];
+      lines.push(`终局：${last.coord} 落下后形成 ${winLine.join(' → ')} 连线。`);
+    }
+
+    const decisions = jevDecisionLog.filter(item => item.moveNo <= moves.length);
+    if (decisions.length) {
+      const timed = decisions
+        .map(item => Number(item.thinkDurationMs))
+        .filter(Number.isFinite);
+      const avgThink = timed.length
+        ? timed.reduce((sum, ms) => sum + ms, 0) / timed.length
+        : null;
+      const forcedCount = decisions.filter(item => item.forced).length;
+      const fallbackCount = decisions.filter(item => item.mode === 'local' || item.fallbackReason).length;
+      let decisionLine = `Jev 共完成 ${decisions.length} 次落子决策`;
+      if (avgThink != null) decisionLine += `，平均思考 ${formatElapsed(avgThink)}`;
+      if (forcedCount) decisionLine += `，其中 ${forcedCount} 次属于强制战术处理`;
+      decisionLine += '。';
+      lines.push(decisionLine);
+      if (fallbackCount) lines.push(`本局有 ${fallbackCount} 次决策使用了本地降级或回退路径。`);
+    }
+
+    const eggLabels = gameEggLabels();
+    if (eggLabels.length) lines.push(`本局彩蛋：${eggLabels.join(' / ')}。`);
+
+    return lines.join('\n');
+  }
+
   function hideResultModal() {
     resultModal.classList.remove('show');
   }
@@ -883,11 +1203,13 @@
         ? `Jev 执${colorShortZh(ai)}完成五连，赢下了这一局。`
         : '棋盘已下满，你与 Jev 战成平局。';
     resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel} · ${ruleSummaryText()}`;
+    resultSummary.textContent = buildGameSummary(winner);
     resultCopyBtn.textContent = '复制棋谱';
     resultModal.classList.add('show');
   }
 
   function finish(text, winner) {
+    prepareFinishEasterEggs(winner);
     gameResult = { text, winner, endedAt: new Date() };
     gameOver = true;
     thinking = false;
@@ -919,6 +1241,19 @@
     thinkingStartedAt = null;
     lastThinkMs = null;
     lastThinkDuration.textContent = '—';
+    gameEggs = new Set();
+    undoCount = 0;
+    copyCount = 0;
+    openingSaved = false;
+    pendingHumanThreat = null;
+    missedDefensePendingWin = false;
+    jevWasInDanger = false;
+    jevBlockStreak = 0;
+    thinkEgg20 = false;
+    thinkEgg40 = false;
+    if (maxBadgeTimer) clearTimeout(maxBadgeTimer);
+    maxBadgeTimer = null;
+    resultSummary.textContent = '等待对局结束。';
     hideResultModal();
     canvas.classList.remove('disabled');
     jevMove.textContent = '—';
@@ -934,6 +1269,7 @@
     updateHistory();
     updateStatus();
     updateApiState();
+    updateEasterProgress();
   }
 
   function startGame() {
@@ -942,6 +1278,14 @@
     ruleHint.textContent = `${ruleSummaryText()}。点击交叉点落子。`;
     runtimeRulesHint.textContent = `本局规则已锁定：你执${colorShortZh(playerColor())}，Jev 执${colorShortZh(aiColor())}；黑棋禁手：${enabled.length ? enabled.join('、') : '关闭'}。Local、Deep Worker、Threat-space 与 Jev 使用同一规则。`;
     toast(`已开始：${ruleSummaryText()} · ${publicModeLabel(settings.strengthMode)}`, 3200);
+    if (settings.strengthMode === 'max' && (gameSeed & 127) === 0) {
+      triggerEasterEgg('max_true_form', 'MAXIMUM。');
+      levelBadge.textContent = 'MAXIMUM';
+      maxBadgeTimer = setTimeout(() => {
+        levelBadge.textContent = publicModeMeta(settings.strengthMode).badge;
+        maxBadgeTimer = null;
+      }, 1200);
+    }
     if (aiColor() === BLACK) setTimeout(jevTurn, 180);
   }
 
@@ -972,6 +1316,15 @@
     if (!gameStarted || !moves.length) return;
 
     const remove = undoPlyCount();
+    undoCount++;
+    if (undoCount === 3) triggerEasterEgg('undo_3', '第三次了，还悔？');
+    if (undoCount === 6) triggerEasterEgg('undo_6', '你这是在读档吧？');
+    if (undoCount === 10) triggerEasterEgg('undo_overload', '十次了，要不重开？');
+    if (undoCount === 20) triggerEasterEgg('undo_multiverse', '别下了，改玩时间旅行吧。');
+    pendingHumanThreat = null;
+    missedDefensePendingWin = false;
+    jevWasInDanger = false;
+    jevBlockStreak = 0;
     if (gameOver) gameOver = false;
     hideResultModal();
     gameResult = null;
@@ -1371,6 +1724,10 @@
       document.execCommand('copy');
       ta.remove();
     }
+    copyCount++;
+    if (copyCount === 3) triggerEasterEgg('copy_3', '棋谱已经背下来了。');
+    if (copyCount === 5) triggerEasterEgg('copy_5', '真的没有偷偷改棋谱。');
+
     const old = copyRecordBtn.textContent;
     const resultOld = resultCopyBtn.textContent;
     copyRecordBtn.textContent = '已复制';
@@ -5294,6 +5651,7 @@
         : 'Jev';
       place(parsed.r, parsed.c, side, moveSource);
       rememberDecision(result, moves.length);
+      afterJevDecisionEasterEggs(result);
 
       if (isWin(parsed.r, parsed.c, side)) {
         finish(result.mode === 'local' ? '本地引擎赢了' : 'Jev 赢了', side);
@@ -5303,6 +5661,7 @@
         finish('平局', EMPTY);
         return;
       }
+      resolveHumanThreatAfterAiMove(coord(parsed.r, parsed.c));
       current = human;
       resetTurnClock();
       updateApiState();
@@ -5324,6 +5683,7 @@
         renderJevResult(fallback);
         place(parsed.r, parsed.c, side, '本地引擎(降级)');
         rememberDecision(fallback, moves.length);
+        afterJevDecisionEasterEggs(fallback);
 
         if (isWin(parsed.r, parsed.c, side)) {
           finish('本地引擎赢了', side);
@@ -5333,6 +5693,7 @@
           finish('平局', EMPTY);
           return;
         }
+        resolveHumanThreatAfterAiMove(coord(parsed.r, parsed.c));
         current = human;
         resetTurnClock();
         updateApiState('err', 'Jev 暂不可用 · 本地引擎接管');
