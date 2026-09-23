@@ -3626,7 +3626,96 @@
     };
   }
 
-  let deepWorkerSequence = 0;
+  const HEAVY_WORKER_POOL_SIZE = 2;
+  const heavyWorkerSlots = Array.from({ length: HEAVY_WORKER_POOL_SIZE }, () => ({
+    worker: null,
+    busy: false
+  }));
+  const heavyWorkerQueue = [];
+  let heavyWorkerTaskSequence = 0;
+
+  function createHeavyWorker(slot) {
+    if (slot.worker) return slot.worker;
+    slot.worker = new Worker('/deep-worker.js', { type: 'module' });
+    return slot.worker;
+  }
+
+  function resetHeavyWorker(slot) {
+    try { slot.worker?.terminate(); } catch (_) {}
+    slot.worker = null;
+    slot.busy = false;
+  }
+
+  function pumpHeavyWorkerQueue() {
+    if (typeof Worker === 'undefined') return;
+    for (const slot of heavyWorkerSlots) {
+      if (slot.busy || !heavyWorkerQueue.length) continue;
+      const job = heavyWorkerQueue.shift();
+      slot.busy = true;
+
+      let worker;
+      try {
+        worker = createHeavyWorker(slot);
+      } catch (error) {
+        resetHeavyWorker(slot);
+        job.resolve(job.onError(error));
+        queueMicrotask(pumpHeavyWorkerQueue);
+        continue;
+      }
+
+      let settled = false;
+      const finish = (result, reset = false) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.onmessage = null;
+        worker.onerror = null;
+        if (reset) resetHeavyWorker(slot);
+        else slot.busy = false;
+        job.resolve(result);
+        queueMicrotask(pumpHeavyWorkerQueue);
+      };
+
+      const timer = setTimeout(() => {
+        finish(job.onTimeout(), true);
+      }, job.timeoutMs);
+
+      worker.onmessage = event => {
+        const message = event.data || {};
+        if (message.id !== job.message.id) return;
+        if (!message.ok) {
+          finish(job.onWorkerError(message.error || 'heavy worker failed'), true);
+          return;
+        }
+        finish(job.onSuccess(message.result || {}));
+      };
+
+      worker.onerror = event => {
+        finish(job.onError(event?.message || 'heavy worker crashed'), true);
+      };
+
+      try {
+        worker.postMessage(job.message);
+      } catch (error) {
+        finish(job.onError(error), true);
+      }
+    }
+  }
+
+  function submitHeavyWorkerTask(message, handlers) {
+    return new Promise(resolve => {
+      heavyWorkerQueue.push({
+        message,
+        timeoutMs: handlers.timeoutMs,
+        resolve,
+        onSuccess: handlers.onSuccess,
+        onTimeout: handlers.onTimeout,
+        onError: handlers.onError,
+        onWorkerError: handlers.onWorkerError || handlers.onError
+      });
+      pumpHeavyWorkerQueue();
+    });
+  }
 
   async function runDeepWorkerVerification(candidateMoves, mode, trigger) {
     const uniqueMoves = [...new Map(
@@ -3634,8 +3723,6 @@
     ).values()];
     if (uniqueMoves.length < 2) return null;
 
-    // Benchmark/Node harnesses do not expose Worker. Evaluate the same candidate
-    // set synchronously so Jev receives comparable deep-search evidence.
     if (typeof Worker === 'undefined') {
       const cfg = challengerVerificationConfig(mode);
       const cache = new Map();
@@ -3654,7 +3741,7 @@
       };
     }
 
-    const id = ++deepWorkerSequence;
+    const id = ++heavyWorkerTaskSequence;
     const timeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1300 : 1800)
       : mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400)
@@ -3662,90 +3749,40 @@
     const maxDepth = mode === 'max' ? 8 : 7;
     const branch = mode === 'max' ? 8 : 7;
 
-    return await new Promise(resolve => {
-      let settled = false;
-      let worker;
-      try {
-        worker = new Worker('/deep-worker.js', { type: 'module' });
-      } catch (error) {
-        resolve({
-          status: 'unavailable',
-          source: 'web-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          error: String(error?.message || error || 'Web Worker unavailable'),
-          timedOut: false
-        });
-        return;
-      }
-      const finish = result => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve(result);
-      };
-
-      const timer = setTimeout(() => {
-        finish({
-          status: 'timeout',
-          source: 'web-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          depthReached: null,
-          scores: [],
-          timedOut: true,
-          elapsedMs: timeBudgetMs,
-          budgetMs: timeBudgetMs
-        });
-      }, timeBudgetMs + 350 * TIMEOUT_SCALE);
-
-      worker.onmessage = event => {
-        const message = event.data || {};
-        if (message.id !== id) return;
-        if (!message.ok) {
-          finish({
-            status: 'error',
-            source: 'web-worker',
-            trigger,
-            winner: uniqueMoves[0].key,
-            error: message.error || 'deep worker failed',
-            timedOut: false
-          });
-          return;
-        }
-        finish({
-          ...(message.result || {}),
-          trigger
-        });
-      };
-
-      worker.onerror = event => {
-        finish({
-          status: 'error',
-          source: 'web-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          error: event?.message || 'deep worker crashed',
-          timedOut: false
-        });
-      };
-
-      worker.postMessage({
-        id,
-        task: 'search',
-        board: board.map(row => row.slice()),
-        side: aiColor(),
-        rules: workerRuleConfig(),
-        candidates: uniqueMoves.map(move => move.key),
-        timeBudgetMs,
-        maxDepth,
-        branch
-      });
+    return submitHeavyWorkerTask({
+      id,
+      task: 'search',
+      board: board.map(row => row.slice()),
+      side: aiColor(),
+      rules: workerRuleConfig(),
+      candidates: uniqueMoves.map(move => move.key),
+      timeBudgetMs,
+      maxDepth,
+      branch
+    }, {
+      timeoutMs: timeBudgetMs + 350 * TIMEOUT_SCALE,
+      onSuccess: result => ({ ...result, trigger }),
+      onTimeout: () => ({
+        status: 'timeout',
+        source: 'web-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        depthReached: null,
+        scores: [],
+        timedOut: true,
+        elapsedMs: timeBudgetMs,
+        budgetMs: timeBudgetMs
+      }),
+      onError: error => ({
+        status: 'error',
+        source: 'web-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        error: String(error?.message || error || 'Web Worker unavailable'),
+        timedOut: false
+      })
     });
   }
-
-  let threatWorkerSequence = 0;
 
   async function runThreatWorkerAnalysis(candidateMoves, mode, trigger = 'parallel_threat_evidence', overrides = {}) {
     const uniqueMoves = [...new Map(
@@ -3753,8 +3790,6 @@
     ).values()].slice(0, 6);
     if (!uniqueMoves.length) return null;
 
-    // Do not run a heavy synchronous fallback on the UI thread. The new mode
-    // stays bounded even on browsers that cannot create a Worker.
     if (typeof Worker === 'undefined') {
       return {
         status: 'unavailable',
@@ -3766,7 +3801,7 @@
       };
     }
 
-    const id = ++threatWorkerSequence;
+    const id = ++heavyWorkerTaskSequence;
     const defaultTimeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1100 : 1450)
       : (moves.length < 10 ? 800 : 1200));
@@ -3780,90 +3815,39 @@
       ? Math.max(4, Math.min(10, overrides.branch))
       : (mode === 'max' ? 9 : 8);
 
-    return await new Promise(resolve => {
-      let settled = false;
-      let worker;
-      try {
-        worker = new Worker('/deep-worker.js', { type: 'module' });
-      } catch (error) {
-        resolve({
-          status: 'unavailable',
-          source: 'threat-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          analyses: [],
-          error: String(error?.message || error || 'Threat Worker unavailable'),
-          timedOut: false
-        });
-        return;
-      }
-
-      const finish = result => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve(result);
-      };
-
-      const timer = setTimeout(() => {
-        finish({
-          status: 'timeout',
-          source: 'threat-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          analyses: [],
-          timedOut: true,
-          elapsedMs: timeBudgetMs,
-          budgetMs: timeBudgetMs,
-          maxThreatTurns
-        });
-      }, timeBudgetMs + 350 * TIMEOUT_SCALE);
-
-      worker.onmessage = event => {
-        const message = event.data || {};
-        if (message.id !== id) return;
-        if (!message.ok) {
-          finish({
-            status: 'error',
-            source: 'threat-worker',
-            trigger,
-            winner: uniqueMoves[0].key,
-            analyses: [],
-            error: message.error || 'threat worker failed',
-            timedOut: false
-          });
-          return;
-        }
-        finish({
-          ...(message.result || {}),
-          trigger
-        });
-      };
-
-      worker.onerror = event => {
-        finish({
-          status: 'error',
-          source: 'threat-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          analyses: [],
-          error: event?.message || 'threat worker crashed',
-          timedOut: false
-        });
-      };
-
-      worker.postMessage({
-        id,
-        task: 'threat',
-        board: board.map(row => row.slice()),
-        side: aiColor(),
-        rules: workerRuleConfig(),
-        candidates: uniqueMoves.map(move => move.key),
-        timeBudgetMs,
-        maxThreatTurns,
-        branch
-      });
+    return submitHeavyWorkerTask({
+      id,
+      task: 'threat',
+      board: board.map(row => row.slice()),
+      side: aiColor(),
+      rules: workerRuleConfig(),
+      candidates: uniqueMoves.map(move => move.key),
+      timeBudgetMs,
+      maxThreatTurns,
+      branch
+    }, {
+      timeoutMs: timeBudgetMs + 350 * TIMEOUT_SCALE,
+      onSuccess: result => ({ ...result, trigger }),
+      onTimeout: () => ({
+        status: 'timeout',
+        source: 'threat-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        analyses: [],
+        timedOut: true,
+        elapsedMs: timeBudgetMs,
+        budgetMs: timeBudgetMs,
+        maxThreatTurns
+      }),
+      onError: error => ({
+        status: 'error',
+        source: 'threat-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        analyses: [],
+        error: String(error?.message || error || 'Threat Worker unavailable'),
+        timedOut: false
+      })
     });
   }
 
