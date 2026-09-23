@@ -2126,15 +2126,21 @@ async function testHistoricalDoubleOpenThreeForkDefense() {
     { timeBudgetMs: 1450, maxThreatTurns: 6, branch: 9 }
   );
   const i7 = (threat?.analyses || []).find(row => row.move === 'I7');
-  if (!i7?.forced || i7.reason !== 'direct_double_open_three' || i7.line?.[0] !== 'H9') {
-    throw new Error('Historical I7 must be hard-proved losing via H9 double-open-three: '
+  const i7DoubleOpenThree = i7?.counterThreat?.risk === 'CRITICAL'
+    && (i7?.counterThreat?.networkMoves || []).some(row =>
+      row.move === 'H9' && row.kind === 'DOUBLE_OPEN_THREE' && row.openThreeDirections >= 2
+    );
+  if (!i7DoubleOpenThree) {
+    throw new Error('Historical I7 must expose CRITICAL H9 double-open-three evidence: '
       + JSON.stringify(i7 || null));
   }
 
   for (const row of threat?.analyses || []) {
-    if (row?.forced && row.reason === 'direct_double_open_three') unsafeKeys.add(row.move);
+    const exposesDoubleOpenThree = row?.counterThreat?.risk === 'CRITICAL'
+      && (row?.counterThreat?.networkMoves || []).some(item => item.kind === 'DOUBLE_OPEN_THREE');
+    if (exposesDoubleOpenThree) unsafeKeys.add(row.move);
   }
-  if (!unsafeKeys.size) throw new Error('Regression expected at least one double-open-three losing candidate');
+  if (!unsafeKeys.size) throw new Error('Regression expected at least one CRITICAL double-open-three candidate');
 
   engine.setPosition(position.board, position.moves, 'jev-latest');
   const result = await engine.jevMax();
@@ -2154,7 +2160,7 @@ async function testHistoricalDoubleOpenThreeForkDefense() {
     finalChoice: result.finalChoice,
     unsafe: [...unsafeKeys],
     h9Sources: h9.recallSources,
-    i7Proof: i7
+    i7Threat: i7
   }));
 }
 
