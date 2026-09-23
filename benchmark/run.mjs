@@ -368,6 +368,7 @@ function blackReferenceDecision(engine, referee, mode) {
 function engineClientTrace(result) {
   const shape = result?.decisionTrace?.requestShape || {};
   const deep = result?.decisionTrace?.preJevDeepSearch || null;
+  const threat = result?.decisionTrace?.preJevThreatSearch || null;
   const client = result?.client || null;
   const usage = result?.usage || null;
   return {
@@ -398,6 +399,15 @@ function engineClientTrace(result) {
         timedOut: Boolean(deep.timedOut),
         elapsedMs: deep.elapsedMs ?? null,
         budgetMs: deep.budgetMs ?? null
+      }
+      : null,
+    threatSearch: threat
+      ? {
+        status: threat.status || null,
+        source: threat.source || null,
+        timedOut: Boolean(threat.timedOut),
+        elapsedMs: threat.elapsedMs ?? null,
+        budgetMs: threat.budgetMs ?? null
       }
       : null,
     jev: {
@@ -665,8 +675,23 @@ function emptyVolume() {
     leftImmediateReplies: 0,
     openedImmediateReplies: 0,
     blockedForcedWins: 0,
+    wildcardRequested: 0,
+    wildcardAccepted: 0,
+    wildcardChosen: 0,
+    atomicPairwiseCompared: 0,
+    atomicPairwiseAgreements: 0,
+    finalLocal1Matches: 0,
+    finalDeep1Matches: 0,
+    vcfChosen: 0,
+    threatFilterHits: 0,
+    workerTimeouts: 0,
+    payloadOverTarget: 0,
+    payloadOverHard: 0,
     latencies: [],
-    deepSearch: { completed: 0, timeout: 0, error: 0, unavailable: 0, skipped: 0 },
+    localElapsed: [],
+    deepElapsed: [],
+    threatElapsed: [],
+    deepSearch: { completed: 0, timeout: 0, error: 0, unavailable: 0, skipped: 0, noCompletedDepth: 0 },
     violations: []
   };
 }
@@ -682,6 +707,8 @@ function accumulate(volume, record, options) {
   const shape = record.trace?.requestShape || {};
   const jev = record.trace?.jev || {};
   const deep = record.trace?.deepSearch || null;
+  const threat = record.trace?.threatSearch || null;
+  const maxTrace = record.trace?.max || {};
   const candidateCount = shape.candidateCount ?? record.candidateCount ?? 0;
   const httpRequests = shape.httpRequests ?? 0;
 
@@ -703,6 +730,40 @@ function accumulate(volume, record, options) {
     else if (status === 'error') volume.deepSearch.error++;
     else if (status === 'unavailable') volume.deepSearch.unavailable++;
     else if (status === 'skipped_opening') volume.deepSearch.skipped++;
+    else if (status === 'no_completed_depth') volume.deepSearch.noCompletedDepth++;
+    if (deep.timedOut) volume.workerTimeouts++;
+  }
+  if (threat?.timedOut) volume.workerTimeouts++;
+
+  if (Number.isFinite(shape.localSearchElapsedMs)) volume.localElapsed.push(shape.localSearchElapsedMs);
+  if (Number.isFinite(shape.deepElapsedMs)) volume.deepElapsed.push(shape.deepElapsedMs);
+  if (Number.isFinite(shape.threatElapsedMs)) volume.threatElapsed.push(shape.threatElapsedMs);
+
+  if (record.engine === 'jev-max') {
+    if (!record.isOverride) volume.finalLocal1Matches++;
+    const deepTop = (maxTrace.localEvidence || []).find(item => item.deepSearchRank === 1)?.move;
+    if (deepTop && deepTop === record.choice) volume.finalDeep1Matches++;
+
+    const atomicRows = (maxTrace.localEvidence || []).filter(item => Number.isFinite(item.atomicScore));
+    const pairRows = (maxTrace.localEvidence || []).filter(item => Number.isFinite(item.pairScore));
+    if (atomicRows.length && pairRows.length) {
+      volume.atomicPairwiseCompared++;
+      const atomicTop = [...atomicRows].sort((a,b) => b.atomicScore - a.atomicScore)[0]?.move;
+      const pairTop = [...pairRows].sort((a,b) => b.pairScore - a.pairScore)[0]?.move;
+      if (atomicTop && atomicTop === pairTop) volume.atomicPairwiseAgreements++;
+    }
+
+    const wildcard = maxTrace.wildcard;
+    if (wildcard?.requested) volume.wildcardRequested++;
+    if (wildcard?.accepted) volume.wildcardAccepted++;
+    if (wildcard?.chosen) volume.wildcardChosen++;
+    if (record.facts?.vcf_status === 'FORCED_SEQUENCE_FOUND') volume.vcfChosen++;
+    volume.threatFilterHits += Number(shape.threatFilterCount || 0);
+
+    for (const estimate of shape.payloadEstimatedInputTokens || []) {
+      if (estimate > 5000) volume.payloadOverTarget++;
+      if (estimate > 7000) volume.payloadOverHard++;
+    }
   }
 
   if (record.tactical?.missedImmediateWin) volume.missedImmediateWins++;
@@ -722,11 +783,12 @@ function accumulate(volume, record, options) {
   const arm = ARMS[record.engine];
 
   if (arm?.expectsJev) {
-    if (candidateCount > 1 && httpRequests > 1) {
+    const maxRequests = record.engine === 'jev-max' ? 3 : 1;
+    if (candidateCount > 1 && httpRequests > maxRequests) {
       volume.violations.push({
         kind: 'jev_calls_per_turn',
         ply: record.ply,
-        detail: 'candidateCount=' + candidateCount + ' but httpRequests=' + httpRequests
+        detail: 'candidateCount=' + candidateCount + ' but httpRequests=' + httpRequests + ' (max=' + maxRequests + ')'
       });
     }
     if (candidateCount === 1 && jev.participated) {
@@ -749,6 +811,37 @@ function accumulate(volume, record, options) {
         });
       }
     }
+    if (record.engine === 'jev-max' && candidateCount > 1) {
+      if (!['jev_max_final', 'jev_max_pairwise_convergence'].includes(shape.decisionAuthority)) {
+        volume.violations.push({
+          kind: 'jev_max_decision_authority',
+          ply: record.ply,
+          detail: 'unexpected decisionAuthority=' + shape.decisionAuthority
+        });
+      }
+      if ((shape.atomicCount || 0) > 8 || (shape.pairwiseCount || 0) > 12 || (shape.criticCount || 0) > 4) {
+        volume.violations.push({
+          kind: 'jev_max_unbounded_analysis',
+          ply: record.ply,
+          detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
+        });
+      }
+      if ((shape.maxWorkers || 0) > 2) {
+        volume.violations.push({
+          kind: 'jev_max_worker_limit',
+          ply: record.ply,
+          detail: 'maxWorkers=' + shape.maxWorkers
+        });
+      }
+      if ((shape.payloadEstimatedInputTokens || []).some(value => value > 7000)) {
+        volume.violations.push({
+          kind: 'jev_max_payload_hard_limit',
+          ply: record.ply,
+          detail: 'payload estimates=' + JSON.stringify(shape.payloadEstimatedInputTokens)
+        });
+      }
+    }
+
     if (record.engine === 'jev-final' && shape.localEvidenceVisibleToJev === false) {
       volume.violations.push({
         kind: 'local_evidence_hidden',
