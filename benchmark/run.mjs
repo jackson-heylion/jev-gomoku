@@ -389,6 +389,9 @@ function engineClientTrace(result) {
       fanoutSpeculativePool: shape.fanoutSpeculativePool ?? [],
       fanoutPairwiseCount: shape.fanoutPairwiseCount ?? null,
       fanoutCriticCount: shape.fanoutCriticCount ?? null,
+      globalBallotAgreement: shape.globalBallotAgreement ?? null,
+      globalBallotMargin: shape.globalBallotMargin ?? null,
+      compactConverged: shape.compactConverged ?? null,
       pairwiseSource: shape.pairwiseSource ?? null,
       localTranspositionEntries: shape.localTranspositionEntries ?? null,
       localTranspositionGeneration: shape.localTranspositionGeneration ?? null,
@@ -437,6 +440,9 @@ function engineClientTrace(result) {
       atomic: Array.isArray(result?.decisionTrace?.atomic) ? result.decisionTrace.atomic : [],
       pairwise: Array.isArray(result?.decisionTrace?.pairwise) ? result.decisionTrace.pairwise : [],
       critic: Array.isArray(result?.decisionTrace?.critic) ? result.decisionTrace.critic : [],
+      globalBest: result?.decisionTrace?.globalBest || null,
+      globalBestReverse: result?.decisionTrace?.globalBestReverse || null,
+      globalConsensus: result?.decisionTrace?.globalConsensus || null,
       wildcard: result?.decisionTrace?.wildcard || null,
       localEvidence: Array.isArray(result?.decisionTrace?.localEvidence) ? result.decisionTrace.localEvidence : []
     }
@@ -675,6 +681,9 @@ function emptyVolume() {
     jevTurns: 0,
     zeroCallTurns: 0,
     forcedSingleCandidateTurns: 0,
+    maxOneRequestTurns: 0,
+    maxTwoRequestTurns: 0,
+    maxCompactConsensusAgreements: 0,
     overrides: 0,
     agreements: 0,
     fallbacks: 0,
@@ -796,6 +805,9 @@ function accumulate(volume, record, options) {
   if (shape.decisionAuthority === 'bounded_rescue_exhausted') volume.rescueSweepExhausted++;
 
   if (record.engine === 'jev-max') {
+    if (Number(shape.logicalRequests) === 1) volume.maxOneRequestTurns++;
+    if (Number(shape.logicalRequests) === 2) volume.maxTwoRequestTurns++;
+    if (shape.globalBallotAgreement === true) volume.maxCompactConsensusAgreements++;
     if (!record.isOverride) volume.finalLocal1Matches++;
     const deepTop = (maxTrace.localEvidence || []).find(item => item.deepSearchRank === 1)?.move;
     if (deepTop && deepTop === record.choice) volume.finalDeep1Matches++;
@@ -887,7 +899,7 @@ function accumulate(volume, record, options) {
       }
     }
     if (record.engine === 'jev-max' && candidateCount > 1) {
-      if (!['jev_max_final', 'jev_max_fanout_convergence', 'jev_max_resolution_fanout', 'jev_max_rescue', 'bounded_rescue_exhausted', 'post_fanout_threat_single'].includes(shape.decisionAuthority)) {
+      if (!['jev_max_compact_convergence', 'jev_max_resolution_fanout', 'jev_max_rescue', 'bounded_rescue_exhausted', 'post_fanout_threat_single'].includes(shape.decisionAuthority)) {
         volume.violations.push({
           kind: 'jev_max_decision_authority',
           ply: record.ply,
@@ -901,9 +913,9 @@ function accumulate(volume, record, options) {
           detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
         });
       }
-      if ((shape.fanoutPairwiseCount || 0) > 30 || (shape.fanoutCriticCount || 0) > 6) {
+      if ((shape.fanoutPairwiseCount || 0) !== 0 || (shape.fanoutCriticCount || 0) > 8) {
         volume.violations.push({
-          kind: 'jev_max_speculative_fanout_budget',
+          kind: 'jev_max_compact_fanout_budget',
           ply: record.ply,
           detail: 'fanoutPairwise=' + shape.fanoutPairwiseCount + ' fanoutCritic=' + shape.fanoutCriticCount
         });
@@ -1098,6 +1110,10 @@ function summarize(games, arms, options) {
       jevTurns: volume.jevTurns,
       zeroCallTurns: volume.zeroCallTurns,
       forcedSingleCandidateTurns: volume.forcedSingleCandidateTurns,
+      maxOneRequestTurns: volume.maxOneRequestTurns,
+      maxTwoRequestTurns: volume.maxTwoRequestTurns,
+      maxCompactConsensusAgreements: volume.maxCompactConsensusAgreements,
+      maxOneRequestRate: volume.decisions ? volume.maxOneRequestTurns / volume.decisions : 0,
       jevCallsPerWhiteTurn: volume.decisions ? volume.jevCalls / volume.decisions : 0,
       overrides: volume.overrides,
       agreements: volume.agreements,
@@ -1478,6 +1494,10 @@ function renderMarkdown(report) {
       + '；独立重试候选=' + max.rescueSweepRetriedCandidates
       + '；bounded exhausted=' + max.rescueSweepExhausted
       + '；平均耗时=' + num(max.avgRescueSweepElapsedMs) + ' ms');
+    lines.push('- Compact Fan-Out：1 请求=' + max.maxOneRequestTurns
+      + '，2 请求=' + max.maxTwoRequestTurns
+      + '，1 请求命中率=' + num(max.maxOneRequestRate * 100, 1) + '%'
+      + '，正反 Global Choice 一致=' + max.maxCompactConsensusAgreements + '/' + max.decisions + '。');
   }
 
   lines.push('');
@@ -1521,7 +1541,7 @@ function renderMarkdown(report) {
   lines.push('');
   const violations = arms.flatMap(arm => report.summary.arms[arm].violations.map(violation => ({ arm, ...violation })));
   if (!violations.length) {
-    lines.push('- 未发现违规：Jev Final 每回合 ≤1 次请求；Jev Max 使用 speculative fan-out 且 ≤2 次请求；唯一候选 0 次 Jev；Worker 并发 ≤2。');
+    lines.push('- 未发现违规：Jev Final 每回合 ≤1 次请求；Jev Max 使用 Compact Fan-Out 且 ≤2 次请求；首请求 Pairwise=0；唯一候选 0 次 Jev；Worker 并发 ≤2。');
   } else {
     for (const violation of violations.slice(0, 20)) {
       lines.push('- ' + ARM_LABELS[violation.arm] + ' #' + violation.ply + ' `' + violation.kind + '` — ' + violation.detail);
