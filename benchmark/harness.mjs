@@ -194,6 +194,10 @@ function injectBenchmarkHook(source) {
     // --- decision entry points (the real product paths) ---------------------
     "    local(mode) { return localOnlyDecision(mode || 'expert'); },",
     "    jevFinal(mode) { return advancedDecision(mode || 'expert'); },",
+    "    jevMax() { return jevMaxDecision(); },",
+    "    normalizeDeepRow(row, analysis) { return deepRowForJev(row, analysis); },",
+    "    maxAtomicPayload(mode) { const context = buildAdvancedCandidates(mode || 'max'); return buildMaxAtomicPayload(context, context.candidates); },",
+    "    maxPairwisePayload(mode) { const context = buildAdvancedCandidates(mode || 'max'); const candidates = context.candidates.slice(0, 4); return buildPairwisePayload(candidates); },",
     '    async jevBlind() {',
     '      const decision = buildPureJevRequest();',
     '      const data = await callJev(decision.payload);',
