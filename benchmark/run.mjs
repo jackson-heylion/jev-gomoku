@@ -385,6 +385,13 @@ function engineClientTrace(result) {
       criticCount: shape.criticCount ?? null,
       finalistCount: shape.finalistCount ?? null,
       maxWorkers: shape.maxWorkers ?? null,
+      workerPoolPersistent: shape.workerPoolPersistent ?? null,
+      fanoutSpeculativePool: shape.fanoutSpeculativePool ?? [],
+      fanoutPairwiseCount: shape.fanoutPairwiseCount ?? null,
+      fanoutCriticCount: shape.fanoutCriticCount ?? null,
+      pairwiseSource: shape.pairwiseSource ?? null,
+      localTranspositionEntries: shape.localTranspositionEntries ?? null,
+      localTranspositionGeneration: shape.localTranspositionGeneration ?? null,
       threatFilterCount: shape.threatFilterCount ?? 0,
       threatSupplementalElapsedMs: shape.threatSupplementalElapsedMs ?? null,
       threatSupplementalCandidates: shape.threatSupplementalCandidates ?? [],
@@ -892,6 +899,20 @@ function accumulate(volume, record, options) {
           kind: 'jev_max_unbounded_analysis',
           ply: record.ply,
           detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
+        });
+      }
+      if ((shape.fanoutPairwiseCount || 0) > 30 || (shape.fanoutCriticCount || 0) > 6) {
+        volume.violations.push({
+          kind: 'jev_max_speculative_fanout_budget',
+          ply: record.ply,
+          detail: 'fanoutPairwise=' + shape.fanoutPairwiseCount + ' fanoutCritic=' + shape.fanoutCriticCount
+        });
+      }
+      if (shape.workerPoolPersistent === false) {
+        volume.violations.push({
+          kind: 'jev_max_worker_pool_not_persistent',
+          ply: record.ply,
+          detail: 'persistent two-slot worker pool expected'
         });
       }
       if (Number(shape.rescueSweepPasses || 0) > 3) {
