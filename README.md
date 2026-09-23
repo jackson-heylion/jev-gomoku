@@ -311,11 +311,14 @@ Jev 的 `OTHER` 只能扩大候选召回，不能绕过确定性安全规则。�
 
 Jev Max 仍保留 6～8 个异构候选，但初始 Threat Worker 只分析最多 6 个。为避免低排名候选因为“缺少风险证据”反而在 Jev 阶段占便宜：
 
-- 本地战术预算耗尽时，候选标记为 `UNVERIFIED_BUDGET`，不再伪装成 `SAFE`。
+- 仅在 Jev Max 中，本地战术预算耗尽的候选标记为 `UNVERIFIED_BUDGET`，不再伪装成 `SAFE`；旧 Grandmaster 行为保持不变。
+- 初始 6 个 Threat 名额不再机械取前 6：保留头部候选后，优先纳入 `UNVERIFIED_BUDGET` 与关键防守候选。
 - Atomic 仍可独立评价全部主候选。
-- 如果 Atomic 把尚未完成 Threat 校验的 #7/#8 候选抬入 Top 4，会触发一次最多 2 候选、850ms 上限的 supplemental Threat Worker。
+- 如果 Atomic 把尚未完成 Threat 校验的候选抬入 Top 4，会触发一次最多 2 候选、850ms 上限的 supplemental Threat Worker。
 - supplemental 校验发生在 Pairwise / Critic 之前；已证明 forced-loss 的候选直接移除。
-- supplemental 超时或缺失结果时 fail-closed：该未验证候选不能进入 Pairwise / Final。
+- supplemental 超时或缺失结果时 fail-closed；Pairwise 前有硬不变量：所有参与比较的主候选都必须拥有完成的 Threat evidence。
 - 该补检与初始 Deep/Threat Worker 不并发叠加，因此重型 Worker 并发数仍不超过 2。
 
-这样 Final Judge 不再比较“风险证据完整的候选”和“因为没分析而看起来干净的候选”。
+Threat Worker 还会在每个候选根节点执行一次**直接双胜点 proof**：若对手某一合法落子能立即制造两个合法成五点，就直接作为确定性 forced-loss 证据，不依赖 Pattern 分类或通用 branch 排序。该全量扫描只在根节点执行，递归深层仍保持原有有界 forcing search。
+
+这样 Final Judge 不再比较“风险证据完整的候选”和“因为没分析而看起来干净的候选”，同时不会把能制造强制反击、迫使对手先防守的 counter-threat 手误杀。
