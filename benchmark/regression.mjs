@@ -1357,16 +1357,25 @@ async function testOldGameForcedDefenseResidualNetwork() {
   const row = threat?.analyses?.find(item => item.move === 'I12');
   if (!row) throw new Error('Old-game I12 threat analysis is missing');
   const counter = row.counterThreat || {};
-  if (counter.forcedDefenseMove !== 'I13') {
-    throw new Error('I12 must identify Black I13 as the forced defensive reply, got ' + counter.forcedDefenseMove);
-  }
+  if (row.forced) {
+    if (row.line?.[0] !== 'I13') {
+      throw new Error('Stronger I12 hard proof must still begin with forced Black I13, got ' + (row.line || []).join('>'));
+    }
+    if (!['residual_fork_rescue_exhausted', 'forced_defense_counter_chain'].includes(row.reason)) {
+      throw new Error('Unexpected strengthened I12 proof reason: ' + row.reason);
+    }
+  } else {
+    if (counter.forcedDefenseMove !== 'I13') {
+      throw new Error('I12 must identify Black I13 as the forced defensive reply, got ' + counter.forcedDefenseMove);
+    }
 
-  const network = new Set((counter.networkMoves || []).map(item => item.move));
-  if (!network.has('J7') || !network.has('K8')) {
-    throw new Error('Residual counter-threat network must preserve both J7 and K8, got ' + [...network].join(','));
-  }
-  if (!['HIGH', 'CRITICAL'].includes(counter.risk)) {
-    throw new Error('I12 residual network should be HIGH/CRITICAL risk, got ' + counter.risk);
+    const network = new Set((counter.networkMoves || []).map(item => item.move));
+    if (!network.has('J7') || !network.has('K8')) {
+      throw new Error('Residual counter-threat network must preserve both J7 and K8, got ' + [...network].join(','));
+    }
+    if (!['HIGH', 'CRITICAL'].includes(counter.risk)) {
+      throw new Error('I12 residual network should be HIGH/CRITICAL risk, got ' + counter.risk);
+    }
   }
 }
 
