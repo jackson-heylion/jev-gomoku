@@ -33,6 +33,11 @@ let ruleConfig = { overline: true, fourFour: true, threeThree: true };
 let hashA = 0;
 let hashB = 0;
 const TT_MAX_ENTRIES = 60000;
+const TT_KEEP_GENERATIONS = 4;
+const persistentSearchCache = new Map();
+let ttGeneration = 0;
+let ttBranch = 0;
+let ttRadius = 2;
 
 function mix32(value) {
   let x = value >>> 0;
@@ -74,8 +79,31 @@ function undoMove(move, color) {
   board[move.r][move.c] = EMPTY;
 }
 
+function prunePersistentSearchCache() {
+  if (persistentSearchCache.size <= TT_MAX_ENTRIES) return;
+  const minGeneration = Math.max(0, ttGeneration - TT_KEEP_GENERATIONS);
+  for (const [key, entry] of persistentSearchCache) {
+    if ((entry?.generation ?? 0) < minGeneration) persistentSearchCache.delete(key);
+    if (persistentSearchCache.size <= TT_MAX_ENTRIES) return;
+  }
+  const ranked = [...persistentSearchCache.entries()].sort((a, b) =>
+    (a[1]?.depth || 0) - (b[1]?.depth || 0)
+    || (a[1]?.generation || 0) - (b[1]?.generation || 0)
+  );
+  const removeCount = persistentSearchCache.size - TT_MAX_ENTRIES;
+  for (let i = 0; i < removeCount; i++) persistentSearchCache.delete(ranked[i][0]);
+}
+
 function cachePut(cache, key, entry) {
-  if (cache.has(key) || cache.size < TT_MAX_ENTRIES) cache.set(key, entry);
+  const previous = cache.get(key);
+  if (!previous || entry.depth >= previous.depth || entry.flag === 'EXACT') {
+    cache.set(key, { ...entry, generation: ttGeneration });
+  } else {
+    previous.generation = ttGeneration;
+  }
+  if (cache === persistentSearchCache && cache.size > TT_MAX_ENTRIES + 1024) {
+    prunePersistentSearchCache();
+  }
 }
 
 function otherColor(color) {
@@ -540,7 +568,8 @@ function orderedMoves(color, limit, radius = 2) {
 }
 
 function boardKey(toMove) {
-  return toMove + ':' + hashA + ':' + hashB;
+  const rules = `${ruleConfig.overline ? 1 : 0}${ruleConfig.fourFour ? 1 : 0}${ruleConfig.threeThree ? 1 : 0}`;
+  return rootSide + ':' + toMove + ':' + rules + ':' + ttBranch + ':' + ttRadius + ':' + hashA + ':' + hashB;
 }
 
 function prioritizeCachedMove(candidates, key) {
@@ -843,10 +872,14 @@ function runSearch(message) {
   const maxDepth = Math.max(3, Math.min(8, Number(message.maxDepth) || 7));
   const branch = Math.max(4, Math.min(9, Number(message.branch) || 7));
   const radius = 2;
+  ttBranch = branch;
+  ttRadius = radius;
+  ttGeneration++;
+  prunePersistentSearchCache();
 
   let completed = null;
   let timedOut = false;
-  const cache = new Map();
+  const cache = persistentSearchCache;
 
   for (let depth = 3; depth <= maxDepth; depth++) {
     const scores = [];

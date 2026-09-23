@@ -955,12 +955,22 @@ async function testJevMaxPayloadBounds() {
       throw new Error('Pairwise questions must reference shared candidate facts instead of duplicating them');
     }
   }
+
+  const speculative = engine.maxSpeculativePayload('max');
+  const speculativeDuelIds = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('duel_'));
+  const speculativeCritics = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('critic_'));
+  if (speculativeDuelIds.length > 30) throw new Error('Top-6 speculative pairwise fan-out exceeded 30 questions');
+  if (speculativeCritics.length > 6) throw new Error('Speculative critic fan-out exceeded six candidates');
+  if (!speculative?.questions?.global_best) throw new Error('Speculative Fan-Out is missing global_best');
+  if (!speculative?.state?.pairwise_policy || !speculative?.state?.critic_policy) {
+    throw new Error('Speculative Fan-Out must hoist shared pairwise/critic policy instead of repeating it');
+  }
 }
 
 /**
- * End-to-end Jev Max regression: Atomic can request OTHER, the bounded wildcard
- * proposal is validated locally, Pairwise/Critic stay batched, and the third
- * request receives real prior-stage results before making the final choice.
+ * End-to-end Jev Max regression: the first speculative fan-out contains Atomic,
+ * Pairwise/Critic, recall and wildcard proposal work. A validated wildcard forces
+ * at most one second Final request with structured prior-stage evidence.
  */
 async function testJevMaxPipelineAndWildcard() {
   let requestCount = 0;
@@ -1026,8 +1036,10 @@ async function testJevMaxPipelineAndWildcard() {
   }));
 
   if (result.mode !== 'max') throw new Error('Jev Max result mode not preserved');
-  if (requestCount !== 3) throw new Error('Expected Atomic + Pairwise/Critic + Final = 3 Jev requests, got ' + requestCount);
+  if (requestCount !== 2) throw new Error('Expected speculative Fan-Out + Final = 2 Jev requests, got ' + requestCount);
   if (result.decisionTrace?.requestShape?.maxWorkers !== 2) throw new Error('Jev Max must declare at most two heavy workers');
+  if (result.decisionTrace?.requestShape?.workerPoolPersistent !== true) throw new Error('Jev Max must use the persistent two-slot Worker pool');
+  if ((result.decisionTrace?.requestShape?.logicalRequests || 0) > 2) throw new Error('Jev Max exceeded the two-request ceiling');
   if ((result.decisionTrace?.requestShape?.candidateCount || 0) > 8) throw new Error('Jev Max candidate universe exceeded 8');
   if ((result.decisionTrace?.requestShape?.pairwiseCount || 0) > 12) throw new Error('Jev Max pairwise budget exceeded 12 questions');
   if ((result.decisionTrace?.requestShape?.criticCount || 0) > 4) throw new Error('Jev Max critic budget exceeded Top 4');
@@ -1042,14 +1054,15 @@ async function testJevMaxPipelineAndWildcard() {
     }
   }
 
-  const second = captured[1];
-  const duelIds = Object.keys(second?.questions || {}).filter(id => id.startsWith('duel_'));
-  if (duelIds.length > 12) throw new Error('Pairwise stage exceeded 12 duel questions');
-  if (!Object.keys(second?.questions || {}).some(id => id.startsWith('critic_'))) {
-    throw new Error('Pairwise request must batch adversarial critic questions');
+  const fanoutPayload = captured[0];
+  const duelIds = Object.keys(fanoutPayload?.questions || {}).filter(id => id.startsWith('duel_'));
+  if (duelIds.length > 30) throw new Error('Speculative Top-6 pairwise fan-out exceeded 30 duel questions');
+  if (!Object.keys(fanoutPayload?.questions || {}).some(id => id.startsWith('critic_'))) {
+    throw new Error('Fan-Out request must batch adversarial critic questions');
   }
-  if (!second?.questions?.wildcard_pick) throw new Error('OTHER must trigger a bounded wildcard proposal question');
-  if ((second?.state?.wildcard_pool || []).length > 16) throw new Error('Wildcard pool exceeded 16');
+  if (!fanoutPayload?.questions?.wildcard_pick) throw new Error('Fan-Out must precompute a bounded wildcard proposal');
+  if ((fanoutPayload?.state?.wildcard_pool || []).length > 16) throw new Error('Wildcard pool exceeded 16');
+  if (!fanoutPayload?.questions?.global_best) throw new Error('Fan-Out must include an independent global_best consensus question');
 
   const wildcard = result.decisionTrace?.wildcard;
   if (!wildcard?.requested || !wildcard?.accepted || !wildcard?.enteredFinalists) {
@@ -1062,7 +1075,7 @@ async function testJevMaxPipelineAndWildcard() {
     throw new Error('Regression should demonstrate Jev Max can override Local #1');
   }
 
-  const finalPayload = captured[2];
+  const finalPayload = captured[1];
   const finalEvidence = finalPayload?.state?.candidates?.[result.finalChoice];
   if (!finalEvidence?.critic_summary && !Array.isArray(finalEvidence?.candidate_sources)) {
     throw new Error('Final judge did not receive structured prior-stage evidence');
@@ -1146,8 +1159,8 @@ async function testRecentGameLocalDeepDisagreementRecall() {
   if (result.finalChoice !== 'I6') {
     throw new Error('Jev Max could not exercise final authority for the real-game I6 alternative: ' + result.finalChoice);
   }
-  if (requestCount < 2 || requestCount > 3) {
-    throw new Error('Real-game Jev Max override must stay within the 2–3 request budget, got ' + requestCount);
+  if (requestCount < 1 || requestCount > 2) {
+    throw new Error('Real-game Jev Max override must stay within the 1–2 request budget, got ' + requestCount);
   }
 }
 
@@ -1478,11 +1491,11 @@ async function testStraightFiveWildcardCannotBypassThreatProof() {
   if (result.finalChoice === 'I7') {
     throw new Error('Threat-proved I7 re-entered through wildcard');
   }
-  if (requestCount < 2 || requestCount > 3) {
-    throw new Error('Straight-five defense must stay within the normal 2–3 Jev request budget, got ' + requestCount);
+  if (requestCount < 1 || requestCount > 2) {
+    throw new Error('Straight-five defense must stay within the normal 1–2 Jev request budget, got ' + requestCount);
   }
 
-  const pairwisePayload = captured[1] || null;
+  const pairwisePayload = captured[0] || null;
   if (pairwisePayload?.state?.wildcard_pool?.includes('I7')) {
     throw new Error('Threat-proved I7 must be excluded from wildcard_pool');
   }
@@ -1660,20 +1673,22 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
     throw new Error('Supplemental G14 validation must merge a completed forced-loss proof');
   }
 
-  const pairwisePayload = captured[1];
-  if (pairwisePayload?.state?.candidate_facts?.G14) {
-    throw new Error('Threat-proved G14 reached Pairwise candidate_facts');
-  }
-  for (const question of Object.values(pairwisePayload?.questions || {})) {
-    if (Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'G14')) {
-      throw new Error('Threat-proved G14 reached a Pairwise/Critic choice question');
+  const fanoutPayload = captured[0];
+  for (const [id, question] of Object.entries(fanoutPayload?.questions || {})) {
+    if ((id.startsWith('duel_') || id.startsWith('critic_'))
+      && Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'G14')) {
+      throw new Error('Tail G14 must not enter speculative Pairwise/Critic before Threat validation');
     }
+  }
+  const resolutionOrFinal = captured[1] || null;
+  if (resolutionOrFinal?.state?.candidates?.G14) {
+    throw new Error('Threat-proved G14 reached the second-stage finalist set');
   }
 
   if (!['F5','J5'].includes(result.finalChoice)) {
     throw new Error('Regression mock should retain the direct defensive F5/J5 family, got ' + result.finalChoice);
   }
-  if (requestCount < 2 || requestCount > 3) {
+  if (requestCount < 1 || requestCount > 2) {
     throw new Error('Threat coverage closure changed the Jev request budget: ' + requestCount);
   }
 }
@@ -2029,7 +2044,7 @@ async function testDiagonalOpenThreeDirectDoubleWinVeto() {
     }
   }
 
-  if (requests > 3) {
+  if (requests > 2) {
     throw new Error('Diagonal-three veto changed Jev Max request cap: ' + requests);
   }
 }

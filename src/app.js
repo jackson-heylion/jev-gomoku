@@ -1799,7 +1799,103 @@
     }
   };
   const MATE_SCORE = 1e14;
+  const LOCAL_TT_MAX_ENTRIES = 50000;
+  const LOCAL_TT_KEEP_GENERATIONS = 4;
+  const localTranspositionTable = new Map();
+  let localTtGeneration = 0;
+  let localHashA = 0;
+  let localHashB = 0;
   let activeLocalSearch = null;
+
+  function localMix32(value) {
+    let x = value >>> 0;
+    x ^= x >>> 16;
+    x = Math.imul(x, 0x7feb352d);
+    x ^= x >>> 15;
+    x = Math.imul(x, 0x846ca68b);
+    x ^= x >>> 16;
+    return x >>> 0;
+  }
+
+  function localHashStone(r, c, color, salt) {
+    return localMix32((((r * SIZE + c + 1) * 3 + color) ^ salt) >>> 0);
+  }
+
+  function toggleLocalHash(r, c, color) {
+    localHashA = (localHashA ^ localHashStone(r, c, color, 0x9e3779b9)) >>> 0;
+    localHashB = (localHashB ^ localHashStone(r, c, color, 0x85ebca6b)) >>> 0;
+  }
+
+  function initializeLocalHash() {
+    localHashA = 0;
+    localHashB = 0;
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        const color = board[r][c];
+        if (color !== EMPTY) toggleLocalHash(r, c, color);
+      }
+    }
+  }
+
+  function localSearchPlay(move, color) {
+    board[move.r][move.c] = color;
+    toggleLocalHash(move.r, move.c, color);
+  }
+
+  function localSearchUndo(move, color) {
+    toggleLocalHash(move.r, move.c, color);
+    board[move.r][move.c] = EMPTY;
+  }
+
+  function localRuleSignature() {
+    const rules = activeRuleConfig();
+    return `${rules.overline ? 1 : 0}${rules.fourFour ? 1 : 0}${rules.threeThree ? 1 : 0}`;
+  }
+
+  function localTtKey(toMove, cfg, depth) {
+    // Move width is root-ply-sensitive in this engine. Include the ply profile
+    // so a value searched under a wider node is never treated as an EXACT value
+    // for a different narrowing profile. Iterative depths still share the root
+    // child key (ply=1), allowing the prior depth's bestMove to order the next.
+    const plyFromRoot = Math.max(0, Number(cfg.depth || depth) - depth);
+    return `${aiColor()}:${toMove}:${localRuleSignature()}:${cfg.branch}:${cfg.radius}:p${plyFromRoot}:${localHashA}:${localHashB}`;
+  }
+
+  function pruneLocalTranspositionTable() {
+    if (localTranspositionTable.size <= LOCAL_TT_MAX_ENTRIES) return;
+    const minGeneration = Math.max(0, localTtGeneration - LOCAL_TT_KEEP_GENERATIONS);
+    for (const [key, entry] of localTranspositionTable) {
+      if ((entry?.generation ?? 0) < minGeneration) localTranspositionTable.delete(key);
+      if (localTranspositionTable.size <= LOCAL_TT_MAX_ENTRIES) return;
+    }
+    if (localTranspositionTable.size <= LOCAL_TT_MAX_ENTRIES) return;
+    const ranked = [...localTranspositionTable.entries()].sort((a, b) =>
+      (a[1]?.depth || 0) - (b[1]?.depth || 0)
+      || (a[1]?.generation || 0) - (b[1]?.generation || 0)
+    );
+    const removeCount = localTranspositionTable.size - LOCAL_TT_MAX_ENTRIES;
+    for (let i = 0; i < removeCount; i++) localTranspositionTable.delete(ranked[i][0]);
+  }
+
+  function localTtPut(key, entry) {
+    const previous = localTranspositionTable.get(key);
+    if (!previous || entry.depth >= previous.depth || entry.flag === 'EXACT') {
+      localTranspositionTable.set(key, {
+        ...entry,
+        generation: localTtGeneration
+      });
+    } else {
+      previous.generation = localTtGeneration;
+    }
+    if (localTranspositionTable.size > LOCAL_TT_MAX_ENTRIES + 1024) pruneLocalTranspositionTable();
+  }
+
+  function prioritizeLocalMove(candidates, key) {
+    if (!key) return candidates;
+    const index = candidates.findIndex(move => move.key === key);
+    if (index <= 0) return candidates;
+    return [candidates[index], ...candidates.slice(0, index), ...candidates.slice(index + 1)];
+  }
 
   function beginLocalSearchBudget(cfg) {
     const startedAt = performance.now();
@@ -1855,7 +1951,9 @@
       rootTimedOut: runtime.rootTimedOut,
       depthReached: runtime.depthReached,
       targetDepth: runtime.targetDepth,
-      checks: runtime.checks
+      checks: runtime.checks,
+      transpositionEntries: runtime.transpositionEntries ?? localTranspositionTable.size,
+      transpositionGeneration: runtime.transpositionGeneration ?? localTtGeneration
     };
     if (activeLocalSearch === runtime) activeLocalSearch = null;
     return result;
@@ -2161,68 +2259,117 @@
       .slice(0, limit);
   }
 
+  // VCF/VCT keep their compact deterministic memo key. Alpha-Beta below uses
+  // the incremental Zobrist TT instead, so it no longer serializes 225 cells
+  // at every search node.
   function boardCacheKey(toMove, depth) {
     let key = `${toMove}:${depth}:`;
     for (let r = 0; r < SIZE; r++) key += board[r].join('');
     return key;
   }
 
-  function alphaBeta(depth, alpha, beta, toMove, cfg, cache) {
+  function alphaBeta(depth, alpha, beta, toMove, cfg) {
     if (depth <= 0 || localSearchExpired()) return evaluateStatic();
-    const key = boardCacheKey(toMove, depth);
-    if (cache.has(key)) return cache.get(key);
+
+    const key = localTtKey(toMove, cfg, depth);
+    const alphaStart = alpha;
+    const betaStart = beta;
+    const cached = localTranspositionTable.get(key);
+    if (cached) {
+      cached.generation = localTtGeneration;
+      if (cached.depth >= depth) {
+        if (cached.flag === 'EXACT') return cached.value;
+        if (cached.flag === 'LOWER') alpha = Math.max(alpha, cached.value);
+        else if (cached.flag === 'UPPER') beta = Math.min(beta, cached.value);
+        if (alpha >= beta) return cached.value;
+      }
+    }
 
     const immediate = immediateWins(toMove, cfg.radius);
     if (immediate.length) {
       const score = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
-      cache.set(key, score);
+      localTtPut(key, {
+        depth,
+        value: score,
+        flag: 'EXACT',
+        bestMove: immediate[0]?.key || null
+      });
       return score;
     }
 
     const limit = Math.max(4, cfg.branch - Math.max(0, cfg.depth - depth - 1));
-    const candidates = orderedMoves(toMove, limit, cfg.radius);
+    const candidates = prioritizeLocalMove(
+      orderedMoves(toMove, limit, cfg.radius),
+      cached?.bestMove || null
+    );
     if (!candidates.length) return evaluateStatic();
 
-    let value = toMove === aiColor() ? -Infinity : Infinity;
+    const maximizing = toMove === aiColor();
+    let value = maximizing ? -Infinity : Infinity;
+    let bestMove = candidates[0]?.key || null;
     let explored = 0;
+    let completedNode = true;
+
     for (const m of candidates) {
-      if (localSearchExpired()) break;
+      if (localSearchExpired()) {
+        completedNode = false;
+        break;
+      }
       explored++;
-      board[m.r][m.c] = toMove;
+      localSearchPlay(m, toMove);
       let child;
       if (isWin(m.r, m.c, toMove)) {
-        child = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
+        child = maximizing ? MATE_SCORE + depth : -MATE_SCORE - depth;
       } else {
-        child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), cfg, cache);
+        child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), cfg);
       }
-      board[m.r][m.c] = EMPTY;
+      localSearchUndo(m, toMove);
 
-      if (toMove === aiColor()) {
-        if (child > value) value = child;
+      if (maximizing) {
+        if (child > value) {
+          value = child;
+          bestMove = m.key;
+        }
         if (value > alpha) alpha = value;
       } else {
-        if (child < value) value = child;
+        if (child < value) {
+          value = child;
+          bestMove = m.key;
+        }
         if (value < beta) beta = value;
       }
       if (beta <= alpha) break;
     }
+
     if (!explored) return evaluateStatic();
-    cache.set(key, value);
+    // A time-bounded partial node is useful to the current iterative layer, but
+    // it is not a valid transposition bound and must never survive into another
+    // depth or turn.
+    if (!completedNode) return value;
+
+    let flag = 'EXACT';
+    if (value <= alphaStart) flag = 'UPPER';
+    else if (value >= betaStart) flag = 'LOWER';
+    localTtPut(key, { depth, value, flag, bestMove });
     return value;
   }
 
-  function scoreRootMove(move, cfg, cache) {
+  function scoreRootMove(move, cfg) {
     const side = aiColor();
     const opponent = otherColor(side);
-    board[move.r][move.c] = side;
+    // scoreRootMove is also used by benchmark/synchronous fallback paths, so
+    // initialize from the actual board at the root instead of assuming a caller
+    // has already seeded the incremental hash.
+    initializeLocalHash();
+    localSearchPlay(move, side);
     let score;
     if (isWin(move.r, move.c, side)) {
       score = MATE_SCORE * 10;
     } else {
-      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, opponent, cfg, cache);
+      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, opponent, cfg);
       score += evaluateStatic() * .035;
     }
-    board[move.r][move.c] = EMPTY;
+    localSearchUndo(move, side);
     return score;
   }
 
@@ -2580,10 +2727,14 @@
 
   function scoreRootsWithinLocalBudget(roots, cfg, runtime) {
     const side = aiColor();
+    localTtGeneration++;
+    pruneLocalTranspositionTable();
+
     let completed = roots.map(move => ({
       ...move,
       searchScore: quickMoveScore(move, side)
     }));
+    let rootOrder = [...completed];
     let depthReached = 0;
 
     const startDepth = Math.min(cfg.depth, 3);
@@ -2594,10 +2745,13 @@
       }
 
       const depthCfg = { ...cfg, depth };
-      const cache = new Map();
       const iteration = [];
       let complete = true;
-      for (const move of roots) {
+
+      // Preserve the previous completed iteration's PV/root ordering. Combined
+      // with TT best-move ordering this improves cutoffs without reducing any
+      // depth, branch width, or tactical candidate coverage.
+      for (const move of rootOrder) {
         if (localSearchExpired()) {
           complete = false;
           runtime.rootTimedOut = true;
@@ -2605,16 +2759,21 @@
         }
         iteration.push({
           ...move,
-          searchScore: scoreRootMove(move, depthCfg, cache)
+          searchScore: scoreRootMove(move, depthCfg)
         });
       }
+
       if (!complete) break;
+      iteration.sort((a, b) => b.searchScore - a.searchScore);
       completed = iteration;
+      rootOrder = iteration;
       depthReached = depth;
       runtime.depthReached = depth;
     }
 
     if (!depthReached && cfg.depth < 3) runtime.depthReached = cfg.depth;
+    runtime.transpositionEntries = localTranspositionTable.size;
+    runtime.transpositionGeneration = localTtGeneration;
     return completed.sort((a, b) => b.searchScore - a.searchScore);
   }
 
@@ -2876,7 +3035,7 @@
     for (const m of context.candidates) {
       questions[`judge_${m.key}`] = {
         type: 'choice',
-        instructions: `Judge candidate ${m.key} for ${colorNameEn(aiColor())} by independently inspecting the board and candidate_facts.${m.key}. Candidate facts are deterministic hints but may be horizon-limited. If direct board tactics conflict with a heuristic fact, prefer the board evidence.`,
+        instructions: `Judge ${m.key} using state.atomic_policy and candidate_facts.${m.key}.`,
         criteria: {
           EXCELLENT: 'The supplied facts indicate a strategically preferred move with strong initiative and tactical safety.',
           GOOD: 'The move is sound and useful, but not clearly dominant.',
@@ -2897,6 +3056,7 @@
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         board_rows: boardRows(),
         instruction: 'Independently inspect the board geometry as well as the supplied candidate facts. The facts are horizon-limited hints, not a ranking and not infallible. Priority: immediate win > mandatory defense > forced tactical sequences > safety > initiative > connectivity.',
+        atomic_policy: 'Judge each candidate independently from board geometry and candidate_facts. Deterministic facts may be horizon-limited; concrete board tactics and legality are authoritative.',
         candidate_facts: candidateFactsMap(context.candidates)
       },
       model: settings.model || 'jev-latest',
@@ -2923,19 +3083,19 @@
     const pairs = [];
     let n = 0;
     const facts = candidateFactsMap(candidates);
-    const instruction = `Choose the stronger move for ${colorNameEn(aiColor())} by independently checking the board and the supplied semantic facts. The facts may miss deeper horizon tactics. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. Obey the configured BLACK forbidden-move rules. No Local ranking is provided.`;
+    const pairwisePolicy = `Choose the stronger move for ${colorNameEn(aiColor())}. Independently check the full board and shared candidate facts. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. Obey configured BLACK forbidden-move rules. No Local ranking is authoritative.`;
     for (let i = 0; i < candidates.length; i++) {
       for (let j = i + 1; j < candidates.length; j++) {
         const a = candidates[i].key, b = candidates[j].key;
         const id = n++;
         questions[`duel_${id}_ab`] = {
           type: 'choice',
-          instructions: instruction,
+          instructions: `Compare ${a} vs ${b}; apply state.pairwise_policy.`,
           criteria: { [a]: `See candidate_facts.${a}`, [b]: `See candidate_facts.${b}` }
         };
         questions[`duel_${id}_ba`] = {
           type: 'choice',
-          instructions: instruction,
+          instructions: `Compare ${b} vs ${a}; apply state.pairwise_policy.`,
           criteria: { [b]: `See candidate_facts.${b}`, [a]: `See candidate_facts.${a}` }
         };
         pairs.push({ id, a, b });
@@ -2952,7 +3112,8 @@
           rules: renjuRuleDescription(),
           last_move: moves.length ? moves[moves.length - 1].coord : null,
           board_rows: boardRows(),
-          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias. Question options only reference candidate IDs; shared candidate_facts are sent once and contain no Local rank.',
+          pairwise_policy: pairwisePolicy,
+          note: 'Pairs are asked twice with reversed option order to reduce presentation-order bias. Shared candidate facts are sent once.',
           candidate_facts: facts
         },
         model: settings.model || 'jev-latest',
@@ -3482,7 +3643,100 @@
     };
   }
 
-  let deepWorkerSequence = 0;
+  const HEAVY_WORKER_POOL_SIZE = 2;
+  const heavyWorkerSlots = Array.from({ length: HEAVY_WORKER_POOL_SIZE }, () => ({
+    worker: null,
+    busy: false
+  }));
+  const heavyWorkerQueue = [];
+  let heavyWorkerTaskSequence = 0;
+
+  function createHeavyWorker(slot) {
+    if (slot.worker) return slot.worker;
+    slot.worker = new Worker('/deep-worker.js', { type: 'module' });
+    return slot.worker;
+  }
+
+  function resetHeavyWorker(slot) {
+    try { slot.worker?.terminate(); } catch (_) {}
+    slot.worker = null;
+    slot.busy = false;
+  }
+
+  function pumpHeavyWorkerQueue() {
+    if (typeof Worker === 'undefined') return;
+    for (const slot of heavyWorkerSlots) {
+      if (slot.busy || !heavyWorkerQueue.length) continue;
+      const job = heavyWorkerQueue.shift();
+      slot.busy = true;
+
+      let worker;
+      try {
+        worker = createHeavyWorker(slot);
+        worker.ref?.();
+      } catch (error) {
+        resetHeavyWorker(slot);
+        job.resolve(job.onError(error));
+        Promise.resolve().then(pumpHeavyWorkerQueue);
+        continue;
+      }
+
+      let settled = false;
+      const finish = (result, reset = false) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        worker.onmessage = null;
+        worker.onerror = null;
+        if (reset) resetHeavyWorker(slot);
+        else {
+          slot.busy = false;
+          worker.unref?.();
+        }
+        job.resolve(result);
+        Promise.resolve().then(pumpHeavyWorkerQueue);
+      };
+
+      const timer = setTimeout(() => {
+        finish(job.onTimeout(), true);
+      }, job.timeoutMs);
+
+      worker.onmessage = event => {
+        const message = event.data || {};
+        if (message.id !== job.message.id) return;
+        if (!message.ok) {
+          finish(job.onWorkerError(message.error || 'heavy worker failed'), true);
+          return;
+        }
+        finish(job.onSuccess(message.result || {}));
+      };
+
+      worker.onerror = event => {
+        finish(job.onError(event?.message || 'heavy worker crashed'), true);
+      };
+
+      try {
+        worker.postMessage(job.message);
+      } catch (error) {
+        finish(job.onError(error), true);
+      }
+    }
+  }
+
+  function submitHeavyWorkerTask(message, handlers) {
+    return new Promise(resolve => {
+      heavyWorkerQueue.push({
+        message,
+        timeoutMs: handlers.timeoutMs,
+        resolve,
+        onSuccess: handlers.onSuccess,
+        onTimeout: handlers.onTimeout,
+        onError: handlers.onError,
+        onWorkerError: handlers.onWorkerError || handlers.onError
+      });
+      pumpHeavyWorkerQueue();
+    });
+  }
 
   async function runDeepWorkerVerification(candidateMoves, mode, trigger) {
     const uniqueMoves = [...new Map(
@@ -3490,8 +3744,6 @@
     ).values()];
     if (uniqueMoves.length < 2) return null;
 
-    // Benchmark/Node harnesses do not expose Worker. Evaluate the same candidate
-    // set synchronously so Jev receives comparable deep-search evidence.
     if (typeof Worker === 'undefined') {
       const cfg = challengerVerificationConfig(mode);
       const cache = new Map();
@@ -3510,7 +3762,7 @@
       };
     }
 
-    const id = ++deepWorkerSequence;
+    const id = ++heavyWorkerTaskSequence;
     const timeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1300 : 1800)
       : mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400)
@@ -3518,90 +3770,40 @@
     const maxDepth = mode === 'max' ? 8 : 7;
     const branch = mode === 'max' ? 8 : 7;
 
-    return await new Promise(resolve => {
-      let settled = false;
-      let worker;
-      try {
-        worker = new Worker('/deep-worker.js', { type: 'module' });
-      } catch (error) {
-        resolve({
-          status: 'unavailable',
-          source: 'web-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          error: String(error?.message || error || 'Web Worker unavailable'),
-          timedOut: false
-        });
-        return;
-      }
-      const finish = result => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve(result);
-      };
-
-      const timer = setTimeout(() => {
-        finish({
-          status: 'timeout',
-          source: 'web-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          depthReached: null,
-          scores: [],
-          timedOut: true,
-          elapsedMs: timeBudgetMs,
-          budgetMs: timeBudgetMs
-        });
-      }, timeBudgetMs + 350 * TIMEOUT_SCALE);
-
-      worker.onmessage = event => {
-        const message = event.data || {};
-        if (message.id !== id) return;
-        if (!message.ok) {
-          finish({
-            status: 'error',
-            source: 'web-worker',
-            trigger,
-            winner: uniqueMoves[0].key,
-            error: message.error || 'deep worker failed',
-            timedOut: false
-          });
-          return;
-        }
-        finish({
-          ...(message.result || {}),
-          trigger
-        });
-      };
-
-      worker.onerror = event => {
-        finish({
-          status: 'error',
-          source: 'web-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          error: event?.message || 'deep worker crashed',
-          timedOut: false
-        });
-      };
-
-      worker.postMessage({
-        id,
-        task: 'search',
-        board: board.map(row => row.slice()),
-        side: aiColor(),
-        rules: workerRuleConfig(),
-        candidates: uniqueMoves.map(move => move.key),
-        timeBudgetMs,
-        maxDepth,
-        branch
-      });
+    return submitHeavyWorkerTask({
+      id,
+      task: 'search',
+      board: board.map(row => row.slice()),
+      side: aiColor(),
+      rules: workerRuleConfig(),
+      candidates: uniqueMoves.map(move => move.key),
+      timeBudgetMs,
+      maxDepth,
+      branch
+    }, {
+      timeoutMs: timeBudgetMs + 350 * TIMEOUT_SCALE,
+      onSuccess: result => ({ ...result, trigger }),
+      onTimeout: () => ({
+        status: 'timeout',
+        source: 'web-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        depthReached: null,
+        scores: [],
+        timedOut: true,
+        elapsedMs: timeBudgetMs,
+        budgetMs: timeBudgetMs
+      }),
+      onError: error => ({
+        status: 'error',
+        source: 'web-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        error: String(error?.message || error || 'Web Worker unavailable'),
+        timedOut: false
+      })
     });
   }
-
-  let threatWorkerSequence = 0;
 
   async function runThreatWorkerAnalysis(candidateMoves, mode, trigger = 'parallel_threat_evidence', overrides = {}) {
     const uniqueMoves = [...new Map(
@@ -3609,8 +3811,6 @@
     ).values()].slice(0, 6);
     if (!uniqueMoves.length) return null;
 
-    // Do not run a heavy synchronous fallback on the UI thread. The new mode
-    // stays bounded even on browsers that cannot create a Worker.
     if (typeof Worker === 'undefined') {
       return {
         status: 'unavailable',
@@ -3622,7 +3822,7 @@
       };
     }
 
-    const id = ++threatWorkerSequence;
+    const id = ++heavyWorkerTaskSequence;
     const defaultTimeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1100 : 1450)
       : (moves.length < 10 ? 800 : 1200));
@@ -3636,90 +3836,39 @@
       ? Math.max(4, Math.min(10, overrides.branch))
       : (mode === 'max' ? 9 : 8);
 
-    return await new Promise(resolve => {
-      let settled = false;
-      let worker;
-      try {
-        worker = new Worker('/deep-worker.js', { type: 'module' });
-      } catch (error) {
-        resolve({
-          status: 'unavailable',
-          source: 'threat-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          analyses: [],
-          error: String(error?.message || error || 'Threat Worker unavailable'),
-          timedOut: false
-        });
-        return;
-      }
-
-      const finish = result => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        worker.terminate();
-        resolve(result);
-      };
-
-      const timer = setTimeout(() => {
-        finish({
-          status: 'timeout',
-          source: 'threat-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          analyses: [],
-          timedOut: true,
-          elapsedMs: timeBudgetMs,
-          budgetMs: timeBudgetMs,
-          maxThreatTurns
-        });
-      }, timeBudgetMs + 350 * TIMEOUT_SCALE);
-
-      worker.onmessage = event => {
-        const message = event.data || {};
-        if (message.id !== id) return;
-        if (!message.ok) {
-          finish({
-            status: 'error',
-            source: 'threat-worker',
-            trigger,
-            winner: uniqueMoves[0].key,
-            analyses: [],
-            error: message.error || 'threat worker failed',
-            timedOut: false
-          });
-          return;
-        }
-        finish({
-          ...(message.result || {}),
-          trigger
-        });
-      };
-
-      worker.onerror = event => {
-        finish({
-          status: 'error',
-          source: 'threat-worker',
-          trigger,
-          winner: uniqueMoves[0].key,
-          analyses: [],
-          error: event?.message || 'threat worker crashed',
-          timedOut: false
-        });
-      };
-
-      worker.postMessage({
-        id,
-        task: 'threat',
-        board: board.map(row => row.slice()),
-        side: aiColor(),
-        rules: workerRuleConfig(),
-        candidates: uniqueMoves.map(move => move.key),
-        timeBudgetMs,
-        maxThreatTurns,
-        branch
-      });
+    return submitHeavyWorkerTask({
+      id,
+      task: 'threat',
+      board: board.map(row => row.slice()),
+      side: aiColor(),
+      rules: workerRuleConfig(),
+      candidates: uniqueMoves.map(move => move.key),
+      timeBudgetMs,
+      maxThreatTurns,
+      branch
+    }, {
+      timeoutMs: timeBudgetMs + 350 * TIMEOUT_SCALE,
+      onSuccess: result => ({ ...result, trigger }),
+      onTimeout: () => ({
+        status: 'timeout',
+        source: 'threat-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        analyses: [],
+        timedOut: true,
+        elapsedMs: timeBudgetMs,
+        budgetMs: timeBudgetMs,
+        maxThreatTurns
+      }),
+      onError: error => ({
+        status: 'error',
+        source: 'threat-worker',
+        trigger,
+        winner: uniqueMoves[0].key,
+        analyses: [],
+        error: String(error?.message || error || 'Threat Worker unavailable'),
+        timedOut: false
+      })
     });
   }
 
@@ -4029,50 +4178,78 @@
     return Boolean(row && !row.timedOut);
   }
 
-  async function closeMaxThreatCoverage(candidates, provisionalTop4, threatAnalysis) {
-    const promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+  async function closeMaxThreatCoverage(candidates, provisionalTop4, threatAnalysis, speculativeThreatPromise = null) {
+    let merged = threatAnalysis;
+    let speculative = null;
+    let promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(merged, move.key));
     if (!promotedNeedsProof) {
       return {
         candidates,
-        threatAnalysis,
+        threatAnalysis: merged,
+        speculative: null,
         supplemental: null,
         rejectedIncomplete: []
       };
     }
 
-    // Initial Threat Search intentionally checks at most six candidates. If
-    // Atomic promotes #7/#8 into Top 4, validate all remaining unvetted main
-    // candidates in one bounded supplemental batch (normally at most two).
+    // Tail validation is queued as soon as the initial Deep/Threat pair starts.
+    // With the two-slot persistent pool it begins the moment either primary
+    // worker becomes idle, so Atomic usually does not create a new wait bubble.
+    if (speculativeThreatPromise) {
+      try {
+        speculative = await speculativeThreatPromise;
+      } catch (_) {
+        speculative = null;
+      }
+      if (speculative) {
+        merged = mergeThreatAnalysis(merged, speculative);
+        attachThreatEvidence(candidates, merged);
+        const filtered = hardFilterMaxCandidates(candidates, merged);
+        provisionalTop4 = provisionalTop4.filter(move =>
+          filtered.some(item => item.key === move.key)
+        );
+        promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(merged, move.key));
+        if (!promotedNeedsProof) {
+          return {
+            candidates: filtered,
+            threatAnalysis: merged,
+            speculative,
+            supplemental: null,
+            rejectedIncomplete: []
+          };
+        }
+        candidates = filtered;
+      }
+    }
+
     const missingTop = provisionalTop4
-      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+      .filter(move => !hasCompletedThreatEvidence(merged, move.key));
     const missingAll = candidates
-      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+      .filter(move => !hasCompletedThreatEvidence(merged, move.key));
     const unvetted = [...new Map(
       [...missingTop, ...missingAll].map(move => [move.key, move])
     ).values()].slice(0, 2);
+
     if (!unvetted.length) {
       return {
         candidates,
-        threatAnalysis,
+        threatAnalysis: merged,
+        speculative,
         supplemental: null,
         rejectedIncomplete: []
       };
     }
 
-    updateApiState('busy', 'Jev Max：校验 Atomic 晋级候选的 Threat 安全性…');
+    updateApiState('busy', 'Jev Max：补齐晋级候选的 Threat 安全性…');
     const supplemental = await runThreatWorkerAnalysis(
       unvetted,
       'max',
       'jev_max_atomic_promotion_validation',
       { timeBudgetMs: 850, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 8 }
     );
-    const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
+    merged = mergeThreatAnalysis(merged, supplemental);
     attachThreatEvidence(candidates, merged);
 
-    // Once coverage closure is triggered, missing evidence is never allowed to
-    // become a comparative advantage. Candidates still lacking a completed
-    // Threat result are fail-closed before Pairwise, even if the 2-candidate
-    // supplemental budget could not reach all of them.
     const rejectedIncomplete = candidates
       .filter(move => !hasCompletedThreatEvidence(merged, move.key))
       .map(move => move.key);
@@ -4083,6 +4260,7 @@
     return {
       candidates: filtered,
       threatAnalysis: merged,
+      speculative,
       supplemental,
       rejectedIncomplete
     };
@@ -4276,7 +4454,6 @@
   function maxSemanticEvidence(move, { includeRanks = false } = {}) {
     const facts = move.analysis?.facts || {};
     return compactEvidence({
-      move: move.key,
       candidate_sources: Array.isArray(move.recallSources) ? move.recallSources : facts.candidate_sources,
       ...(includeRanks ? {
         local_rank: Number.isFinite(move.localRank) ? move.localRank : (Number.isFinite(move.rank) ? move.rank : null),
@@ -4308,12 +4485,6 @@
             : null
         }) : null
       }) : null,
-      principal_variation: Array.isArray(move.deepEvidence?.principal_variation)
-        ? move.deepEvidence.principal_variation
-        : null,
-      opponent_best_replies: Array.isArray(move.deepEvidence?.opponent_best_replies)
-        ? move.deepEvidence.opponent_best_replies
-        : null,
       atomic_judgement: move.atomicJudgement || null,
       pairwise_score: Number.isFinite(move.pairScore) ? Number(move.pairScore.toFixed(4)) : null,
       critic_summary: move.criticSummary || null
@@ -4339,6 +4510,77 @@
     return payload;
   }
 
+  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = []) {
+    const payload = buildMaxAtomicPayload(context, candidates);
+    const tournament = buildPairwisePayload(speculativePool);
+
+    payload.state.task = 'Jev Max speculative fan-out: atomic evaluation plus precomputed pairwise/critic evidence for the likely finalist pool.';
+    payload.state.fanout_policy = 'Atomic answers determine the actual Top 4. Pairwise/Critic answers are speculative and are only consumed when their candidate is still eligible after deterministic Threat coverage. Ignore all hard-proved losing or illegal candidates.';
+    payload.state.speculative_pool = speculativePool.map(move => move.key);
+    payload.state.pairwise_policy = tournament.payload.state.pairwise_policy;
+    payload.state.critic_policy = MAX_CRITIC_POLICY;
+    Object.assign(payload.questions, tournament.payload.questions);
+    addCriticQuestions(payload.questions, speculativePool);
+
+    payload.questions.global_best = {
+      type: 'choice',
+      instructions: 'Independently choose the strongest supplied main candidate from the full board and candidate_facts. This is a consensus signal, not permission to override deterministic proof.',
+      criteria: Object.fromEntries(candidates.map(move => [
+        move.key,
+        `See candidate_facts.${move.key}`
+      ]))
+    };
+
+    if (wildcardPool.length) {
+      payload.state.wildcard_pool = wildcardPool.map(move => move.key);
+      payload.questions.wildcard_pick = {
+        type: 'choice',
+        instructions: 'If recall_check is OTHER, propose the strongest alternative from state.wildcard_pool; otherwise this answer will be ignored.',
+        criteria: Object.fromEntries(wildcardPool.map(move => [
+          move.key,
+          'Bounded legal alternative; inspect full-board geometry directly.'
+        ]))
+      };
+    }
+
+    return {
+      payload,
+      pairs: tournament.pairs,
+      speculativePool: speculativePool.map(move => move.key)
+    };
+  }
+
+  function buildMaxResolutionPayload(context, candidates, atomicAnswers, extraCandidate = null) {
+    const tournament = buildPairwisePayload(candidates);
+    const resolutionCandidates = [
+      ...candidates,
+      ...(extraCandidate && !candidates.some(move => move.key === extraCandidate.key) ? [extraCandidate] : [])
+    ];
+    tournament.payload.state.task = 'Jev Max difficult-position resolution fan-out after Atomic changed the likely finalist pool or wildcard validation introduced a new finalist.';
+    tournament.payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
+    tournament.payload.state.critic_policy = MAX_CRITIC_POLICY;
+    tournament.payload.state.candidate_facts = Object.fromEntries(
+      resolutionCandidates.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: false })])
+    );
+    tournament.payload.state.atomic_results = Object.fromEntries(
+      candidates.map(move => [move.key, atomicAnswers?.[`judge_${move.key}`] || null])
+    );
+    addCriticQuestions(tournament.payload.questions, candidates);
+    tournament.payload.questions.best_move = {
+      type: 'choice',
+      instructions: 'Choose the strongest legal resolution candidate. Use full-board geometry, candidate_facts and prior Atomic results. Pairwise/Critic questions in this request are independent cross-checks; legality and hard proofs remain authoritative.',
+      criteria: Object.fromEntries(resolutionCandidates.map(move => [
+        move.key,
+        `See candidate_facts.${move.key}`
+      ]))
+    };
+    return {
+      payload: tournament.payload,
+      pairs: tournament.pairs,
+      candidates: resolutionCandidates
+    };
+  }
+
   function atomicTraceFor(candidates, answers) {
     return candidates.map(move => {
       const answer = answers?.[`judge_${move.key}`] || null;
@@ -4352,11 +4594,13 @@
     });
   }
 
+  const MAX_CRITIC_POLICY = 'Assume the candidate is wrong and search for the strongest opponent refutation: immediate tactic, forcing sequence, multi-axis counterattack, residual threat network after a forced defense, premature spending of a forcing resource, or loss of initiative. If no concrete refutation is convincing, choose SURVIVES_BEST_REPLY.';
+
   function addCriticQuestions(questions, candidates) {
     for (const move of candidates) {
       questions[`critic_${move.key}`] = {
         type: 'choice',
-        instructions: `Assume candidate ${move.key} is wrong. Inspect the full board, candidate_facts.${move.key}, and atomic_results.${move.key}. Find the strongest opponent refutation: immediate tactical reply, forcing sequence, multi-axis counterattack, or a forced defensive reply that still leaves the opponent with a residual threat network. Do not treat "I create a threat and force one reply" as automatically safe: inspect the position after that forced reply and whether the opponent still has multiple forcing extensions. Also check premature spending of a forcing resource or loss of initiative. If none is convincing, choose SURVIVES_BEST_REPLY.`,
+        instructions: `Refute ${move.key} using state.critic_policy and candidate_facts.${move.key}; otherwise choose SURVIVES_BEST_REPLY.`,
         criteria: {
           SURVIVES_BEST_REPLY: 'No concrete refutation found; candidate remains robust against best play.',
           TACTICAL_REFUTATION: 'Opponent has a concrete tactical or forcing refutation.',
@@ -4434,16 +4678,28 @@
     );
   }
 
-  function highConfidenceMaxConvergence(ranked) {
+  function highConfidenceMaxConvergence(ranked, globalBest = null) {
     if (ranked.length < 2) return false;
     const first = ranked[0];
     const second = ranked[1];
     const pairLead = Number(first.pairScore || 0) - Number(second.pairScore || 0);
     const expectedWins = Math.max(1, Math.min(3, ranked.length - 1));
-    return first.pairWins >= expectedWins
+    const strict = first.pairWins >= expectedWins
       && pairLead >= 1.35
       && Number(first.atomicScore || 0) >= .82
       && criticSurvivalProbability(first) >= .72;
+    if (strict) return true;
+
+    const globalChoice = String(globalBest?.choice || '').toUpperCase();
+    const globalConfidence = Number.isFinite(globalBest?.confidence)
+      ? Number(globalBest.confidence)
+      : Number(globalBest?.probabilities?.[first.key] || 0);
+    return globalChoice === first.key
+      && globalConfidence >= .55
+      && first.pairWins >= Math.max(1, expectedWins - 1)
+      && pairLead >= .75
+      && Number(first.atomicScore || 0) >= .72
+      && criticSurvivalProbability(first) >= .65;
   }
 
   function pairwiseAnswer(ranked) {
@@ -4929,10 +5185,26 @@
 
     const deepCandidates = candidates.slice(0, Math.min(5, candidates.length));
     const threatCandidates = selectMaxThreatCandidates(candidates, 6);
-    updateApiState('busy', 'Jev Max：Deep 与 Threat Worker 并行准备证据…');
+    const initialThreatKeys = new Set(threatCandidates.map(move => move.key));
+    const speculativeThreatCandidates = candidates
+      .filter(move => !initialThreatKeys.has(move.key))
+      .slice(0, 2);
+
+    updateApiState('busy', 'Jev Max：Deep / Threat 长驻 Worker 并行准备证据…');
+    const deepPromise = runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel');
+    const threatPromise = runThreatWorkerAnalysis(threatCandidates, 'max', 'jev_max_parallel');
+    const speculativeThreatPromise = speculativeThreatCandidates.length
+      ? runThreatWorkerAnalysis(
+          speculativeThreatCandidates,
+          'max',
+          'jev_max_speculative_tail',
+          { timeBudgetMs: 850, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 8 }
+        )
+      : Promise.resolve(null);
+
     const [deepAnalysis, initialThreatAnalysis] = await Promise.all([
-      runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel'),
-      runThreatWorkerAnalysis(threatCandidates, 'max', 'jev_max_parallel')
+      deepPromise,
+      threatPromise
     ]);
     let threatAnalysis = initialThreatAnalysis;
 
@@ -4947,9 +5219,6 @@
     candidates = preAtomicFrontier.candidates;
     threatAnalysis = preAtomicFrontier.threatAnalysis;
 
-    // If every normal main candidate is already hard-proved losing, do not
-    // spend Atomic/Pairwise/Final requests ranking known losses. Search a
-    // bounded rescue universe first; this rare tactical path is sequential.
     if (allMaxCandidatesHardLost(candidates)) {
       const rescue = await runMaxRescueSweep(context, candidates, deepAnalysis, threatAnalysis);
       if (rescue?.decisionTrace?.requestShape) {
@@ -4959,7 +5228,6 @@
       return rescue;
     }
 
-    // A proven VCF set or Threat-space filter may collapse to one exact choice.
     if (candidates.length === 1) {
       return deterministicMaxResult(
         context, candidates, candidates[0].key, deepAnalysis, threatAnalysis,
@@ -4967,20 +5235,40 @@
       );
     }
 
-    let atomicPayload = buildMaxAtomicPayload(context, candidates);
-    let atomicTokens = estimatePayloadTokens(atomicPayload);
-    if (Number.isFinite(atomicTokens) && atomicTokens > 7000 && candidates.length > 6) {
-      // Payload is a browser/network safety boundary too. Prefer a bounded 6-candidate
-      // universe over sending an oversized 8-candidate request.
-      candidates = candidates.slice(0, 6);
-      atomicPayload = buildMaxAtomicPayload(context, candidates);
-      atomicTokens = estimatePayloadTokens(atomicPayload);
+    let hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
+    let wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
+    let speculativePool = candidates.slice(0, Math.min(6, candidates.length));
+    let fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+    let fanoutTokens = estimatePayloadTokens(fanout.payload);
+
+    // Keep the main candidate recall intact when possible. First reduce only
+    // speculative comparisons; if the shared-state payload still crosses the
+    // historical hard target, fall back to the existing six-candidate ceiling.
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
+      speculativePool = candidates.slice(0, Math.min(4, candidates.length));
+      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
     }
-    updateApiState('busy', 'Jev Max：Atomic 独立评估候选…');
-    const atomicData = await callJev(atomicPayload);
-    const atomic = atomicTraceFor(candidates, atomicData?.answers || {});
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && candidates.length > 6) {
+      candidates = candidates.slice(0, 6);
+      hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
+      wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
+      speculativePool = candidates.slice(0, Math.min(6, candidates.length));
+      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
+      if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
+        speculativePool = candidates.slice(0, 4);
+        fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+        fanoutTokens = estimatePayloadTokens(fanout.payload);
+      }
+    }
+
+    updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / Critic…');
+    const fanoutData = await callJev(fanout.payload);
+    const atomic = atomicTraceFor(candidates, fanoutData?.answers || {});
     const atomicCandidateCount = candidates.length;
-    const recallChoice = String(atomicData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
+    const recallChoice = String(fanoutData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
+    const globalBest = compactAnswer(fanoutData?.answers?.global_best);
 
     let atomicTop4 = [...candidates]
       .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
@@ -4988,7 +5276,12 @@
       .slice(0, Math.min(4, candidates.length));
 
     const preCoverageCandidates = [...candidates];
-    const coverage = await closeMaxThreatCoverage(candidates, atomicTop4, threatAnalysis);
+    const coverage = await closeMaxThreatCoverage(
+      candidates,
+      atomicTop4,
+      threatAnalysis,
+      speculativeThreatPromise
+    );
     candidates = coverage.candidates;
     threatAnalysis = coverage.threatAnalysis;
     atomicTop4 = [...candidates]
@@ -5004,12 +5297,39 @@
         deepAnalysis,
         threatAnalysis,
         {
-          data: atomicData,
+          data: fanoutData,
           trace: atomic,
           count: atomicCandidateCount,
-          tokens: atomicTokens
+          tokens: fanoutTokens
         }
       );
+    }
+
+    if (candidates.length === 1) {
+      const result = deterministicMaxResult(
+        context,
+        candidates,
+        candidates[0].key,
+        deepAnalysis,
+        threatAnalysis,
+        'post_fanout_threat_single'
+      );
+      const client = aggregateJevClient(fanoutData);
+      result.model = fanoutData?.model || settings.model;
+      result.usage = fanoutData?.usage || null;
+      result.client = client;
+      result.decisionTrace.atomic = atomic;
+      result.decisionTrace.recallCheck = compactAnswer(fanoutData?.answers?.recall_check);
+      result.decisionTrace.globalBest = globalBest;
+      Object.assign(result.decisionTrace.requestShape, {
+        logicalRequests: 1,
+        httpRequests: client.attempts,
+        fanoutPairwiseCount: fanout.pairs.length * 2,
+        fanoutCriticCount: fanout.speculativePool.length,
+        payloadEstimatedInputTokens: [fanoutTokens].filter(Number.isFinite)
+      });
+      result.stageNote = `Jev Max：Fan-Out 后 Threat 证明收敛到唯一候选 ${candidates[0].key}（1 次 Jev 请求）`;
+      return result;
     }
 
     const pairwiseThreatCoverageComplete = atomicTop4.every(move =>
@@ -5019,41 +5339,11 @@
       throw new Error('Jev Max Threat coverage closure invariant failed before Pairwise');
     }
 
-    const tournament = buildPairwisePayload(atomicTop4);
-    tournament.payload.state.task = 'Jev Max stage 2: order-balanced pairwise tournament plus adversarial refutation analysis.';
-    tournament.payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
-    tournament.payload.state.atomic_results = Object.fromEntries(
-      atomicTop4.map(move => [move.key, move.atomicJudgement || null])
-    );
-    addCriticQuestions(tournament.payload.questions, atomicTop4);
-
-    let wildcardPool = [];
-    const hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
-    if (recallChoice === 'OTHER') {
-      wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
-      if (wildcardPool.length) {
-        tournament.payload.state.wildcard_pool = wildcardPool.map(move => move.key);
-        tournament.payload.questions.wildcard_pick = {
-          type: 'choice',
-          instructions: 'The Atomic recall audit requested OTHER. Choose one alternative from this bounded legal wildcard pool by inspecting the shared full board. This is a proposal only; deterministic legality and immediate-loss checks run afterward.',
-          criteria: Object.fromEntries(wildcardPool.map(move => [
-            move.key,
-            'Unranked legal alternative; inspect board geometry directly.'
-          ]))
-        };
-      }
-    }
-
-    const pairwiseTokens = estimatePayloadTokens(tournament.payload);
-    updateApiState('busy', 'Jev Max：Pairwise 双向对决与 Critic 反驳分析…');
-    const pairwiseData = await callJev(tournament.payload);
-    const pairwise = scorePairwiseTournament(atomicTop4, tournament.pairs, pairwiseData?.answers || {});
-    const critic = maxCriticTrace(atomicTop4, pairwiseData?.answers || {});
-    let ranked = pairwiseRank(atomicTop4);
-
+    const wildcardChoice = recallChoice === 'OTHER'
+      ? String(fanoutData?.answers?.wildcard_pick?.choice || '').toUpperCase()
+      : '';
     let wildcard = null;
     let wildcardValidation = null;
-    const wildcardChoice = String(pairwiseData?.answers?.wildcard_pick?.choice || '').toUpperCase();
     if (wildcardChoice) {
       const proposed = wildcardPool.find(move => move.key === wildcardChoice);
       const checked = await validateWildcardForMax(proposed, threatAnalysis);
@@ -5065,51 +5355,124 @@
       }
     }
 
-    let finalists = ranked.slice(0, Math.min(2, ranked.length));
-    if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
-      finalists = [...finalists, wildcard].slice(0, 3);
-    }
+    const atomicTopKeys = new Set(atomicTop4.map(move => move.key));
+    const speculativePoolKeys = new Set(fanout.speculativePool);
+    const expectedPairs = atomicTop4.length * (atomicTop4.length - 1) / 2;
+    let usedPairs = fanout.pairs.filter(pair =>
+      atomicTopKeys.has(pair.a) && atomicTopKeys.has(pair.b)
+    );
+    const fanoutCovered = atomicTop4.every(move => speculativePoolKeys.has(move.key))
+      && usedPairs.length === expectedPairs;
 
-    const converged = !wildcard && highConfidenceMaxConvergence(ranked);
-    let finalData = null;
-    let answer;
-    let finalChoice;
+    let pairwise = [];
+    let critic = [];
+    let ranked = [];
+    let finalists = [];
+    let answer = null;
+    let finalChoice = null;
+    let secondData = null;
+    let secondTokens = null;
+    let decisionAuthority = null;
+    let pairwiseSource = 'speculative_fanout';
 
-    if (converged) {
-      answer = pairwiseAnswer(ranked);
-      finalChoice = answer.choice;
+    if (fanoutCovered) {
+      pairwise = scorePairwiseTournament(atomicTop4, usedPairs, fanoutData?.answers || {});
+      critic = maxCriticTrace(atomicTop4, fanoutData?.answers || {});
+      ranked = pairwiseRank(atomicTop4);
+      finalists = ranked.slice(0, Math.min(2, ranked.length));
+      if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
+        finalists = [...finalists, wildcard].slice(0, 3);
+      }
+
+      const converged = !wildcard && highConfidenceMaxConvergence(ranked, globalBest);
+      if (converged) {
+        answer = pairwiseAnswer(ranked);
+        finalChoice = answer.choice;
+        decisionAuthority = 'jev_max_fanout_convergence';
+      } else {
+        const finalPayload = buildMaxFinalPayload(finalists, context, deepAnalysis, threatAnalysis);
+        secondTokens = estimatePayloadTokens(finalPayload);
+        updateApiState('busy', 'Jev Max：证据存在分歧，执行第 2 次最终裁决…');
+        secondData = await callJev(finalPayload);
+        const raw = secondData?.answers?.best_move;
+        if (!raw || typeof raw.choice !== 'string') {
+          throw new Error('Jev Max 最终响应中缺少 answers.best_move.choice');
+        }
+        const finalistKeys = new Set(finalists.map(move => move.key));
+        finalChoice = raw.choice.toUpperCase();
+        if (!finalistKeys.has(finalChoice)) {
+          throw new Error(`Jev Max 返回候选集之外的落点：${raw.choice}`);
+        }
+        const probabilities = raw.probabilities && typeof raw.probabilities === 'object'
+          ? Object.fromEntries(Object.entries(raw.probabilities)
+              .filter(([key]) => finalistKeys.has(String(key).toUpperCase()))
+              .map(([key, value]) => [String(key).toUpperCase(), Number(value)]))
+          : { [finalChoice]: 1 };
+        answer = {
+          ...raw,
+          choice: finalChoice,
+          confidence: Number.isFinite(raw.confidence)
+            ? raw.confidence
+            : Number.isFinite(Number(probabilities[finalChoice])) ? Number(probabilities[finalChoice]) : null,
+          probabilities
+        };
+        decisionAuthority = 'jev_max_final';
+      }
     } else {
-      const finalPayload = buildMaxFinalPayload(finalists, context, deepAnalysis, threatAnalysis);
-      const finalTokens = estimatePayloadTokens(finalPayload);
-      updateApiState('busy', 'Jev Max：汇总证据并进行最终裁决…');
-      finalData = await callJev(finalPayload);
-      const raw = finalData?.answers?.best_move;
-      if (!raw || typeof raw.choice !== 'string') {
-        throw new Error('Jev Max 最终响应中缺少 answers.best_move.choice');
-      }
-      finalChoice = raw.choice.toUpperCase();
-      const finalistKeys = new Set(finalists.map(move => move.key));
-      if (!finalistKeys.has(finalChoice)) {
-        throw new Error(`Jev Max 返回候选集之外的落点：${raw.choice}`);
-      }
-      const probabilities = raw.probabilities && typeof raw.probabilities === 'object'
+      // Rare difficult path: Atomic promoted a candidate outside the speculative
+      // top-six pool. Resolve Pairwise/Critic and a final best-move vote together
+      // in the second and final request, preserving the two-request ceiling.
+      const resolution = buildMaxResolutionPayload(
+        context,
+        atomicTop4,
+        fanoutData?.answers || {},
+        wildcard
+      );
+      secondTokens = estimatePayloadTokens(resolution.payload);
+      updateApiState('busy', 'Jev Max：Atomic 改写决赛池，第 2 次 Fan-Out 解决分歧…');
+      secondData = await callJev(resolution.payload);
+      usedPairs = resolution.pairs;
+      pairwise = scorePairwiseTournament(atomicTop4, resolution.pairs, secondData?.answers || {});
+      critic = maxCriticTrace(atomicTop4, secondData?.answers || {});
+      ranked = pairwiseRank(atomicTop4);
+      pairwiseSource = 'resolution_fanout';
+
+      const raw = secondData?.answers?.best_move;
+      const resolutionKeys = new Set(resolution.candidates.map(move => move.key));
+      let rawChoice = String(raw?.choice || '').toUpperCase();
+      if (!resolutionKeys.has(rawChoice)) rawChoice = ranked[0]?.key || resolution.candidates[0]?.key;
+      const rawProbabilities = raw?.probabilities && typeof raw.probabilities === 'object'
         ? Object.fromEntries(Object.entries(raw.probabilities)
-            .filter(([key]) => finalistKeys.has(String(key).toUpperCase()))
+            .filter(([key]) => resolutionKeys.has(String(key).toUpperCase()))
             .map(([key, value]) => [String(key).toUpperCase(), Number(value)]))
-        : { [finalChoice]: 1 };
-      answer = {
-        ...raw,
-        choice: finalChoice,
-        confidence: Number.isFinite(raw.confidence)
+        : { [rawChoice]: 1 };
+      const resolutionAnswer = {
+        ...(raw || {}),
+        choice: rawChoice,
+        confidence: Number.isFinite(raw?.confidence)
           ? raw.confidence
-          : Number.isFinite(Number(probabilities[finalChoice])) ? Number(probabilities[finalChoice]) : null,
-        probabilities
+          : Number.isFinite(Number(rawProbabilities[rawChoice])) ? Number(rawProbabilities[rawChoice]) : null,
+        probabilities: rawProbabilities
       };
-      finalData.__maxEstimatedTokens = finalTokens;
+
+      if (
+        !wildcard
+        && ranked[0]
+        && resolutionAnswer.choice === ranked[0].key
+        && highConfidenceMaxConvergence(ranked, resolutionAnswer)
+      ) {
+        answer = pairwiseAnswer(ranked);
+      } else {
+        answer = resolutionAnswer;
+      }
+      finalChoice = answer.choice;
+      finalists = resolution.candidates;
+      decisionAuthority = 'jev_max_resolution_fanout';
     }
 
     const final = finalists.find(move => move.key === finalChoice)
-      || ranked.find(move => move.key === finalChoice);
+      || ranked.find(move => move.key === finalChoice)
+      || candidates.find(move => move.key === finalChoice);
     if (!final) throw new Error('Jev Max 最终选择无法映射到合法候选');
 
     const finalCandidates = [
@@ -5118,14 +5481,10 @@
       ...(wildcard && !candidates.some(move => move.key === wildcard.key) && wildcard.key !== final.key ? [wildcard] : [])
     ].slice(0, maxCandidateLimit());
 
-    const usage = sumUsage(atomicData?.usage, pairwiseData?.usage, finalData?.usage);
-    const client = aggregateJevClient(atomicData, pairwiseData, finalData);
-    const logicalRequests = finalData ? 3 : 2;
-    const estimatedInputTokens = [
-      atomicTokens,
-      pairwiseTokens,
-      finalData?.__maxEstimatedTokens ?? null
-    ].filter(Number.isFinite);
+    const usage = sumUsage(fanoutData?.usage, secondData?.usage);
+    const client = aggregateJevClient(fanoutData, secondData);
+    const logicalRequests = secondData ? 2 : 1;
+    const estimatedInputTokens = [fanoutTokens, secondTokens].filter(Number.isFinite);
 
     return {
       answer,
@@ -5135,7 +5494,7 @@
       mode: 'max',
       forced: context.forced,
       candidates: finalCandidates,
-      model: finalData?.model || pairwiseData?.model || atomicData?.model || settings.model,
+      model: secondData?.model || fanoutData?.model || settings.model,
       usage,
       client,
       decisionTrace: {
@@ -5144,7 +5503,8 @@
           sources: [...(move.recallSources || [])]
         })),
         atomic,
-        recallCheck: compactAnswer(atomicData?.answers?.recall_check),
+        recallCheck: compactAnswer(fanoutData?.answers?.recall_check),
+        globalBest,
         pairwise,
         critic,
         wildcard: {
@@ -5180,30 +5540,42 @@
         } : null,
         preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
         threatCoverage: {
+          speculativeQueued: speculativeThreatCandidates.map(move => move.key),
+          speculativeUsed: Boolean(coverage.speculative),
+          speculativeCandidates: coverage.speculative?.analyses?.map(row => row.move) || [],
+          speculativeElapsedMs: coverage.speculative?.elapsedMs ?? null,
           supplementalTriggered: Boolean(coverage.supplemental),
           supplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
           rejectedIncomplete: coverage.rejectedIncomplete,
           elapsedMs: coverage.supplemental?.elapsedMs ?? null
         },
-        finalDecision: finalData ? compactAnswer(answer) : null,
+        finalDecision: secondData ? compactAnswer(answer) : null,
         requestShape: {
-          decisionAuthority: finalData ? 'jev_max_final' : 'jev_max_pairwise_convergence',
+          decisionAuthority,
           candidateCount: candidates.length,
           atomicCount: atomicCandidateCount,
-          pairwiseCount: tournament.pairs.length * 2,
+          pairwiseCount: usedPairs.length * 2,
           criticCount: atomicTop4.length,
           finalistCount: finalists.length,
           logicalRequests,
           httpRequests: client.attempts,
-          maxWorkers: 2,
+          maxWorkers: HEAVY_WORKER_POOL_SIZE,
+          workerPoolPersistent: true,
+          fanoutSpeculativePool: fanout.speculativePool,
+          fanoutPairwiseCount: fanout.pairs.length * 2,
+          fanoutCriticCount: fanout.speculativePool.length,
+          pairwiseSource,
           payloadEstimatedInputTokens: estimatedInputTokens,
           payloadTokenBudgetTarget: 5000,
           payloadTokenBudgetHard: 7000,
           localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
           localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
           localSearchTimedOut: Boolean(context.localSearch?.timedOut),
+          localTranspositionEntries: context.localSearch?.transpositionEntries ?? null,
+          localTranspositionGeneration: context.localSearch?.transpositionGeneration ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
           threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
+          threatSpeculativeElapsedMs: coverage.speculative?.elapsedMs ?? null,
           threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
           threatSupplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
           threatCoverageRejectedIncomplete: coverage.rejectedIncomplete,
@@ -5226,9 +5598,11 @@
           facts: move.analysis?.facts || null
         }))
       },
-      stageNote: converged
-        ? `Jev Max：Atomic + 双向 Pairwise + Critic 高置信收敛，${logicalRequests} 次 Jev 请求后选择 ${finalChoice}`
-        : `Jev Max：异构候选 → Atomic → 双向 Pairwise/Critic → Final Judge，${logicalRequests} 次 Jev 请求后选择 ${finalChoice}`
+      stageNote: logicalRequests === 1
+        ? `Jev Max：Speculative Fan-Out 单请求收敛，选择 ${finalChoice}`
+        : decisionAuthority === 'jev_max_resolution_fanout'
+          ? `Jev Max：首轮 Fan-Out + 困难局面 Resolution Fan-Out，2 次 Jev 请求后选择 ${finalChoice}`
+          : `Jev Max：首轮 Fan-Out 后证据仍有分歧，第 2 次 Final Judge 选择 ${finalChoice}`
     };
   }
 
