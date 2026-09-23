@@ -1058,139 +1058,6 @@ function directForkCreator(color, radius = 2) {
   return null;
 }
 
-function residualForkRescueMoves(attacker, defender, fork, radius, maxReplies = 10) {
-  // Hard-proof rescue enumeration is currently enabled only when WHITE is the
-  // defender. BLACK forbidden-move interactions remain advisory until this
-  // exhaustive audit is separately regression-tested for Renju legality.
-  if (defender !== WHITE || !fork) {
-    return { complete: false, moves: [], reason: 'unsupported_defender_rules' };
-  }
-
-  const forkPoint = coordToPoint(fork.move);
-  if (!forkPoint) return { complete: false, moves: [], reason: 'invalid_fork_creator' };
-
-  const byKey = new Map();
-  const add = move => {
-    if (!move || byKey.has(move.key)) return;
-    byKey.set(move.key, move);
-  };
-
-  // A hard proof must account for every legal WHITE move that either creates
-  // forcing tempo or prevents the known fork creator from still yielding two
-  // legal immediate winning points. Scanning the whole 15x15 board is rare but
-  // complete; if too many rescue branches exist we return UNKNOWN, never proof.
-  for (let r = 0; r < SIZE; r++) {
-    for (let col = 0; col < SIZE; col++) {
-      assertTime();
-      if (board[r][col] !== EMPTY || !isLegalMoveForColor(r, col, defender)) continue;
-      const move = { r, c: col, key: coord(r, col) };
-
-      playMove(move, defender);
-      let winningDefense = false;
-      let createsTempo = false;
-      let forkStillWins = false;
-      try {
-        if (isWin(move.r, move.c, defender)) {
-          winningDefense = true;
-        } else {
-          createsTempo = immediateWins(defender, radius).length > 0;
-
-          if (
-            board[forkPoint.r]?.[forkPoint.c] === EMPTY
-            && isLegalMoveForColor(forkPoint.r, forkPoint.c, attacker)
-          ) {
-            playMove(forkPoint, attacker);
-            try {
-              if (isWin(forkPoint.r, forkPoint.c, attacker)) {
-                forkStillWins = true;
-              } else {
-                const legalWins = immediateWins(attacker, radius);
-                const defenderWins = immediateWins(defender, radius);
-                forkStillWins = legalWins.length >= 2 && defenderWins.length === 0;
-              }
-            } finally {
-              undoMove(forkPoint, attacker);
-            }
-          }
-        }
-      } finally {
-        undoMove(move, defender);
-      }
-
-      if (winningDefense) {
-        return {
-          complete: true,
-          winningDefense: move.key,
-          moves: [...byKey.values()],
-          reason: 'defender_can_win_immediately'
-        };
-      }
-
-      if (createsTempo || !forkStillWins) {
-        add(move);
-        if (byKey.size > maxReplies) {
-          return {
-            complete: false,
-            moves: [...byKey.values()],
-            reason: 'rescue_branch_limit'
-          };
-        }
-      }
-    }
-  }
-
-  return {
-    complete: true,
-    moves: [...byKey.values()],
-    reason: 'complete'
-  };
-}
-
-function proveResidualForkAfterForcedDefense(attacker, defender, turns, branch, radius, memo) {
-  if (turns <= 1) return null;
-  const fork = directForkCreator(attacker, radius);
-  if (!fork) return null;
-
-  const rescue = residualForkRescueMoves(attacker, defender, fork, radius, 10);
-  if (!rescue.complete || rescue.winningDefense || !rescue.moves.length) return null;
-
-  let principal = null;
-  const checked = [];
-  for (const move of rescue.moves) {
-    assertTime();
-    playMove(move, defender);
-    let child;
-    try {
-      if (isWin(move.r, move.c, defender)) return null;
-      child = proveForcingWin(attacker, turns - 1, branch, radius, memo, true);
-    } finally {
-      undoMove(move, defender);
-    }
-
-    checked.push({
-      move: move.key,
-      forced: Boolean(child?.forced),
-      attackerTurns: child?.attackerTurns ?? null
-    });
-    if (!child?.forced) return null;
-
-    if (!principal || (child.attackerTurns || 0) > (principal.child.attackerTurns || 0)) {
-      principal = { move, child };
-    }
-  }
-
-  if (!principal) return null;
-  return {
-    forced: true,
-    attackerTurns: principal.child.attackerTurns || 0,
-    line: [principal.move.key, ...(principal.child.line || [])],
-    reason: 'residual_fork_rescue_exhausted',
-    rescueReplies: checked,
-    forkCreator: fork.move,
-    forkWinningPoints: fork.winningPoints || []
-  };
-}
-
 function forcingProofKey(attacker, turns, scanDirectFork = true) {
   return 'TS:' + attacker + ':' + turns + ':' + (scanDirectFork ? 'F1' : 'F0') + ':' + hashA + ':' + hashB;
 }
@@ -1269,26 +1136,6 @@ function proveForcingWin(attacker, turns, branch, radius, memo, scanDirectFork =
             } finally {
               undoMove(forcedReply, defender);
             }
-          }
-        } else if (turns > 1) {
-          const residual = proveResidualForkAfterForcedDefense(
-            attacker,
-            defender,
-            turns,
-            branch,
-            radius,
-            memo
-          );
-          if (residual?.forced) {
-            defensiveResult = {
-              forced: true,
-              attackerTurns: 1 + (residual.attackerTurns || 0),
-              line: [block.key, ...(residual.line || [])],
-              reason: residual.reason,
-              rescueReplies: residual.rescueReplies || [],
-              forkCreator: residual.forkCreator || null,
-              forkWinningPoints: residual.forkWinningPoints || []
-            };
           }
         }
       }
@@ -1501,9 +1348,6 @@ function runThreatSearch(message) {
       attackerTurns: proof.attackerTurns ?? null,
       line: Array.isArray(proof.line) ? proof.line : [],
       reason: timedOut ? 'timeout' : proof.reason,
-      rescueReplies: Array.isArray(proof.rescueReplies) ? proof.rescueReplies : [],
-      forkCreator: proof.forkCreator || null,
-      forkWinningPoints: Array.isArray(proof.forkWinningPoints) ? proof.forkWinningPoints : [],
       counterThreat
     });
   }
