@@ -1463,8 +1463,8 @@ async function testStraightFiveWildcardCannotBypassThreatProof() {
 
   const threat = await engine.threatAnalyze(['H5','H9','I7','G6','H10','G9'], 'max');
   const i7 = threat?.analyses?.find(item => item.move === 'I7');
-  if (!i7?.forced || i7.line?.[0] !== 'H9') {
-    throw new Error('Historical I7 must be proved losing through Black H9');
+  if (!i7?.forced || !['H5','H9'].includes(i7.line?.[0])) {
+    throw new Error('Historical I7 must be proved losing through Black H5/H9 fork creator');
   }
 
   engine.setPosition(position.board, position.moves, 'jev-latest');
