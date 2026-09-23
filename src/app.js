@@ -4779,10 +4779,18 @@
 
   function criticHardRefutationProbability(move) {
     const probabilities = move?.criticSummary?.probabilities || {};
+    const deterministicRisk = move?.threatSearch?.counterThreat?.risk || 'NONE';
+    const tactical = Number(probabilities.TACTICAL_REFUTATION || 0);
+    const multiAxis = Number(probabilities.MULTI_AXIS_COUNTERATTACK || 0);
+    const residual = Number(probabilities.RESIDUAL_COUNTER_THREAT || 0);
+
+    // Residual pressure is common in real midgame positions and is already
+    // measured by the deterministic Threat worker. Only promote it to a hard
+    // semantic veto when that worker independently marks the network CRITICAL.
     return Math.max(
-      Number(probabilities.TACTICAL_REFUTATION || 0),
-      Number(probabilities.MULTI_AXIS_COUNTERATTACK || 0),
-      Number(probabilities.RESIDUAL_COUNTER_THREAT || 0)
+      tactical,
+      multiAxis,
+      deterministicRisk === 'CRITICAL' ? residual : 0
     );
   }
 
@@ -4810,7 +4818,8 @@
     // position. Convergence therefore uses relative Atomic rank plus two
     // reversed-order global ballots. Critic is a veto for a strong concrete
     // refutation, not an absolute survival threshold.
-    return chosenGapFromTop <= .04
+    return chosenScore >= .25
+      && chosenGapFromTop <= .04
       && chosenProbability >= .34
       && Number(consensus.margin || 0) >= .12
       && (atomicLead >= .04 || Number(consensus.margin || 0) >= .20)
