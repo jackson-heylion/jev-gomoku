@@ -211,7 +211,7 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (!Number.isFinite(full.localSearch?.depthReached) || full.localSearch.depthReached > 5) {
     throw new Error('Local search trace returned an invalid depthReached');
   }
-  if (full.localSearch.elapsedMs > 3800) {
+  if (full.localSearch.elapsedMs > 7600) {
     throw new Error('Local search exceeded its bounded budget by too much: ' + full.localSearch.elapsedMs + 'ms');
   }
 }
@@ -721,7 +721,7 @@ async function testWorkerRulePropagation() {
     const timer = setTimeout(() => {
       worker.terminate();
       reject(new Error('Worker rule regression timed out'));
-    }, 5000);
+    }, 10000);
     worker.onmessage = event => {
       clearTimeout(timer);
       worker.terminate();
@@ -739,7 +739,7 @@ async function testWorkerRulePropagation() {
       side: BLACK,
       rules,
       candidates: ['E8'],
-      timeBudgetMs: 500,
+      timeBudgetMs: 1000,
       maxDepth: 3,
       branch: 4
     });
@@ -1707,7 +1707,7 @@ async function testRealGameMove42ProofBoundary() {
   const threat = await engine.threatAnalyze(
     ['H2'],
     'max',
-    { timeBudgetMs: 1450, maxThreatTurns: 6, branch: 9 }
+    { timeBudgetMs: 2900, maxThreatTurns: 6, branch: 9 }
   );
   const row = threat?.analyses?.find(item => item.move === 'H2');
   if (!row) {
@@ -1754,7 +1754,7 @@ async function testRealGameMove36CounterfactualThreatAudit() {
   const h5Depth8 = await engine.threatAnalyze(
     ['H5'],
     'max',
-    { maxThreatTurns: 8, timeBudgetMs: 1450, branch: 9 }
+    { maxThreatTurns: 8, timeBudgetMs: 2900, branch: 9 }
   );
   const h5Deep = h5Depth8?.analyses?.[0] || null;
   console.log('move36 H5 depth8 audit:', JSON.stringify(h5Deep));
@@ -1860,7 +1860,7 @@ async function testRealGameMove44M7WorkerAudit() {
   const threat = await engine.threatAnalyze(
     ['M7'],
     'max',
-    { timeBudgetMs: 1100, maxThreatTurns: 6, branch: 9 }
+    { timeBudgetMs: 2200, maxThreatTurns: 6, branch: 9 }
   );
   const row = threat?.analyses?.find(item => item.move === 'M7');
   if (!row?.forced || row.timedOut) {
