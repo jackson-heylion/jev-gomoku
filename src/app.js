@@ -5166,10 +5166,26 @@
 
     const deepCandidates = candidates.slice(0, Math.min(5, candidates.length));
     const threatCandidates = selectMaxThreatCandidates(candidates, 6);
-    updateApiState('busy', 'Jev Max：Deep 与 Threat Worker 并行准备证据…');
+    const initialThreatKeys = new Set(threatCandidates.map(move => move.key));
+    const speculativeThreatCandidates = candidates
+      .filter(move => !initialThreatKeys.has(move.key))
+      .slice(0, 2);
+
+    updateApiState('busy', 'Jev Max：Deep / Threat 长驻 Worker 并行准备证据…');
+    const deepPromise = runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel');
+    const threatPromise = runThreatWorkerAnalysis(threatCandidates, 'max', 'jev_max_parallel');
+    const speculativeThreatPromise = speculativeThreatCandidates.length
+      ? runThreatWorkerAnalysis(
+          speculativeThreatCandidates,
+          'max',
+          'jev_max_speculative_tail',
+          { timeBudgetMs: 850, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 8 }
+        )
+      : Promise.resolve(null);
+
     const [deepAnalysis, initialThreatAnalysis] = await Promise.all([
-      runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel'),
-      runThreatWorkerAnalysis(threatCandidates, 'max', 'jev_max_parallel')
+      deepPromise,
+      threatPromise
     ]);
     let threatAnalysis = initialThreatAnalysis;
 
@@ -5184,9 +5200,6 @@
     candidates = preAtomicFrontier.candidates;
     threatAnalysis = preAtomicFrontier.threatAnalysis;
 
-    // If every normal main candidate is already hard-proved losing, do not
-    // spend Atomic/Pairwise/Final requests ranking known losses. Search a
-    // bounded rescue universe first; this rare tactical path is sequential.
     if (allMaxCandidatesHardLost(candidates)) {
       const rescue = await runMaxRescueSweep(context, candidates, deepAnalysis, threatAnalysis);
       if (rescue?.decisionTrace?.requestShape) {
@@ -5196,7 +5209,6 @@
       return rescue;
     }
 
-    // A proven VCF set or Threat-space filter may collapse to one exact choice.
     if (candidates.length === 1) {
       return deterministicMaxResult(
         context, candidates, candidates[0].key, deepAnalysis, threatAnalysis,
@@ -5204,20 +5216,35 @@
       );
     }
 
-    let atomicPayload = buildMaxAtomicPayload(context, candidates);
-    let atomicTokens = estimatePayloadTokens(atomicPayload);
-    if (Number.isFinite(atomicTokens) && atomicTokens > 7000 && candidates.length > 6) {
-      // Payload is a browser/network safety boundary too. Prefer a bounded 6-candidate
-      // universe over sending an oversized 8-candidate request.
-      candidates = candidates.slice(0, 6);
-      atomicPayload = buildMaxAtomicPayload(context, candidates);
-      atomicTokens = estimatePayloadTokens(atomicPayload);
+    let hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
+    let wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
+    let speculativePool = candidates.slice(0, Math.min(6, candidates.length));
+    let fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+    let fanoutTokens = estimatePayloadTokens(fanout.payload);
+
+    // Keep the main candidate recall intact when possible. First reduce only
+    // speculative comparisons; if the shared-state payload still crosses the
+    // historical hard target, fall back to the existing six-candidate ceiling.
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
+      speculativePool = candidates.slice(0, Math.min(4, candidates.length));
+      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
     }
-    updateApiState('busy', 'Jev Max：Atomic 独立评估候选…');
-    const atomicData = await callJev(atomicPayload);
-    const atomic = atomicTraceFor(candidates, atomicData?.answers || {});
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && candidates.length > 6) {
+      candidates = candidates.slice(0, 6);
+      hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
+      wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
+      speculativePool = candidates.slice(0, Math.min(6, candidates.length));
+      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
+    }
+
+    updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / Critic…');
+    const fanoutData = await callJev(fanout.payload);
+    const atomic = atomicTraceFor(candidates, fanoutData?.answers || {});
     const atomicCandidateCount = candidates.length;
-    const recallChoice = String(atomicData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
+    const recallChoice = String(fanoutData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
+    const globalBest = compactAnswer(fanoutData?.answers?.global_best);
 
     let atomicTop4 = [...candidates]
       .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
@@ -5225,7 +5252,12 @@
       .slice(0, Math.min(4, candidates.length));
 
     const preCoverageCandidates = [...candidates];
-    const coverage = await closeMaxThreatCoverage(candidates, atomicTop4, threatAnalysis);
+    const coverage = await closeMaxThreatCoverage(
+      candidates,
+      atomicTop4,
+      threatAnalysis,
+      speculativeThreatPromise
+    );
     candidates = coverage.candidates;
     threatAnalysis = coverage.threatAnalysis;
     atomicTop4 = [...candidates]
@@ -5241,12 +5273,39 @@
         deepAnalysis,
         threatAnalysis,
         {
-          data: atomicData,
+          data: fanoutData,
           trace: atomic,
           count: atomicCandidateCount,
-          tokens: atomicTokens
+          tokens: fanoutTokens
         }
       );
+    }
+
+    if (candidates.length === 1) {
+      const result = deterministicMaxResult(
+        context,
+        candidates,
+        candidates[0].key,
+        deepAnalysis,
+        threatAnalysis,
+        'post_fanout_threat_single'
+      );
+      const client = aggregateJevClient(fanoutData);
+      result.model = fanoutData?.model || settings.model;
+      result.usage = fanoutData?.usage || null;
+      result.client = client;
+      result.decisionTrace.atomic = atomic;
+      result.decisionTrace.recallCheck = compactAnswer(fanoutData?.answers?.recall_check);
+      result.decisionTrace.globalBest = globalBest;
+      Object.assign(result.decisionTrace.requestShape, {
+        logicalRequests: 1,
+        httpRequests: client.attempts,
+        fanoutPairwiseCount: fanout.pairs.length * 2,
+        fanoutCriticCount: fanout.speculativePool.length,
+        payloadEstimatedInputTokens: [fanoutTokens].filter(Number.isFinite)
+      });
+      result.stageNote = `Jev Max：Fan-Out 后 Threat 证明收敛到唯一候选 ${candidates[0].key}（1 次 Jev 请求）`;
+      return result;
     }
 
     const pairwiseThreatCoverageComplete = atomicTop4.every(move =>
@@ -5256,41 +5315,11 @@
       throw new Error('Jev Max Threat coverage closure invariant failed before Pairwise');
     }
 
-    const tournament = buildPairwisePayload(atomicTop4);
-    tournament.payload.state.task = 'Jev Max stage 2: order-balanced pairwise tournament plus adversarial refutation analysis.';
-    tournament.payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
-    tournament.payload.state.atomic_results = Object.fromEntries(
-      atomicTop4.map(move => [move.key, move.atomicJudgement || null])
-    );
-    addCriticQuestions(tournament.payload.questions, atomicTop4);
-
-    let wildcardPool = [];
-    const hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
-    if (recallChoice === 'OTHER') {
-      wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
-      if (wildcardPool.length) {
-        tournament.payload.state.wildcard_pool = wildcardPool.map(move => move.key);
-        tournament.payload.questions.wildcard_pick = {
-          type: 'choice',
-          instructions: 'The Atomic recall audit requested OTHER. Choose one alternative from this bounded legal wildcard pool by inspecting the shared full board. This is a proposal only; deterministic legality and immediate-loss checks run afterward.',
-          criteria: Object.fromEntries(wildcardPool.map(move => [
-            move.key,
-            'Unranked legal alternative; inspect board geometry directly.'
-          ]))
-        };
-      }
-    }
-
-    const pairwiseTokens = estimatePayloadTokens(tournament.payload);
-    updateApiState('busy', 'Jev Max：Pairwise 双向对决与 Critic 反驳分析…');
-    const pairwiseData = await callJev(tournament.payload);
-    const pairwise = scorePairwiseTournament(atomicTop4, tournament.pairs, pairwiseData?.answers || {});
-    const critic = maxCriticTrace(atomicTop4, pairwiseData?.answers || {});
-    let ranked = pairwiseRank(atomicTop4);
-
+    const wildcardChoice = recallChoice === 'OTHER'
+      ? String(fanoutData?.answers?.wildcard_pick?.choice || '').toUpperCase()
+      : '';
     let wildcard = null;
     let wildcardValidation = null;
-    const wildcardChoice = String(pairwiseData?.answers?.wildcard_pick?.choice || '').toUpperCase();
     if (wildcardChoice) {
       const proposed = wildcardPool.find(move => move.key === wildcardChoice);
       const checked = await validateWildcardForMax(proposed, threatAnalysis);
@@ -5302,51 +5331,124 @@
       }
     }
 
-    let finalists = ranked.slice(0, Math.min(2, ranked.length));
-    if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
-      finalists = [...finalists, wildcard].slice(0, 3);
-    }
+    const atomicTopKeys = new Set(atomicTop4.map(move => move.key));
+    const speculativePoolKeys = new Set(fanout.speculativePool);
+    const expectedPairs = atomicTop4.length * (atomicTop4.length - 1) / 2;
+    let usedPairs = fanout.pairs.filter(pair =>
+      atomicTopKeys.has(pair.a) && atomicTopKeys.has(pair.b)
+    );
+    const fanoutCovered = atomicTop4.every(move => speculativePoolKeys.has(move.key))
+      && usedPairs.length === expectedPairs;
 
-    const converged = !wildcard && highConfidenceMaxConvergence(ranked);
-    let finalData = null;
-    let answer;
-    let finalChoice;
+    let pairwise = [];
+    let critic = [];
+    let ranked = [];
+    let finalists = [];
+    let answer = null;
+    let finalChoice = null;
+    let secondData = null;
+    let secondTokens = null;
+    let decisionAuthority = null;
+    let pairwiseSource = 'speculative_fanout';
 
-    if (converged) {
-      answer = pairwiseAnswer(ranked);
-      finalChoice = answer.choice;
+    if (fanoutCovered) {
+      pairwise = scorePairwiseTournament(atomicTop4, usedPairs, fanoutData?.answers || {});
+      critic = maxCriticTrace(atomicTop4, fanoutData?.answers || {});
+      ranked = pairwiseRank(atomicTop4);
+      finalists = ranked.slice(0, Math.min(2, ranked.length));
+      if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
+        finalists = [...finalists, wildcard].slice(0, 3);
+      }
+
+      const converged = !wildcard && highConfidenceMaxConvergence(ranked, globalBest);
+      if (converged) {
+        answer = pairwiseAnswer(ranked);
+        finalChoice = answer.choice;
+        decisionAuthority = 'jev_max_fanout_convergence';
+      } else {
+        const finalPayload = buildMaxFinalPayload(finalists, context, deepAnalysis, threatAnalysis);
+        secondTokens = estimatePayloadTokens(finalPayload);
+        updateApiState('busy', 'Jev Max：证据存在分歧，执行第 2 次最终裁决…');
+        secondData = await callJev(finalPayload);
+        const raw = secondData?.answers?.best_move;
+        if (!raw || typeof raw.choice !== 'string') {
+          throw new Error('Jev Max 最终响应中缺少 answers.best_move.choice');
+        }
+        const finalistKeys = new Set(finalists.map(move => move.key));
+        finalChoice = raw.choice.toUpperCase();
+        if (!finalistKeys.has(finalChoice)) {
+          throw new Error(`Jev Max 返回候选集之外的落点：${raw.choice}`);
+        }
+        const probabilities = raw.probabilities && typeof raw.probabilities === 'object'
+          ? Object.fromEntries(Object.entries(raw.probabilities)
+              .filter(([key]) => finalistKeys.has(String(key).toUpperCase()))
+              .map(([key, value]) => [String(key).toUpperCase(), Number(value)]))
+          : { [finalChoice]: 1 };
+        answer = {
+          ...raw,
+          choice: finalChoice,
+          confidence: Number.isFinite(raw.confidence)
+            ? raw.confidence
+            : Number.isFinite(Number(probabilities[finalChoice])) ? Number(probabilities[finalChoice]) : null,
+          probabilities
+        };
+        decisionAuthority = 'jev_max_final';
+      }
     } else {
-      const finalPayload = buildMaxFinalPayload(finalists, context, deepAnalysis, threatAnalysis);
-      const finalTokens = estimatePayloadTokens(finalPayload);
-      updateApiState('busy', 'Jev Max：汇总证据并进行最终裁决…');
-      finalData = await callJev(finalPayload);
-      const raw = finalData?.answers?.best_move;
-      if (!raw || typeof raw.choice !== 'string') {
-        throw new Error('Jev Max 最终响应中缺少 answers.best_move.choice');
-      }
-      finalChoice = raw.choice.toUpperCase();
-      const finalistKeys = new Set(finalists.map(move => move.key));
-      if (!finalistKeys.has(finalChoice)) {
-        throw new Error(`Jev Max 返回候选集之外的落点：${raw.choice}`);
-      }
-      const probabilities = raw.probabilities && typeof raw.probabilities === 'object'
+      // Rare difficult path: Atomic promoted a candidate outside the speculative
+      // top-six pool. Resolve Pairwise/Critic and a final best-move vote together
+      // in the second and final request, preserving the two-request ceiling.
+      const resolution = buildMaxResolutionPayload(
+        context,
+        atomicTop4,
+        fanoutData?.answers || {},
+        wildcard
+      );
+      secondTokens = estimatePayloadTokens(resolution.payload);
+      updateApiState('busy', 'Jev Max：Atomic 改写决赛池，第 2 次 Fan-Out 解决分歧…');
+      secondData = await callJev(resolution.payload);
+      usedPairs = resolution.pairs;
+      pairwise = scorePairwiseTournament(atomicTop4, resolution.pairs, secondData?.answers || {});
+      critic = maxCriticTrace(atomicTop4, secondData?.answers || {});
+      ranked = pairwiseRank(atomicTop4);
+      pairwiseSource = 'resolution_fanout';
+
+      const raw = secondData?.answers?.best_move;
+      const resolutionKeys = new Set(resolution.candidates.map(move => move.key));
+      let rawChoice = String(raw?.choice || '').toUpperCase();
+      if (!resolutionKeys.has(rawChoice)) rawChoice = ranked[0]?.key || resolution.candidates[0]?.key;
+      const rawProbabilities = raw?.probabilities && typeof raw.probabilities === 'object'
         ? Object.fromEntries(Object.entries(raw.probabilities)
-            .filter(([key]) => finalistKeys.has(String(key).toUpperCase()))
+            .filter(([key]) => resolutionKeys.has(String(key).toUpperCase()))
             .map(([key, value]) => [String(key).toUpperCase(), Number(value)]))
-        : { [finalChoice]: 1 };
-      answer = {
-        ...raw,
-        choice: finalChoice,
-        confidence: Number.isFinite(raw.confidence)
+        : { [rawChoice]: 1 };
+      const resolutionAnswer = {
+        ...(raw || {}),
+        choice: rawChoice,
+        confidence: Number.isFinite(raw?.confidence)
           ? raw.confidence
-          : Number.isFinite(Number(probabilities[finalChoice])) ? Number(probabilities[finalChoice]) : null,
-        probabilities
+          : Number.isFinite(Number(rawProbabilities[rawChoice])) ? Number(rawProbabilities[rawChoice]) : null,
+        probabilities: rawProbabilities
       };
-      finalData.__maxEstimatedTokens = finalTokens;
+
+      if (
+        !wildcard
+        && ranked[0]
+        && resolutionAnswer.choice === ranked[0].key
+        && highConfidenceMaxConvergence(ranked, resolutionAnswer)
+      ) {
+        answer = pairwiseAnswer(ranked);
+      } else {
+        answer = resolutionAnswer;
+      }
+      finalChoice = answer.choice;
+      finalists = resolution.candidates;
+      decisionAuthority = 'jev_max_resolution_fanout';
     }
 
     const final = finalists.find(move => move.key === finalChoice)
-      || ranked.find(move => move.key === finalChoice);
+      || ranked.find(move => move.key === finalChoice)
+      || candidates.find(move => move.key === finalChoice);
     if (!final) throw new Error('Jev Max 最终选择无法映射到合法候选');
 
     const finalCandidates = [
@@ -5355,14 +5457,10 @@
       ...(wildcard && !candidates.some(move => move.key === wildcard.key) && wildcard.key !== final.key ? [wildcard] : [])
     ].slice(0, maxCandidateLimit());
 
-    const usage = sumUsage(atomicData?.usage, pairwiseData?.usage, finalData?.usage);
-    const client = aggregateJevClient(atomicData, pairwiseData, finalData);
-    const logicalRequests = finalData ? 3 : 2;
-    const estimatedInputTokens = [
-      atomicTokens,
-      pairwiseTokens,
-      finalData?.__maxEstimatedTokens ?? null
-    ].filter(Number.isFinite);
+    const usage = sumUsage(fanoutData?.usage, secondData?.usage);
+    const client = aggregateJevClient(fanoutData, secondData);
+    const logicalRequests = secondData ? 2 : 1;
+    const estimatedInputTokens = [fanoutTokens, secondTokens].filter(Number.isFinite);
 
     return {
       answer,
@@ -5372,7 +5470,7 @@
       mode: 'max',
       forced: context.forced,
       candidates: finalCandidates,
-      model: finalData?.model || pairwiseData?.model || atomicData?.model || settings.model,
+      model: secondData?.model || fanoutData?.model || settings.model,
       usage,
       client,
       decisionTrace: {
@@ -5381,7 +5479,8 @@
           sources: [...(move.recallSources || [])]
         })),
         atomic,
-        recallCheck: compactAnswer(atomicData?.answers?.recall_check),
+        recallCheck: compactAnswer(fanoutData?.answers?.recall_check),
+        globalBest,
         pairwise,
         critic,
         wildcard: {
@@ -5417,30 +5516,42 @@
         } : null,
         preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
         threatCoverage: {
+          speculativeQueued: speculativeThreatCandidates.map(move => move.key),
+          speculativeUsed: Boolean(coverage.speculative),
+          speculativeCandidates: coverage.speculative?.analyses?.map(row => row.move) || [],
+          speculativeElapsedMs: coverage.speculative?.elapsedMs ?? null,
           supplementalTriggered: Boolean(coverage.supplemental),
           supplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
           rejectedIncomplete: coverage.rejectedIncomplete,
           elapsedMs: coverage.supplemental?.elapsedMs ?? null
         },
-        finalDecision: finalData ? compactAnswer(answer) : null,
+        finalDecision: secondData ? compactAnswer(answer) : null,
         requestShape: {
-          decisionAuthority: finalData ? 'jev_max_final' : 'jev_max_pairwise_convergence',
+          decisionAuthority,
           candidateCount: candidates.length,
           atomicCount: atomicCandidateCount,
-          pairwiseCount: tournament.pairs.length * 2,
+          pairwiseCount: usedPairs.length * 2,
           criticCount: atomicTop4.length,
           finalistCount: finalists.length,
           logicalRequests,
           httpRequests: client.attempts,
-          maxWorkers: 2,
+          maxWorkers: HEAVY_WORKER_POOL_SIZE,
+          workerPoolPersistent: true,
+          fanoutSpeculativePool: fanout.speculativePool,
+          fanoutPairwiseCount: fanout.pairs.length * 2,
+          fanoutCriticCount: fanout.speculativePool.length,
+          pairwiseSource,
           payloadEstimatedInputTokens: estimatedInputTokens,
           payloadTokenBudgetTarget: 5000,
           payloadTokenBudgetHard: 7000,
           localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
           localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
           localSearchTimedOut: Boolean(context.localSearch?.timedOut),
+          localTranspositionEntries: context.localSearch?.transpositionEntries ?? null,
+          localTranspositionGeneration: context.localSearch?.transpositionGeneration ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
           threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
+          threatSpeculativeElapsedMs: coverage.speculative?.elapsedMs ?? null,
           threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
           threatSupplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
           threatCoverageRejectedIncomplete: coverage.rejectedIncomplete,
@@ -5463,9 +5574,11 @@
           facts: move.analysis?.facts || null
         }))
       },
-      stageNote: converged
-        ? `Jev Max：Atomic + 双向 Pairwise + Critic 高置信收敛，${logicalRequests} 次 Jev 请求后选择 ${finalChoice}`
-        : `Jev Max：异构候选 → Atomic → 双向 Pairwise/Critic → Final Judge，${logicalRequests} 次 Jev 请求后选择 ${finalChoice}`
+      stageNote: logicalRequests === 1
+        ? `Jev Max：Speculative Fan-Out 单请求收敛，选择 ${finalChoice}`
+        : decisionAuthority === 'jev_max_resolution_fanout'
+          ? `Jev Max：首轮 Fan-Out + 困难局面 Resolution Fan-Out，2 次 Jev 请求后选择 ${finalChoice}`
+          : `Jev Max：首轮 Fan-Out 后证据仍有分歧，第 2 次 Final Judge 选择 ${finalChoice}`
     };
   }
 
