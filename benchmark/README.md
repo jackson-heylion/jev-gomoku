@@ -56,7 +56,7 @@ FINAL MOVE
 - wildcard：额外池 10–16 个，只提议 1 个，必须重新通过本地合法性与一手败着检查。
 - Payload：目标 < 5000 input tokens / 请求，硬目标 < 7000。
 - Deep 若没有完成任何有效 depth：`no_completed_depth + ranking_only`，不能把 `0/-1/-2` 当评估分。
-- mate/forced sentinel：转换成结构化 `forced_result`，不得把超大内部 score 发送给 Jev。
+- mate-like sentinel：转换成结构化 `forced_result` 且标记 `proven=false / advisory=true`，不得把超大内部 score 当作数学证明发送给 Jev；VCF / Threat-space proof 仍单独标记为确定性证据。
 
 ## 核心指标
 
@@ -88,6 +88,7 @@ FINAL MOVE
 8. Top4 Pairwise 不得超过 12 个双向问题，候选 facts 通过共享 state 引用，不重复完整棋盘/证据。
 9. `OTHER` → bounded wildcard → 本地合法/一手败着校验 → final judge 的完整链路。
 10. Jev Max 每回合重型 Worker ≤2、Jev 请求 ≤3、候选 ≤8。
+11. 最近两盘真实棋谱固定位置：`D5 ↔ I6` Local/Deep 分歧召回、Threat-space forced-loss 过滤、VCF proof lock，以及历史 `depth=0` 语义回归。
 
 ## 运行
 
