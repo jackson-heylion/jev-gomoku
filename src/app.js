@@ -17,6 +17,7 @@
   const historyEl = document.getElementById('history');
   const apiIndicator = document.getElementById('apiIndicator');
   const apiLabel = document.getElementById('apiLabel');
+  const apiPhase = document.getElementById('apiPhase');
   const levelBadge = document.getElementById('levelBadge');
   const levelSummary = document.getElementById('levelSummary');
   const jevLiveState = document.getElementById('jevLiveState');
@@ -38,6 +39,7 @@
   const resultTitle = document.getElementById('resultTitle');
   const resultDesc = document.getElementById('resultDesc');
   const resultStats = document.getElementById('resultStats');
+  const resultSummary = document.getElementById('resultSummary');
   const resultCloseBtn = document.getElementById('resultCloseBtn');
   const resultCopyBtn = document.getElementById('resultCopyBtn');
   const resultRestartBtn = document.getElementById('resultRestartBtn');
@@ -270,7 +272,6 @@
       const elapsed = Math.max(0, now - started);
       turnClockLabel.textContent = 'Jev 已思考';
       turnClockValue.textContent = formatElapsed(elapsed);
-      jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
       return;
     }
 
@@ -469,23 +470,26 @@
     apiIndicator.className = 'indicator';
     jevLiveState.className = 'jev-live';
 
+    const meta = publicModeMeta(settings.strengthMode);
+    apiLabel.textContent = meta.name;
+    levelBadge.textContent = meta.badge;
+    levelSummary.textContent = meta.summary;
+
     if (kind === 'busy') {
       apiIndicator.classList.add('busy');
       jevLiveState.classList.add('busy');
       jevLiveState.textContent = '思考中';
+      apiPhase.textContent = text || '正在分析局面…';
     } else if (kind === 'err') {
       apiIndicator.classList.add('err');
       jevLiveState.classList.add('fallback');
       jevLiveState.textContent = '本地接管';
+      apiPhase.textContent = text || 'Jev 暂不可用，本回合由本地引擎接管。';
     } else {
       apiIndicator.classList.add('ok');
       jevLiveState.textContent = '在线';
+      apiPhase.textContent = text || '准备就绪';
     }
-
-    const meta = publicModeMeta(settings.strengthMode);
-    apiLabel.textContent = text || meta.name;
-    levelBadge.textContent = meta.badge;
-    levelSummary.textContent = meta.summary;
   }
 
   function openSettings(force = false) {
@@ -865,6 +869,62 @@
     return !blackForbiddenInfo(r, c).forbidden;
   }
 
+  function winningLineCoords(winner) {
+    if (winner === EMPTY || !moves.length) return [];
+    const last = moves[moves.length - 1];
+    if (!last || last.color !== winner) return [];
+
+    for (const [dr, dc] of RENJU_DIRS) {
+      const run = contiguousRunCells(last.r, last.c, winner, dr, dc);
+      const wins = winner === BLACK && activeRuleConfig().overline
+        ? run.length === 5
+        : run.length >= 5;
+      if (wins) return run.map(([r, c]) => coord(r, c));
+    }
+    return [];
+  }
+
+  function buildGameSummary(winner) {
+    const human = playerColor();
+    const ai = aiColor();
+    const lengthLabel = moves.length <= 20 ? '短局' : moves.length <= 45 ? '中盘结束' : '长局';
+    const lines = [];
+
+    if (winner === human) {
+      lines.push(`你执${colorShortZh(human)}获胜，共 ${moves.length} 手，属于${lengthLabel}。`);
+    } else if (winner === ai) {
+      lines.push(`Jev 执${colorShortZh(ai)}获胜，共 ${moves.length} 手，属于${lengthLabel}。`);
+    } else {
+      lines.push(`本局共 ${moves.length} 手，双方战成平局。`);
+    }
+
+    const winLine = winningLineCoords(winner);
+    if (winLine.length) {
+      const last = moves[moves.length - 1];
+      lines.push(`终局：${last.coord} 落下后形成 ${winLine.join(' → ')} 连线。`);
+    }
+
+    const decisions = jevDecisionLog.filter(item => item.moveNo <= moves.length);
+    if (decisions.length) {
+      const timed = decisions
+        .map(item => Number(item.thinkDurationMs))
+        .filter(Number.isFinite);
+      const avgThink = timed.length
+        ? timed.reduce((sum, ms) => sum + ms, 0) / timed.length
+        : null;
+      const forcedCount = decisions.filter(item => item.forced).length;
+      const fallbackCount = decisions.filter(item => item.mode === 'local' || item.fallbackReason).length;
+      let decisionLine = `Jev 共完成 ${decisions.length} 次落子决策`;
+      if (avgThink != null) decisionLine += `，平均思考 ${formatElapsed(avgThink)}`;
+      if (forcedCount) decisionLine += `，其中 ${forcedCount} 次属于强制战术处理`;
+      decisionLine += '。';
+      lines.push(decisionLine);
+      if (fallbackCount) lines.push(`本局有 ${fallbackCount} 次决策使用了本地降级或回退路径。`);
+    }
+
+    return lines.join('\n');
+  }
+
   function hideResultModal() {
     resultModal.classList.remove('show');
   }
@@ -883,6 +943,7 @@
         ? `Jev 执${colorShortZh(ai)}完成五连，赢下了这一局。`
         : '棋盘已下满，你与 Jev 战成平局。';
     resultStats.textContent = `共 ${moves.length} 手 · ${modeLabel} · ${ruleSummaryText()}`;
+    resultSummary.textContent = buildGameSummary(winner);
     resultCopyBtn.textContent = '复制棋谱';
     resultModal.classList.add('show');
   }
@@ -919,6 +980,7 @@
     thinkingStartedAt = null;
     lastThinkMs = null;
     lastThinkDuration.textContent = '—';
+    resultSummary.textContent = '等待对局结束。';
     hideResultModal();
     canvas.classList.remove('disabled');
     jevMove.textContent = '—';
