@@ -1744,6 +1744,13 @@ async function testRealGameMove36CounterfactualThreatAudit() {
     const threat = await engine.threatAnalyze([key], 'max');
     rows[key] = threat?.analyses?.find(item => item.move === key) || null;
   }
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const h5Depth8 = await engine.threatAnalyze(
+    ['H5'],
+    'max',
+    { maxThreatTurns: 8, timeBudgetMs: 1450, branch: 9 }
+  );
+  console.log('move36 H5 depth8 audit:', JSON.stringify(h5Depth8?.analyses?.[0] || null));
   console.log('move36 counterfactual threat audit:', JSON.stringify(rows));
   if (!rows.H5 || !rows.L5) {
     throw new Error('Move-36 counterfactual audit did not return core candidates');
