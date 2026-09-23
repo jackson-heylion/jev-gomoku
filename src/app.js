@@ -4462,6 +4462,46 @@
     return payload;
   }
 
+  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = []) {
+    const payload = buildMaxAtomicPayload(context, candidates);
+    const tournament = buildPairwisePayload(speculativePool);
+
+    payload.state.task = 'Jev Max speculative fan-out: atomic evaluation plus precomputed pairwise/critic evidence for the likely finalist pool.';
+    payload.state.fanout_policy = 'Atomic answers determine the actual Top 4. Pairwise/Critic answers are speculative and are only consumed when their candidate is still eligible after deterministic Threat coverage. Ignore all hard-proved losing or illegal candidates.';
+    payload.state.speculative_pool = speculativePool.map(move => move.key);
+    payload.state.pairwise_policy = tournament.payload.state.pairwise_policy;
+    payload.state.critic_policy = MAX_CRITIC_POLICY;
+    Object.assign(payload.questions, tournament.payload.questions);
+    addCriticQuestions(payload.questions, speculativePool);
+
+    payload.questions.global_best = {
+      type: 'choice',
+      instructions: 'Independently choose the strongest supplied main candidate from the full board and candidate_facts. This is a consensus signal, not permission to override deterministic proof.',
+      criteria: Object.fromEntries(candidates.map(move => [
+        move.key,
+        `See candidate_facts.${move.key}`
+      ]))
+    };
+
+    if (wildcardPool.length) {
+      payload.state.wildcard_pool = wildcardPool.map(move => move.key);
+      payload.questions.wildcard_pick = {
+        type: 'choice',
+        instructions: 'If recall_check is OTHER, propose the strongest alternative from state.wildcard_pool; otherwise this answer will be ignored.',
+        criteria: Object.fromEntries(wildcardPool.map(move => [
+          move.key,
+          'Bounded legal alternative; inspect full-board geometry directly.'
+        ]))
+      };
+    }
+
+    return {
+      payload,
+      pairs: tournament.pairs,
+      speculativePool: speculativePool.map(move => move.key)
+    };
+  }
+
   function atomicTraceFor(candidates, answers) {
     return candidates.map(move => {
       const answer = answers?.[`judge_${move.key}`] || null;
@@ -4559,16 +4599,28 @@
     );
   }
 
-  function highConfidenceMaxConvergence(ranked) {
+  function highConfidenceMaxConvergence(ranked, globalBest = null) {
     if (ranked.length < 2) return false;
     const first = ranked[0];
     const second = ranked[1];
     const pairLead = Number(first.pairScore || 0) - Number(second.pairScore || 0);
     const expectedWins = Math.max(1, Math.min(3, ranked.length - 1));
-    return first.pairWins >= expectedWins
+    const strict = first.pairWins >= expectedWins
       && pairLead >= 1.35
       && Number(first.atomicScore || 0) >= .82
       && criticSurvivalProbability(first) >= .72;
+    if (strict) return true;
+
+    const globalChoice = String(globalBest?.choice || '').toUpperCase();
+    const globalConfidence = Number.isFinite(globalBest?.confidence)
+      ? Number(globalBest.confidence)
+      : Number(globalBest?.probabilities?.[first.key] || 0);
+    return globalChoice === first.key
+      && globalConfidence >= .55
+      && first.pairWins >= Math.max(1, expectedWins - 1)
+      && pairLead >= .75
+      && Number(first.atomicScore || 0) >= .72
+      && criticSurvivalProbability(first) >= .65;
   }
 
   function pairwiseAnswer(ranked) {
