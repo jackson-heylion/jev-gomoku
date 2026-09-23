@@ -1002,16 +1002,14 @@
     const color = current;
     const stoneClass = colorCss(color);
     if (thinking) {
-      const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
-      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span class="thinking">${actor} 正在思考</span>`;
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span class="thinking">Jev 正在思考</span>`;
       turnHint.textContent = '正在分析局面，请稍候';
     } else if (current === playerColor()) {
       turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span>轮到你了</span>`;
       turnHint.textContent = `点击棋盘交叉点落下一枚${colorNameZh(color)}`;
     } else {
-      const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
-      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span>${actor} 的回合</span>`;
-      turnHint.textContent = `${actor} 即将开始思考`;
+      turnText.innerHTML = `<span class="stone-dot ${stoneClass}"></span><span>Jev 的回合</span>`;
+      turnHint.textContent = 'Jev 即将开始思考';
     }
     gameMeta.textContent = `第 ${nextNo} 手 · ${colorNameZh(color)}`;
     lastMoveText.textContent = moves.length ? `最后落子：${moves[moves.length - 1].coord}` : '尚未落子';
@@ -2838,7 +2836,7 @@
   }
 
   function localOnlyDecision(mode = 'expert') {
-    const engineMode = mode === 'strong' ? 'strong' : 'expert';
+    const engineMode = mode === 'max' ? 'max' : mode === 'grandmaster' ? 'grandmaster' : 'expert';
     const context = buildAdvancedCandidates(engineMode);
     const candidates = context.candidates;
     if (!candidates.length) throw new Error('本地引擎没有生成合法候选点');
@@ -2892,7 +2890,7 @@
     const base = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
     return {
       ...base,
-      depth: mode === 'strong' ? Math.max(5, base.depth + 2) : Math.max(7, base.depth + 2),
+      depth: mode === 'max' ? Math.max(8, base.depth + 2) : Math.max(7, base.depth + 2),
       branch: Math.max(8, base.branch + 1),
       root: 2,
       semantic: 2,
