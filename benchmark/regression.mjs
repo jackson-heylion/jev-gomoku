@@ -1066,6 +1066,173 @@ async function testJevMaxPipelineAndWildcard() {
   }
 }
 
+/**
+ * Real position from the recent Jev/Local game: Local preferred D5 while the
+ * completed deeper search preferred I6. Keep both moves in the candidate recall
+ * so Jev Max can actually override instead of losing the alternative upstream.
+ */
+async function testRecentGameLocalDeepDisagreementRecall() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Recent-game recall regression must not call Jev');
+    }
+  });
+  const sequence = [
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  const keys = new Set(context.candidates.map(move => move.key));
+  if (!keys.has('I6')) {
+    throw new Error('Jev Max candidate recall lost the real-game Deep/Jev alternative I6');
+  }
+  if (!keys.has('D5')) {
+    throw new Error('Jev Max candidate recall lost the real-game Local alternative D5');
+  }
+
+  const deep = await engine.deepAnalyze(['D5','I6','F9','E10'], 'max');
+  if (deep.status === 'completed' && Number(deep.depthReached || 0) > 0) {
+    const ranking = deep.scores.map(item => item.move);
+    if (ranking[0] !== 'I6') {
+      throw new Error('Real-game deep-search regression no longer prefers I6 over D5: ' + ranking.join(','));
+    }
+  } else if (deep.status !== 'no_completed_depth' && deep.status !== 'timeout') {
+    throw new Error('Unexpected real-game deep-search status: ' + deep.status);
+  }
+}
+
+/**
+ * Real position from the same game: Threat-space proved L7 loses by force.
+ * That mathematical proof must remain visible and L7 must not survive the
+ * deterministic filter into Jev's final candidate set.
+ */
+async function testRecentGameThreatForcedLossFilter() {
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        let choice;
+        if (id === 'recall_check') choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        else if (id.startsWith('judge_')) choice = keys.includes('GOOD') ? 'GOOD' : keys[0];
+        else if (id.startsWith('critic_')) choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        else choice = keys[0];
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-real-threat',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  const sequence = [
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7','I6','J5','J6','J9'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const result = await engine.jevMax();
+  const threat = result.decisionTrace?.preJevThreatSearch;
+  const l7 = threat?.analyses?.find(item => item.move === 'L7');
+  if (l7 && !l7.forced) {
+    throw new Error('Real-game L7 threat evidence exists but is no longer a forced loss');
+  }
+  if (l7?.forced && result.candidates.some(candidate => candidate.key === 'L7')) {
+    throw new Error('Threat-space proven losing L7 survived the Jev Max hard filter');
+  }
+}
+
+/**
+ * Real position from the recent depth=0 game. Depending on runner speed the
+ * worker may now finish depth >=3; if it does not, it must return ranking-only
+ * semantics and no fake 0/-1/-2 numeric evaluations.
+ */
+async function testRecentGameDepthZeroPositionSemantics() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Depth-zero real-position regression must not call Jev');
+    }
+  });
+  const sequence = [
+    'H8','G9','H9','H10','F8','G8','I11','G10','G7','G11','G12','F10','I10','D10','E10'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const deep = await engine.deepAnalyze(['I9','F12','E9','H12'], 'grandmaster');
+  if (Number(deep.depthReached || 0) === 0) {
+    if (deep.status !== 'no_completed_depth' || deep.rankingOnly !== true) {
+      throw new Error('Historical depth=0 position must use no_completed_depth ranking-only semantics');
+    }
+    for (const row of deep.scores || []) {
+      if (Number.isFinite(row.score)) {
+        throw new Error('Historical depth=0 position leaked a fake numeric score for ' + row.move);
+      }
+      if (!Number.isFinite(row.fallbackRank)) {
+        throw new Error('Historical depth=0 position lost its fallback rank for ' + row.move);
+      }
+    }
+  } else if (deep.status !== 'completed' || Number(deep.depthReached) < 3) {
+    throw new Error('Unexpected deep result for historical depth=0 position: ' + JSON.stringify(deep));
+  }
+}
+
+/**
+ * Real late-game position: I5 starts the already-proven VCF sequence. Jev Max
+ * may compare proven VCF alternatives, but it must never escape the proven set.
+ */
+async function testRecentGameVcfProofLock() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        const choice = id === 'recall_check' && keys.includes('MAIN_SET')
+          ? 'MAIN_SET'
+          : id.startsWith('judge_') && keys.includes('GOOD')
+            ? 'GOOD'
+            : id.startsWith('critic_') && keys.includes('SURVIVES_BEST_REPLY')
+              ? 'SURVIVES_BEST_REPLY'
+              : keys[keys.length - 1];
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-real-vcf',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  const sequence = [
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7','I6','J5','J6',
+    'J9','F9','E10','H11','L7','M6','E8','E9','H9','K6','L6','I12','J13','D9','C9','F8','J10','J11','F6','D8','D10'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const result = await engine.jevMax();
+  const chosen = result.candidates.find(candidate => candidate.key === result.finalChoice);
+  if (!chosen?.analysis?.vcf) {
+    throw new Error('Jev Max escaped the real-game proven VCF set at move 42: ' + result.finalChoice);
+  }
+  if (result.candidates.some(candidate => candidate.analysis?.vcf !== true)) {
+    throw new Error('Non-VCF candidate survived after a proven VCF candidate existed');
+  }
+  if (result.finalChoice !== 'I5') {
+    throw new Error('Real-game VCF regression expected I5, got ' + result.finalChoice);
+  }
+  if (result.candidates.length === 1 && requestCount !== 0) {
+    throw new Error('Single proven VCF candidate should not spend a Jev request');
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1082,6 +1249,10 @@ function testCoordinateHelpers() {
   }
 }
 
+await testRecentGameLocalDeepDisagreementRecall();
+await testRecentGameThreatForcedLossFilter();
+await testRecentGameDepthZeroPositionSemantics();
+await testRecentGameVcfProofLock();
 await testDeepEvidenceSemantics();
 await testJevMaxPayloadBounds();
 await testJevMaxPipelineAndWildcard();
