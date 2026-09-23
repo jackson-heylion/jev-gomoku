@@ -254,10 +254,9 @@
     if (thinking) {
       const started = thinkingStartedAt ?? turnStartedAt;
       const elapsed = Math.max(0, now - started);
-      const actor = settings.strengthMode !== 'local' ? 'Jev' : '本地引擎';
-      turnClockLabel.textContent = `${actor} 已思考`;
+      turnClockLabel.textContent = 'Jev 已思考';
       turnClockValue.textContent = formatElapsed(elapsed);
-      if (settings.strengthMode !== 'local') jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
+      jevLiveState.textContent = `思考中 · ${formatElapsedCompact(elapsed)}`;
       return;
     }
 
@@ -266,15 +265,25 @@
       turnClockValue.textContent = formatElapsed(now - turnStartedAt);
       return;
     }
-    turnClockLabel.textContent = settings.strengthMode !== 'local' ? '等待 Jev' : '等待本地引擎';
+    turnClockLabel.textContent = '等待 Jev';
     turnClockValue.textContent = formatElapsed(now - turnStartedAt);
   }
 
   function loadSettings() {
     const player = localStorage.getItem('jev_gomoku_player_color');
+    const storedStrength = localStorage.getItem('jev_gomoku_strength');
+    const migratedStrength = storedStrength === 'local' || storedStrength === 'strong'
+      ? 'grandmaster'
+      : storedStrength;
+    const strengthMode = ['jev', 'expert', 'grandmaster', 'max'].includes(migratedStrength)
+      ? migratedStrength
+      : 'max';
+    if (storedStrength && storedStrength !== strengthMode) {
+      localStorage.setItem('jev_gomoku_strength', strengthMode);
+    }
     return {
       model: localStorage.getItem('jev_gomoku_model') || 'jev-latest',
-      strengthMode: localStorage.getItem('jev_gomoku_strength') || 'grandmaster',
+      strengthMode,
       playerColor: player === 'white' ? 'white' : 'black',
       forbidOverline: storedBool('jev_gomoku_rule_overline', true),
       forbidFourFour: storedBool('jev_gomoku_rule_four_four', true),
@@ -326,9 +335,9 @@
   function saveSettings() {
     if (testController) testController.abort();
     settings.model = modelInput.value.trim() || 'jev-latest';
-    settings.strengthMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(strengthModeInput.value)
+    settings.strengthMode = ['jev', 'expert', 'grandmaster', 'max'].includes(strengthModeInput.value)
       ? strengthModeInput.value
-      : 'grandmaster';
+      : 'max';
     readPreGameControls();
     persistSettings();
     settingsModal.classList.remove('show');
@@ -389,9 +398,16 @@
   function publicModeMeta(mode) {
     if (mode === 'local') {
       return {
-        name: '本地引擎',
-        badge: '本地',
-        summary: '不使用 Jev：只运行传统搜索和战术判断。'
+        name: '本地接管',
+        badge: '降级',
+        summary: '仅作为 Jev 不可用时的内部安全降级，不提供用户选择。'
+      };
+    }
+    if (mode === 'max') {
+      return {
+        name: 'Jev Max',
+        badge: 'MAX',
+        summary: '多算法异构召回 + Atomic + Pairwise + 对手最强回复 + Critic，由 Jev 做高信息量最终裁决。'
       };
     }
     if (mode === 'jev') {
@@ -399,13 +415,6 @@
         name: 'Jev 直觉',
         badge: '实验',
         summary: 'Jev 更直接地从合法落点中选择；Jev 感更强，但不代表棋力更强。'
-      };
-    }
-    if (mode === 'strong') {
-      return {
-        name: 'Jev 快速',
-        badge: '等级 2',
-        summary: '速度优先：本地搜索提供候选与证据，由 Jev 做最终落子决定。'
       };
     }
     if (mode === 'grandmaster') {
@@ -432,7 +441,7 @@
   }
 
   function renderLevelSelection(mode) {
-    const selectedMode = ['local', 'jev', 'strong', 'expert', 'grandmaster'].includes(mode) ? mode : 'grandmaster';
+    const selectedMode = ['jev', 'expert', 'grandmaster', 'max'].includes(mode) ? mode : 'max';
     strengthModeInput.value = selectedMode;
     levelOptionButtons.forEach(button => {
       const selected = button.dataset.mode === selectedMode;
@@ -454,9 +463,6 @@
       apiIndicator.classList.add('err');
       jevLiveState.classList.add('fallback');
       jevLiveState.textContent = '本地接管';
-    } else if (settings.strengthMode === 'local') {
-      jevLiveState.classList.add('off');
-      jevLiveState.textContent = '未启用';
     } else {
       apiIndicator.classList.add('ok');
       jevLiveState.textContent = '在线';
@@ -474,7 +480,7 @@
       return;
     }
     modelInput.value = settings.model;
-    renderLevelSelection(settings.strengthMode || 'grandmaster');
+    renderLevelSelection(settings.strengthMode || 'max');
     syncPreGameControls();
     clearConnectionTest();
     settingsModal.classList.add('show');
@@ -1316,11 +1322,6 @@
 
   const LINE_WEIGHTS = [0, 2, 28, 520, 32000, 1000000000];
   const ENGINE_PRESETS = {
-    strong: {
-      depth: 3, root: 10, branch: 7, semantic: 5, tournament: 3, radius: 2,
-      vcfDepth: 3, vctDepth: 1, localTimeMs: 900, localRootShare: .75,
-      localWeight: .66, pairWeight: .24, atomicWeight: .10
-    },
     expert: {
       depth: 5, root: 14, branch: 7, semantic: 6, tournament: 4, radius: 2,
       vcfDepth: 4, vctDepth: 2, localTimeMs: 2200, localRootShare: .80,
@@ -1330,6 +1331,11 @@
       depth: 4, root: 12, branch: 7, semantic: 6, tournament: 3, radius: 2,
       vcfDepth: 4, vctDepth: 2, localTimeMs: 2400, localRootShare: .85,
       localWeight: .62, pairWeight: .27, atomicWeight: .11
+    },
+    max: {
+      depth: 5, root: 16, branch: 7, semantic: 8, tournament: 4, radius: 2,
+      vcfDepth: 5, vctDepth: 2, localTimeMs: 2500, localRootShare: .82,
+      localWeight: .0, pairWeight: .0, atomicWeight: .0
     }
   };
   const MATE_SCORE = 1e14;
@@ -2091,7 +2097,7 @@
 
   function advancedEngineConfig(mode) {
     const base = ENGINE_PRESETS[mode] || ENGINE_PRESETS.expert;
-    if ((mode === 'expert' || mode === 'grandmaster') && moves.length < 4) {
+    if ((mode === 'expert' || mode === 'grandmaster' || mode === 'max') && moves.length < 4) {
       // Only the first four plies use the shallow opening profile. From ply 5
       // onward Expert/Grandmaster restore their full local search settings;
       // the local wall-clock budget below prevents pathological UI stalls.
@@ -2777,9 +2783,12 @@
     }
 
     const id = ++deepWorkerSequence;
-    const timeBudgetMs = mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400) : mode === 'expert' ? 1500 : 1000;
-    const maxDepth = mode === 'grandmaster' ? 7 : mode === 'expert' ? 7 : 5;
-    const branch = mode === 'grandmaster' ? 7 : mode === 'expert' ? 7 : 6;
+    const timeBudgetMs = mode === 'max'
+      ? (moves.length < 10 ? 1300 : 1800)
+      : mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400)
+        : 1500;
+    const maxDepth = mode === 'max' ? 8 : 7;
+    const branch = mode === 'max' ? 8 : 7;
 
     return await new Promise(resolve => {
       let settled = false;
@@ -2886,9 +2895,11 @@
     }
 
     const id = ++threatWorkerSequence;
-    const timeBudgetMs = moves.length < 10 ? 800 : 1200;
+    const timeBudgetMs = mode === 'max'
+      ? (moves.length < 10 ? 1100 : 1450)
+      : (moves.length < 10 ? 800 : 1200);
     const maxThreatTurns = moves.length < 10 ? 4 : 6;
-    const branch = 8;
+    const branch = mode === 'max' ? 9 : 8;
 
     return await new Promise(resolve => {
       let settled = false;
@@ -3264,6 +3275,7 @@
   }
 
   async function advancedDecision(mode) {
+    if (mode === 'max') return jevMaxDecision();
     if (mode === 'grandmaster') return grandmasterDecision();
     const context = buildAdvancedCandidates(mode);
     const candidates = context.candidates;
@@ -3458,16 +3470,12 @@
     retryBtn.style.display = 'none';
     canvas.classList.add('disabled');
     updateStatus();
-    updateApiState('busy', settings.strengthMode !== 'local'
-      ? '正在为 Jev 分析局面…'
-      : '本地引擎正在思考…');
+    updateApiState('busy', '正在为 Jev 分析局面…');
     requestController = new AbortController();
 
     try {
       let result;
-      if (settings.strengthMode === 'local') {
-        result = localOnlyDecision('expert');
-      } else if (settings.strengthMode === 'jev') {
+      if (settings.strengthMode === 'jev') {
         updateApiState('busy', 'Jev 正在思考…');
         const decision = buildPureJevRequest();
         const data = await callJev(decision.payload);
@@ -3496,7 +3504,7 @@
           stageNote: '纯 Jev（每回合 1 次请求）'
         };
       } else {
-        result = await advancedDecision(settings.strengthMode || 'grandmaster');
+        result = await advancedDecision(settings.strengthMode || 'max');
       }
 
       const parsed = parseCoord(result.finalChoice);
