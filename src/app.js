@@ -2203,6 +2203,8 @@
       let primaryRoots = [];
       let hotspots = [];
       let defensiveHotspots = [];
+      let opponentForkBlocks = [];
+      let counterThreatBlocks = [];
 
       if (ownWins.length) {
         forced = 'win';
@@ -2214,7 +2216,7 @@
         const opponentForks = moves.length >= 16 && !localSearchExpired()
           ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
           : { count: 0, points: [], moves: [] };
-        if (opponentForks.count === 1) {
+        if (opponentForks.count === 1 && mode !== 'max') {
           forced = 'block_fork';
           roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
         } else {
@@ -2224,9 +2226,21 @@
             ? patternHotspots(opponent, 5, cfg.radius)
                 .filter(move => isLegalMoveForColor(move.r, move.c, side))
             : [];
-          // Keep the proven Alpha-Beta root width bounded. Max improves recall by
-          // composing a semantic candidate universe, not by widening every search.
-          roots = mergeRootCandidates(primaryRoots, hotspots, cfg.root);
+          opponentForkBlocks = mode === 'max'
+            ? opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
+          counterThreatBlocks = mode === 'max' && !localSearchExpired()
+            ? forcingExtensions(opponent, 5, cfg.radius)
+                .filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
+          // Keep the Alpha-Beta root width bounded. Jev Max treats a unique
+          // fork-creator as strong defensive evidence, not a mathematical
+          // single-move proof: a second forcing branch may still exist.
+          roots = mergeRootCandidates(
+            mergeRootCandidates(primaryRoots, opponentForkBlocks, cfg.root),
+            hotspots,
+            cfg.root
+          );
         }
       }
 
@@ -2256,6 +2270,8 @@
 
         scored.slice(0, 2).forEach(move => add(move, 'LOCAL_ALPHA_BETA'));
         hotspots.slice(0, 2).forEach(move => add(move, 'PATTERN_EXPERT'));
+        opponentForkBlocks.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_FORK_BLOCK'));
+        counterThreatBlocks.slice(0, 3).forEach(move => add(move, 'COUNTER_THREAT_BLOCK'));
         defensiveHotspots.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_COUNTER_THREAT'));
         scored.slice(2, 5).forEach(move => add(move, 'LOCAL_DEEP_SEED'));
 
