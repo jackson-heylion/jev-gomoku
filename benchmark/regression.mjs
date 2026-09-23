@@ -1082,7 +1082,7 @@ async function testJevMaxPipelineAndWildcard() {
         } else if (id === 'wildcard_pick') {
           choice = keys[0];
         } else if (id === 'best_move') {
-          const candidateEvidence = payload?.state?.candidates || {};
+          const candidateEvidence = payload?.state?.candidates || payload?.state?.candidate_facts || {};
           finalTarget = keys.find(key =>
             Array.isArray(candidateEvidence[key]?.candidate_sources)
             && candidateEvidence[key].candidate_sources.includes('JEV_WILDCARD')
