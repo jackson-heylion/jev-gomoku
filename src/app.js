@@ -1869,6 +1869,32 @@
     return score;
   }
 
+  function directDoubleWinCreators(color, radius = 2, maxCount = Infinity) {
+    const movesFound = [];
+    for (const move of nearbyMoves(radius)) {
+      if (!isLegalMoveForColor(move.r, move.c, color)) continue;
+      board[move.r][move.c] = color;
+      let winningPoints = [];
+      try {
+        if (isWin(move.r, move.c, color)) continue;
+        winningPoints = immediateWins(color, radius);
+      } finally {
+        board[move.r][move.c] = EMPTY;
+      }
+      if (winningPoints.length < 2) continue;
+      movesFound.push({
+        ...move,
+        winningPoints: winningPoints.slice(0, 4).map(point => point.key)
+      });
+      if (movesFound.length >= maxCount) break;
+    }
+    return {
+      count: movesFound.length,
+      points: movesFound.map(move => move.key),
+      moves: movesFound
+    };
+  }
+
   function countForkCreators(color, limit = 10, radius = 2, maxCount = Infinity) {
     let count = 0;
     let complete = true;
@@ -2092,6 +2118,9 @@
     const ownImmediate = winsNow ? 2 : immediateWins(side, cfg.radius).length;
     const oppImmediate = winsNow ? 0 : immediateWins(opponent, cfg.radius).length;
     const forks = winsNow ? {count: 0, points: [], moves: []} : countForkCreators(side, 10, cfg.radius, 3);
+    const opponentDirectDoubleWins = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
+      ? directDoubleWinCreators(opponent, cfg.radius, 2)
+      : { count: 0, points: [], moves: [] };
     const opponentForks = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
       ? countForkCreators(opponent, 12, cfg.radius, 2)
       : { count: 0, points: [], moves: [] };
@@ -2109,6 +2138,7 @@
     let safety = mode === 'max' && !tacticalVerificationComplete ? 'UNVERIFIED_BUDGET' : 'SAFE';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
+    else if (opponentDirectDoubleWins.count >= 1) safety = 'LOSING';
     else if (opponentForks.count >= 1) safety = 'LOSING';
     else if (opponentCounterVCF || opponentCounterVCT) safety = 'TACTICALLY_RISKY';
 
@@ -2144,6 +2174,10 @@
         initiative,
         own_immediate_winning_points_after_move: countLabel(ownImmediate),
         opponent_immediate_winning_points_after_move: countLabel(oppImmediate),
+        opponent_direct_double_win_creators_after_move: countLabel(opponentDirectDoubleWins.count),
+        opponent_direct_double_win_creator_points: opponentDirectDoubleWins.moves.length
+          ? opponentDirectDoubleWins.moves.map(item => item.key + '->' + item.winningPoints.join('/')).join(',')
+          : 'NONE',
         opponent_fork_creators_after_move: countLabel(opponentForks.count),
         opponent_fork_creator_points: opponentForks.points.length ? opponentForks.points.join(',') : 'NONE',
         vcf_status: vcf ? 'FORCED_SEQUENCE_FOUND' : 'NOT_FOUND',
@@ -2254,6 +2288,7 @@
       let primaryRoots = [];
       let hotspots = [];
       let defensiveHotspots = [];
+      let directDoubleWinBlocks = [];
       let opponentForkBlocks = [];
       let counterThreatBlocks = [];
 
@@ -2264,6 +2299,7 @@
         forced = opponentWins.length >= 2 ? 'forced_loss_double_win' : 'block';
         roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
       } else {
+        const opponentDirectDoubleWins = directDoubleWinCreators(opponent, cfg.radius, 4);
         const opponentForks = moves.length >= 16 && !localSearchExpired()
           ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
           : { count: 0, points: [], moves: [] };
@@ -2272,6 +2308,9 @@
           roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
         } else {
           primaryRoots = orderedMoves(side, cfg.root, cfg.radius);
+          directDoubleWinBlocks = mode === 'max'
+            ? opponentDirectDoubleWins.moves.filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
           hotspots = localSearchExpired() ? [] : patternHotspots(side, mode === 'max' ? 5 : 3, cfg.radius);
           defensiveHotspots = mode === 'max' && !localSearchExpired()
             ? patternHotspots(opponent, 5, cfg.radius)
@@ -2288,7 +2327,11 @@
           // fork-creator as strong defensive evidence, not a mathematical
           // single-move proof: a second forcing branch may still exist.
           roots = mergeRootCandidates(
-            mergeRootCandidates(primaryRoots, opponentForkBlocks, cfg.root),
+            mergeRootCandidates(
+              mergeRootCandidates(primaryRoots, directDoubleWinBlocks, cfg.root),
+              opponentForkBlocks,
+              cfg.root
+            ),
             hotspots,
             cfg.root
           );
@@ -2319,6 +2362,7 @@
           addRecallSource(move, source);
         };
 
+        directDoubleWinBlocks.slice(0, 4).forEach(move => add(move, 'DIRECT_OPEN_FOUR_BLOCK'));
         scored.slice(0, 2).forEach(move => add(move, 'LOCAL_ALPHA_BETA'));
         hotspots.slice(0, 2).forEach(move => add(move, 'PATTERN_EXPERT'));
         opponentForkBlocks.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_FORK_BLOCK'));
@@ -2393,7 +2437,7 @@
       evidence_order: 'LEGALITY_AND_PROOF > FORCED_THREAT > DEEP_SEARCH > PATTERN_HEURISTIC > POSITIONAL_STYLE',
       threat_hierarchy: 'WIN > OPEN_FOUR / DOUBLE_FOUR / FOUR_THREE > FOUR > OPEN_THREE / VCT > MULTI_TWO > POSITION',
       sequencing: 'Move order matters. Preserve latent three/four resources unless converting them creates a concrete forced gain; do not spend forcing moves just because they are available.',
-      defense: 'Prefer a defense that both removes the opponent strongest continuation and creates your own forcing threat or cuts a multi-line intersection.',
+      defense: 'A legal opponent move that creates two legal immediate winning points (for example extending an open diagonal three into a double-ended open four) is deterministic hard tactical evidence. If your move does not create an immediate forcing reply, it must remove all such one-ply creators before positional preference is considered.',
       counter_threat: 'A move is not automatically safe just because it creates one forcing threat. If the opponent has a forced defensive reply, inspect the board after that reply: residual forcing extensions, fork creators, and multi-axis junctions may leave the original attack intact.',
       geometry: 'Inspect horizontal, vertical, and both diagonals equally. Multi-axis intersections and moves that reduce the opponent reply set are strategically important.',
       opening: 'In the early game, value connected central influence, multiple two-to-three extension routes, and denying the opponent equivalent extension routes over isolated stones.',
@@ -3508,7 +3552,7 @@
       .forEach(add);
     candidates
       .filter(move => (move.recallSources || []).some(source =>
-        ['DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
+        ['DIRECT_OPEN_FOUR_BLOCK', 'DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
       ))
       .forEach(add);
     candidates.forEach(add);
