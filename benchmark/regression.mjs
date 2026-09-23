@@ -2044,7 +2044,7 @@ async function testDiagonalOpenThreeDirectDoubleWinVeto() {
     }
   }
 
-  if (requests > 3) {
+  if (requests > 2) {
     throw new Error('Diagonal-three veto changed Jev Max request cap: ' + requests);
   }
 }
