@@ -1062,7 +1062,7 @@ function forcingProofKey(attacker, turns) {
   return 'TS:' + attacker + ':' + turns + ':' + hashA + ':' + hashB;
 }
 
-function proveForcingWin(attacker, turns, branch, radius, memo) {
+function proveForcingWin(attacker, turns, branch, radius, memo, scanDirectFork = true) {
   assertTime();
   const defender = otherColor(attacker);
 
@@ -1123,7 +1123,7 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
             playMove(forcedReply, defender);
             try {
               if (!isWin(forcedReply.r, forcedReply.c, defender)) {
-                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo);
+                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo, false);
                 if (child.forced) {
                   defensiveResult = {
                     forced: true,
@@ -1158,7 +1158,7 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
   // never depend on generic move-order branch width. This catches positions
   // such as J5 creating two legal winning points F5/K5 even when J5 is outside
   // orderedMoves(attacker, branch).
-  if (turns >= 2) {
+  if (scanDirectFork && turns >= 2) {
     const fork = directForkCreator(attacker, radius);
     if (fork) {
       const result = {
@@ -1210,7 +1210,7 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
             playMove(block, defender);
             try {
               if (!isWin(block.r, block.c, defender)) {
-                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo);
+                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo, false);
                 if (child.forced) {
                   result = {
                     forced: true,
