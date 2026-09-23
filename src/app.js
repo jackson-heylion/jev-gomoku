@@ -4642,7 +4642,7 @@
     );
     tournament.payload.questions.best_move = {
       type: 'choice',
-      instructions: 'Choose the strongest legal resolution candidate. Use full-board geometry, candidate_facts and prior Atomic results. Pairwise/Critic questions in this request are independent cross-checks; legality and hard proofs remain authoritative.',
+      instructions: 'Choose the strongest legal resolution candidate. Use full-board geometry, candidate_facts, prior Atomic/Critic results, and the order-balanced Pairwise questions in this request. Legality and hard proofs remain authoritative.',
       criteria: Object.fromEntries(resolutionCandidates.map(move => [
         move.key,
         `See candidate_facts.${move.key}`
@@ -4819,13 +4819,19 @@
       && chosen.analysis?.facts?.tactical_safety !== 'LOSING';
   }
 
-  function compactConsensusAnswer(consensus) {
+  function compactConsensusAnswer(consensus, candidates = []) {
     const choice = consensus?.choice;
     if (!choice) return null;
+    const allowed = new Set((candidates || []).map(move => move.key));
+    const entries = Object.entries(consensus.probabilities || {})
+      .filter(([key]) => !allowed.size || allowed.has(key))
+      .map(([key, value]) => [key, Number(value) || 0]);
+    const sum = entries.reduce((total, [, value]) => total + value, 0) || 1;
+    const probabilities = Object.fromEntries(entries.map(([key, value]) => [key, value / sum]));
     return {
       choice,
-      confidence: Number(consensus.probabilities?.[choice] || 0),
-      probabilities: { ...(consensus.probabilities || {}) }
+      confidence: Number(probabilities[choice] || 0),
+      probabilities
     };
   }
 
@@ -5522,7 +5528,7 @@
       && highConfidenceCompactConvergence(atomicTop4, globalConsensus, recallChoice);
 
     if (compactConverged) {
-      answer = compactConsensusAnswer(globalConsensus);
+      answer = compactConsensusAnswer(globalConsensus, atomicTop4);
       finalChoice = answer.choice;
       finalists = atomicTop4;
       decisionAuthority = 'jev_max_compact_convergence';
