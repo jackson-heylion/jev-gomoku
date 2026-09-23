@@ -964,7 +964,9 @@ function threatNetworkMoves(color, limit = 6, radius = 2) {
             ? 'DOUBLE_WINNING_POINTS'
             : winningPoints === 1
               ? 'FORCING_EXTENSION'
-              : 'MULTI_AXIS_JUNCTION',
+              : profile.openThreeDirections >= 2
+                ? 'DOUBLE_OPEN_THREE'
+                : 'MULTI_AXIS_JUNCTION',
           winningPoints,
           openThreeDirections: profile.openThreeDirections,
           fourDirections: profile.fourDirections,
@@ -991,8 +993,10 @@ function threatNetworkMoves(color, limit = 6, radius = 2) {
 
 function counterThreatRisk(networkMoves) {
   const forcing = networkMoves.filter(item => item.winningPoints >= 1);
+  const doubleOpenThrees = networkMoves.filter(item => item.kind === 'DOUBLE_OPEN_THREE');
   const junctions = networkMoves.filter(item => item.kind === 'MULTI_AXIS_JUNCTION');
   if (forcing.some(item => item.winningPoints >= 2)) return 'CRITICAL';
+  if (doubleOpenThrees.length >= 1) return 'CRITICAL';
   if (forcing.length >= 2) return 'HIGH';
   if (forcing.length === 1 && junctions.length >= 1) return 'HIGH';
   if (forcing.length === 1 || junctions.length >= 2) return 'ELEVATED';
@@ -1082,6 +1086,63 @@ function directForkCreator(color, radius = 2) {
       result = {
         move: move.key,
         winningPoints: legalWins.slice(0, 4).map(item => item.key)
+      };
+    } finally {
+      undoMove(move, color);
+    }
+    if (result) return result;
+  }
+  return null;
+}
+
+function hasMaterialCounterForcingMove(color, radius) {
+  for (const move of nearbyMoves(radius)) {
+    assertTime();
+    if (!isLegalMoveForColor(move.r, move.c, color)) continue;
+    playMove(move, color);
+    let forcing = false;
+    try {
+      if (isWin(move.r, move.c, color)) {
+        forcing = true;
+      } else {
+        const profile = threatPatternProfilePlaced(move.r, move.c, color);
+        forcing = profile.winningPoints >= 1
+          || profile.fourDirections > 0
+          || profile.openThreeDirections >= 2;
+      }
+    } finally {
+      undoMove(move, color);
+    }
+    if (forcing) return true;
+  }
+  return false;
+}
+
+function directDoubleOpenThreeCreator(color, radius = 2) {
+  const defender = otherColor(color);
+  for (const move of nearbyMoves(radius)) {
+    assertTime();
+    if (!isLegalMoveForColor(move.r, move.c, color)) continue;
+    if (!mayContainForcingPattern(move, color)) continue;
+
+    playMove(move, color);
+    let result = null;
+    try {
+      if (isWin(move.r, move.c, color)) continue;
+      const profile = threatPatternProfilePlaced(move.r, move.c, color);
+      if (profile.openThreeDirections < 2) continue;
+
+      // Conservative proof boundary: do not call a double-open-three forced if
+      // the defender can win immediately or can create an open-four / another
+      // double-open-three counter-resource on the next move. In those cases the
+      // generic search/Jev layer must resolve the race.
+      if (immediateWins(defender, radius).length) continue;
+      if (hasMaterialCounterForcingMove(defender, radius)) continue;
+
+      result = {
+        move: move.key,
+        openThreeDirections: profile.openThreeDirections,
+        multiAxis: profile.multiAxis
       };
     } finally {
       undoMove(move, color);
@@ -1200,6 +1261,21 @@ function proveForcingWin(attacker, turns, branch, radius, memo, scanDirectFork =
         line: [fork.move],
         winningPoints: fork.winningPoints,
         reason: 'direct_double_winning_points'
+      };
+      memo.set(key, result);
+      return result;
+    }
+  }
+
+  if (scanDirectFork && turns >= 3) {
+    const doubleOpenThree = directDoubleOpenThreeCreator(attacker, radius);
+    if (doubleOpenThree) {
+      const result = {
+        forced: true,
+        attackerTurns: 3,
+        line: [doubleOpenThree.move],
+        openThreeDirections: doubleOpenThree.openThreeDirections,
+        reason: 'direct_double_open_three'
       };
       memo.set(key, result);
       return result;
