@@ -2421,6 +2421,41 @@
     };
   }
 
+  function directDoubleOpenThreeCreators(color, radius = 2, maxCount = Infinity) {
+    const movesFound = [];
+    const defender = otherColor(color);
+    for (const move of nearbyMoves(radius)) {
+      if (!isLegalMoveForColor(move.r, move.c, color)) continue;
+      board[move.r][move.c] = color;
+      let row = null;
+      try {
+        if (isWin(move.r, move.c, color)) continue;
+        const profile = threatPatternProfilePlaced(move.r, move.c, color);
+        // A true double-open-three creator must open at least two independent
+        // axes and must not simply hand the defender an immediate win.
+        if (profile.openThreeDirections < 2) continue;
+        if (immediateWins(defender, radius).length) continue;
+        row = {
+          ...move,
+          openThreeDirections: profile.openThreeDirections,
+          multiAxis: profile.multiAxis,
+          patternScore: Math.round(profile.score)
+        };
+      } finally {
+        board[move.r][move.c] = EMPTY;
+      }
+      if (row) {
+        movesFound.push(row);
+        if (movesFound.length >= maxCount) break;
+      }
+    }
+    return {
+      count: movesFound.length,
+      points: movesFound.map(move => move.key),
+      moves: movesFound
+    };
+  }
+
   function countForkCreators(color, limit = 10, radius = 2, maxCount = Infinity) {
     let count = 0;
     let complete = true;
@@ -2827,6 +2862,7 @@
       let hotspots = [];
       let defensiveHotspots = [];
       let directDoubleWinBlocks = [];
+      let doubleOpenThreeBlocks = [];
       let opponentForkBlocks = [];
       let counterThreatBlocks = [];
 
@@ -2838,6 +2874,12 @@
         roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
       } else {
         const opponentDirectDoubleWins = directDoubleWinCreators(opponent, cfg.radius, 4);
+        // Double-open-three creators are one ply earlier than the existing
+        // direct-double-win/open-four detector. They matter in the early-midgame
+        // too, so do not gate them behind the old moves.length >= 16 threshold.
+        const opponentDoubleOpenThrees = mode === 'max' && !localSearchExpired()
+          ? directDoubleOpenThreeCreators(opponent, cfg.radius, 3)
+          : { count: 0, points: [], moves: [] };
         const opponentForks = moves.length >= 16 && !localSearchExpired()
           ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
           : { count: 0, points: [], moves: [] };
@@ -2848,6 +2890,9 @@
           primaryRoots = orderedMoves(side, cfg.root, cfg.radius);
           directDoubleWinBlocks = mode === 'max'
             ? opponentDirectDoubleWins.moves.filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
+          doubleOpenThreeBlocks = mode === 'max'
+            ? opponentDoubleOpenThrees.moves.filter(move => isLegalMoveForColor(move.r, move.c, side))
             : [];
           hotspots = localSearchExpired() ? [] : patternHotspots(side, mode === 'max' ? 5 : 3, cfg.radius);
           defensiveHotspots = mode === 'max' && !localSearchExpired()
@@ -2866,7 +2911,11 @@
           // single-move proof: a second forcing branch may still exist.
           roots = mergeRootCandidates(
             mergeRootCandidates(
-              mergeRootCandidates(primaryRoots, directDoubleWinBlocks, cfg.root),
+              mergeRootCandidates(
+                mergeRootCandidates(primaryRoots, directDoubleWinBlocks, cfg.root),
+                doubleOpenThreeBlocks,
+                cfg.root
+              ),
               opponentForkBlocks,
               cfg.root
             ),
@@ -2901,6 +2950,7 @@
         };
 
         directDoubleWinBlocks.slice(0, 4).forEach(move => add(move, 'DIRECT_OPEN_FOUR_BLOCK'));
+        doubleOpenThreeBlocks.slice(0, 3).forEach(move => add(move, 'DOUBLE_OPEN_THREE_BLOCK'));
         scored.slice(0, 2).forEach(move => add(move, 'LOCAL_ALPHA_BETA'));
         hotspots.slice(0, 2).forEach(move => add(move, 'PATTERN_EXPERT'));
         opponentForkBlocks.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_FORK_BLOCK'));
@@ -4082,7 +4132,7 @@
       .forEach(add);
     candidates
       .filter(move => (move.recallSources || []).some(source =>
-        ['DIRECT_OPEN_FOUR_BLOCK', 'DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
+        ['DIRECT_OPEN_FOUR_BLOCK', 'DOUBLE_OPEN_THREE_BLOCK', 'DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
       ))
       .forEach(add);
     candidates.forEach(add);
