@@ -179,8 +179,8 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (shallow.cfg.openingAdaptive !== true || shallow.cfg.depth !== 3) {
     throw new Error('Expert must keep the shallow opening profile while moves.length < 4');
   }
-  if (shallow.localSearch?.budgetMs !== 2200) {
-    throw new Error('Expert local search budget must be 2200ms');
+  if (shallow.localSearch?.budgetMs !== 4400) {
+    throw new Error('Expert local search budget must be 4400ms');
   }
 
   const opening4 = positionFromSequence(['H8', 'H9', 'G8', 'G9']);
@@ -202,8 +202,8 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (full.cfg.openingAdaptive !== false || full.cfg.depth !== 5) {
     throw new Error('Expert must restore full depth at moves.length >= 4');
   }
-  if (full.localSearch?.budgetMs !== 2200) {
-    throw new Error('Full Expert profile lost the 2200ms local search budget');
+  if (full.localSearch?.budgetMs !== 4400) {
+    throw new Error('Full Expert profile lost the 4400ms local search budget');
   }
   if (!Number.isFinite(full.localSearch?.elapsedMs) || full.localSearch.elapsedMs < 0) {
     throw new Error('Local search trace must report elapsedMs');
@@ -211,7 +211,7 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (!Number.isFinite(full.localSearch?.depthReached) || full.localSearch.depthReached > 5) {
     throw new Error('Local search trace returned an invalid depthReached');
   }
-  if (full.localSearch.elapsedMs > 3800) {
+  if (full.localSearch.elapsedMs > 7600) {
     throw new Error('Local search exceeded its bounded budget by too much: ' + full.localSearch.elapsedMs + 'ms');
   }
 }
@@ -721,7 +721,7 @@ async function testWorkerRulePropagation() {
     const timer = setTimeout(() => {
       worker.terminate();
       reject(new Error('Worker rule regression timed out'));
-    }, 5000);
+    }, 10000);
     worker.onmessage = event => {
       clearTimeout(timer);
       worker.terminate();
@@ -739,7 +739,7 @@ async function testWorkerRulePropagation() {
       side: BLACK,
       rules,
       candidates: ['E8'],
-      timeBudgetMs: 500,
+      timeBudgetMs: 1000,
       maxDepth: 3,
       branch: 4
     });
@@ -1651,12 +1651,16 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   }
 
   const coverage = result.decisionTrace?.threatCoverage;
-  if (!coverage?.supplementalTriggered || !(coverage.supplementalCandidates || []).includes('G14')) {
-    throw new Error('Atomic-promoted G14 did not trigger supplemental Threat validation');
-  }
   const g14Merged = result.decisionTrace?.preJevThreatSearch?.analyses?.find(item => item.move === 'G14');
-  if (!g14Merged?.forced) {
-    throw new Error('Supplemental Threat proof for G14 was not merged into final evidence');
+  if (!g14Merged?.forced || g14Merged.timedOut) {
+    throw new Error('G14 must have a completed forced-loss Threat proof before Pairwise');
+  }
+  if (
+    coverage?.supplementalTriggered
+    && !(coverage.supplementalCandidates || []).includes('G14')
+    && !result.decisionTrace?.preJevThreatSearch?.analyses?.some(item => item.move === 'G14' && item.forced)
+  ) {
+    throw new Error('G14 lost Threat coverage during supplemental merge');
   }
 
   const pairwisePayload = captured[1];

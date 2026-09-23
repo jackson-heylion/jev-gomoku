@@ -176,7 +176,7 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 契约要求：
 
 - Jev Max 的 `UNVERIFIED_BUDGET` 只影响 Max，不改变旧 Grandmaster 候选行为。
-- 初始 Threat 最多 6；supplemental 最多 2、850ms。
+- 初始 Threat 最多 6；supplemental 最多 2、1700ms（timeout ×2）。
 - supplemental fail-closed，Pairwise 的主候选 Threat coverage 必须 100% 完成。
 - 重型 Worker 并发仍 ≤2。
 - benchmark 记录补检触发回合、候选数、fail-closed 拒绝数、补检耗时，并把 supplemental >2 或 Pairwise coverage 不完整记为契约违规。
@@ -213,3 +213,15 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 - 1～2 个 rescue 候选使用独立 Threat 时间片；较大 rescue pool 批量后最多重试 2 个 unresolved。
 
 Benchmark 统计 rescue sweep 触发回合、候选数、vetted / unresolved 数、bounded-exhausted 次数和耗时，并把 rescue >6 或 rescue 状态仍执行 Pairwise/Critic 记为契约违规。
+
+
+## Timeout ×2 regression policy
+
+运行时 timeout 统一放大 2 倍后，benchmark 同步放宽对应的显式时间预算和上界，但不放宽结构约束：
+
+- Local 搜索回归上界同步翻倍。
+- Worker 规则传播测试的执行 timeout 与显式 worker budget 同步翻倍。
+- 49 手实战的 Threat / rescue 诊断预算同步翻倍。
+- 候选数、Jev 请求数、Worker 并发数、Threat coverage、rescue pass/retry 上限均保持不变。
+
+这样 benchmark 只允许“多算一倍时间”，不会允许算法无界扩张。

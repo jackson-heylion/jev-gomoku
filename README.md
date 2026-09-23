@@ -177,7 +177,7 @@ Jev Max 明确使用 bounded implementation：
 
 - 主线程：UI、候选聚合、轻量 pattern/一手战术、请求调度、结果整合。
 - 重型 Worker：最多 2 个并行（Deep + Threat）。
-- Local 根搜索预算：Max 2500ms。
+- Local 根搜索预算：Max 5000ms（全局 timeout ×2 后的有效预算）。
 - Deep Worker：约 1.3–1.8s。
 - Threat Worker：约 1.1–1.45s。
 - 候选：最多 8；Deep ≤5；Threat ≤6。
@@ -314,7 +314,7 @@ Jev Max 仍保留 6～8 个异构候选，但初始 Threat Worker 只分析最�
 - 仅在 Jev Max 中，本地战术预算耗尽的候选标记为 `UNVERIFIED_BUDGET`，不再伪装成 `SAFE`；旧 Grandmaster 行为保持不变。
 - 初始 6 个 Threat 名额不再机械取前 6：保留头部候选后，优先纳入 `UNVERIFIED_BUDGET` 与关键防守候选。
 - Atomic 仍可独立评价全部主候选。
-- 如果 Atomic 把尚未完成 Threat 校验的候选抬入 Top 4，会触发一次最多 2 候选、850ms 上限的 supplemental Threat Worker。
+- 如果 Atomic 把尚未完成 Threat 校验的候选抬入 Top 4，会触发一次最多 2 候选、1700ms 上限的 supplemental Threat Worker。
 - supplemental 校验发生在 Pairwise / Critic 之前；已证明 forced-loss 的候选直接移除。
 - supplemental 超时或缺失结果时 fail-closed；Pairwise 前有硬不变量：所有参与比较的主候选都必须拥有完成的 Threat evidence。
 - 该补检与初始 Deep/Threat Worker 不并发叠加，因此重型 Worker 并发数仍不超过 2。
@@ -337,3 +337,20 @@ Threat Worker 还会在每个候选根节点执行一次**直接双胜点 proof*
 另外，在接近“全主候选已败”的 rare path，最多 4 个仅因 Threat 未完成而存活的候选可以在 Atomic 前补一次本地 proof，以减少无意义的语义请求。正常回合预算和最多 2 个重型 Worker 的约束不变。
 
 `THREAT_VETTED_NO_FORCED_LOSS` 语义已改为更保守的 `THREAT_SEARCH_NO_PROOF`：搜索没证明输不等于已经证明安全。
+
+
+### Timeout ×2
+
+所有搜索/决策 timeout 预算统一放大为原来的 2 倍，算法深度、候选上限和 Worker 并发数不变：
+
+- Jev 健康检查：15s → 30s。
+- Local：Expert 2.2s → 4.4s；Grandmaster 2.4s → 4.8s；Max 2.5s → 5.0s。
+- Deep Worker：Max 1.3/1.8s → 2.6/3.6s；Grandmaster 0.9/1.4s → 1.8/2.8s；其它 1.5s → 3.0s。
+- Threat Worker：Max 1.1/1.45s → 2.2/2.9s；其它 0.8/1.2s → 1.6/2.4s。
+- Worker 外层终止 grace：350ms → 700ms。
+- pre-Atomic loss frontier：1.45s → 2.9s。
+- Atomic Top4 supplemental Threat：0.85s → 1.7s。
+- wildcard Threat 校验：0.7s → 1.4s。
+- rescue individual：1.1s → 2.2s；rescue batch：1.45s → 2.9s；rescue retry：0.9s → 1.8s。
+
+其中 Threat 的总预算仍会按候选数切片，因此 6 个候选的 Max 中后盘首轮约从 241ms/候选提升到约 483ms/候选。
