@@ -3542,6 +3542,46 @@
     return filtered.slice(0, maxCandidateLimit());
   }
 
+  async function closePreAtomicLossFrontier(contextCandidates, survivors, threatAnalysis) {
+    const unresolved = (survivors || []).filter(move =>
+      !hasCompletedThreatEvidence(threatAnalysis, move.key)
+    );
+    const knownLost = (contextCandidates || []).filter(maxHardProvenLoss);
+
+    // Rare tactical state: the initial Threat batch has already proved most of
+    // the universe losing, and <=2 candidates survive only because their proof
+    // did not run/finish. Close that hard-evidence frontier before spending an
+    // Atomic request; semantic judgement must not decide whether proof exists.
+    if (
+      unresolved.length === 0
+      || unresolved.length !== survivors.length
+      || unresolved.length > 2
+      || knownLost.length + unresolved.length < contextCandidates.length
+    ) {
+      return {
+        candidates: survivors,
+        threatAnalysis,
+        supplemental: null
+      };
+    }
+
+    updateApiState('busy', 'Jev Max：主候选接近全败，Atomic 前补齐 Threat 生存证据…');
+    const supplemental = await runThreatWorkerAnalysis(
+      unresolved,
+      'max',
+      'jev_max_pre_atomic_loss_frontier',
+      { timeBudgetMs: 1100, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+    );
+    const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
+    attachThreatEvidence(contextCandidates, merged);
+    const filtered = hardFilterMaxCandidates(survivors, merged);
+    return {
+      candidates: filtered,
+      threatAnalysis: merged,
+      supplemental
+    };
+  }
+
   function mergeThreatAnalysis(primary, supplemental) {
     if (!primary) return supplemental || null;
     if (!supplemental) return primary;
@@ -4403,11 +4443,24 @@
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
 
+    const preAtomicFrontier = await closePreAtomicLossFrontier(
+      context.candidates,
+      candidates,
+      threatAnalysis
+    );
+    candidates = preAtomicFrontier.candidates;
+    threatAnalysis = preAtomicFrontier.threatAnalysis;
+
     // If every normal main candidate is already hard-proved losing, do not
     // spend Atomic/Pairwise/Final requests ranking known losses. Search a
     // bounded rescue universe first; this rare tactical path is sequential.
     if (allMaxCandidatesHardLost(candidates)) {
-      return runMaxRescueSweep(context, candidates, deepAnalysis, threatAnalysis);
+      const rescue = await runMaxRescueSweep(context, candidates, deepAnalysis, threatAnalysis);
+      if (rescue?.decisionTrace?.requestShape) {
+        rescue.decisionTrace.requestShape.preAtomicFrontierElapsedMs = preAtomicFrontier.supplemental?.elapsedMs ?? null;
+        rescue.decisionTrace.requestShape.preAtomicFrontierCandidates = preAtomicFrontier.supplemental?.analyses?.map(row => row.move) || [];
+      }
+      return rescue;
     }
 
     // A proven VCF set or Threat-space filter may collapse to one exact choice.
