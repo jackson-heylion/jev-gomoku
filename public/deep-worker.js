@@ -1160,8 +1160,8 @@ function proveResidualForkAfterForcedDefense(attacker, defender, turns, branch, 
   };
 }
 
-function forcingProofKey(attacker, turns) {
-  return 'TS:' + attacker + ':' + turns + ':' + hashA + ':' + hashB;
+function forcingProofKey(attacker, turns, scanDirectFork = true) {
+  return 'TS:' + attacker + ':' + turns + ':' + (scanDirectFork ? 'F1' : 'F0') + ':' + hashA + ':' + hashB;
 }
 
 function proveForcingWin(attacker, turns, branch, radius, memo, scanDirectFork = true) {
@@ -1272,7 +1272,7 @@ function proveForcingWin(attacker, turns, branch, radius, memo, scanDirectFork =
     };
   }
 
-  const key = forcingProofKey(attacker, turns);
+  const key = forcingProofKey(attacker, turns, scanDirectFork);
   const cached = memo.get(key);
   if (cached) return cached;
 
