@@ -1139,6 +1139,13 @@
         t.analyses.forEach(item => {
           const line = Array.isArray(item.line) && item.line.length ? `；line=${item.line.join('>')}` : '';
           lines.push(`    ${item.move}: ${item.forced ? 'OPPONENT_FORCED_WIN' : item.timedOut ? 'TIMEOUT' : 'NO_PROOF'}${line}`);
+          const counter = item.counterThreat;
+          if (counter && counter.risk && !['NONE', 'PROVEN_FORCED_LOSS'].includes(counter.risk)) {
+            const network = Array.isArray(counter.networkMoves) && counter.networkMoves.length
+              ? counter.networkMoves.map(row => `${row.move}:${row.kind}`).join(' / ')
+              : '—';
+            lines.push(`      counter-threat=${counter.risk}；forced-defense=${counter.forcedDefenseMove || '—'}；network=${network}`);
+          }
         });
       }
     }
@@ -2343,6 +2350,7 @@
       threat_hierarchy: 'WIN > OPEN_FOUR / DOUBLE_FOUR / FOUR_THREE > FOUR > OPEN_THREE / VCT > MULTI_TWO > POSITION',
       sequencing: 'Move order matters. Preserve latent three/four resources unless converting them creates a concrete forced gain; do not spend forcing moves just because they are available.',
       defense: 'Prefer a defense that both removes the opponent strongest continuation and creates your own forcing threat or cuts a multi-line intersection.',
+      counter_threat: 'A move is not automatically safe just because it creates one forcing threat. If the opponent has a forced defensive reply, inspect the board after that reply: residual forcing extensions, fork creators, and multi-axis junctions may leave the original attack intact.',
       geometry: 'Inspect horizontal, vertical, and both diagonals equally. Multi-axis intersections and moves that reduce the opponent reply set are strategically important.',
       opening: 'In the early game, value connected central influence, multiple two-to-three extension routes, and denying the opponent equivalent extension routes over isolated stones.',
       caution: 'pattern_* fields are fast heuristic shape evidence, not mathematical proof. threat-space FOUND and proven VCF remain higher authority.'
@@ -2720,6 +2728,7 @@
           'Never choose an UNSAFE or LOSING move when a SAFE candidate is available.',
           'Treat local rank, Alpha-Beta score, deep-search score, and pattern_* fields as finite-horizon evidence; pattern evidence is useful for shape and move-order judgement but is not proof.',
           'When safe candidates are close, explicitly compare forcing tempo, number of opponent replies, multi-axis threat growth, whether a latent threat should be preserved, and whether a defensive move also creates counter-pressure.',
+          'If a candidate creates one forcing threat, inspect the forced reply and residual counter-threat evidence before calling it safe. A forced reply that preserves multiple opponent forcing extensions is a major warning, though not by itself a mathematical proof.',
           'In quiet openings prefer connected multi-direction extension potential and denial of the opponent equivalent routes; avoid isolated cosmetic central moves with little continuation.'
         ]
       },
