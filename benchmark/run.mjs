@@ -674,6 +674,10 @@ function emptyVolume() {
     jevCalls: 0,
     jevTurns: 0,
     zeroCallTurns: 0,
+    oneRequestTurns: 0,
+    twoRequestTurns: 0,
+    moreThanTwoRequestTurns: 0,
+    fanoutConvergedTurns: 0,
     forcedSingleCandidateTurns: 0,
     overrides: 0,
     agreements: 0,
@@ -743,14 +747,21 @@ function accumulate(volume, record, options) {
   const candidateCount = shape.candidateCount ?? record.candidateCount ?? 0;
   const httpRequests = shape.httpRequests ?? 0;
 
+  const logicalRequests = Number.isFinite(shape.logicalRequests)
+    ? Number(shape.logicalRequests)
+    : (jev.participated ? Math.max(1, httpRequests || 1) : 0);
+  if (logicalRequests === 0) volume.zeroCallTurns++;
+  else if (logicalRequests === 1) volume.oneRequestTurns++;
+  else if (logicalRequests === 2) volume.twoRequestTurns++;
+  else volume.moreThanTwoRequestTurns++;
+  if (shape.decisionAuthority === 'jev_max_fanout_convergence') volume.fanoutConvergedTurns++;
+
   if (jev.participated) {
     volume.jevTurns++;
-    volume.jevCalls += Math.max(1, httpRequests || 1);
+    volume.jevCalls += Math.max(1, httpRequests || logicalRequests || 1);
     volume.inputTokens += jev.inputTokens || 0;
     volume.outputTokens += jev.outputTokens || 0;
     volume.upstreamAttempts += jev.upstreamAttempts || 0;
-  } else {
-    volume.zeroCallTurns++;
   }
   if (candidateCount <= 1) volume.forcedSingleCandidateTurns++;
 
@@ -1097,6 +1108,13 @@ function summarize(games, arms, options) {
       jevCalls: volume.jevCalls,
       jevTurns: volume.jevTurns,
       zeroCallTurns: volume.zeroCallTurns,
+      oneRequestTurns: volume.oneRequestTurns,
+      twoRequestTurns: volume.twoRequestTurns,
+      moreThanTwoRequestTurns: volume.moreThanTwoRequestTurns,
+      fanoutConvergedTurns: volume.fanoutConvergedTurns,
+      oneRequestRate: volume.decisions ? volume.oneRequestTurns / volume.decisions : 0,
+      twoRequestRate: volume.decisions ? volume.twoRequestTurns / volume.decisions : 0,
+      fanoutConvergenceRate: volume.decisions ? volume.fanoutConvergedTurns / volume.decisions : 0,
       forcedSingleCandidateTurns: volume.forcedSingleCandidateTurns,
       jevCallsPerWhiteTurn: volume.decisions ? volume.jevCalls / volume.decisions : 0,
       overrides: volume.overrides,
@@ -1483,8 +1501,8 @@ function renderMarkdown(report) {
   lines.push('');
   lines.push('## 成本与调用契约');
   lines.push('');
-  lines.push('| Arm | Jev 调用 | 每手调用 | 0 调用回合 | 唯一候选回合 | input/output token | 上游尝试 |');
-  lines.push('|---|---:|---:|---:|---:|---:|---:|');
+  lines.push('| Arm | Jev 调用 | 每手调用 | 0请求 | 1请求 | 2请求 | >2请求 | Fan-Out 1请求收敛 | 唯一候选 | input/output token | 上游尝试 |');
+  lines.push('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
   for (const arm of arms) {
     const item = report.summary.arms[arm];
     lines.push(
@@ -1492,6 +1510,10 @@ function renderMarkdown(report) {
       ' | ' + item.jevCalls +
       ' | ' + num(item.jevCallsPerWhiteTurn, 2) +
       ' | ' + item.zeroCallTurns +
+      ' | ' + item.oneRequestTurns + ' (' + pct(item.oneRequestRate) + ')' +
+      ' | ' + item.twoRequestTurns + ' (' + pct(item.twoRequestRate) + ')' +
+      ' | ' + item.moreThanTwoRequestTurns +
+      ' | ' + item.fanoutConvergedTurns + ' (' + pct(item.fanoutConvergenceRate) + ')' +
       ' | ' + item.forcedSingleCandidateTurns +
       ' | ' + item.inputTokens + ' / ' + item.outputTokens +
       ' | ' + item.upstreamAttempts + ' |'
