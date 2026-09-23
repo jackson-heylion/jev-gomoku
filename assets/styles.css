@@ -119,6 +119,11 @@
       box-shadow: 0 10px 26px rgba(0,0,0,.26);
     }
     canvas.disabled { cursor: wait; }
+    canvas.easter-pulse { animation: easterPulse 1.15s ease both; }
+    @keyframes easterPulse {
+      0%, 100% { box-shadow: 0 10px 26px rgba(0,0,0,.26); }
+      45% { box-shadow: 0 10px 26px rgba(0,0,0,.26), 0 0 0 7px rgba(88,166,255,.10), 0 0 30px rgba(126,231,135,.12); }
+    }
 
     .hint {
       display: flex;
