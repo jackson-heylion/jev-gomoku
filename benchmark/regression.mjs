@@ -2049,6 +2049,121 @@ async function testDiagonalOpenThreeDirectDoubleWinVeto() {
   }
 }
 
+/**
+ * Historical diagonal loss:
+ * H8 G7 I9 G9 G8 F8 I8 J8 I10 I11 H10, White to move.
+ * The losing White I7 allows Black H9, which creates two independent open-three
+ * axes (vertical H-file + G8-H9-I10 diagonal). H9 must be recalled as a direct
+ * preventive defense and I7 must receive a deterministic Threat forced-loss proof.
+ */
+async function testHistoricalDoubleOpenThreeForkDefense() {
+  const captured = [];
+  const unsafeKeys = new Set();
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      captured.push(payload);
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Double-open-three mock question has no choices: ' + id);
+
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          if (unsafeKeys.has(move) && keys.includes('EXCELLENT')) choice = 'EXCELLENT';
+          else if (move === 'H9' && keys.includes('BAD')) choice = 'BAD';
+          else choice = keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          const move = id.slice('critic_'.length);
+          if (unsafeKeys.has(move) && keys.includes('SURVIVES_BEST_REPLY')) choice = 'SURVIVES_BEST_REPLY';
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.find(key => unsafeKeys.has(key)) || keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-double-open-three-defense',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: false,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G7',
+    'I9','G9',
+    'G8','F8',
+    'I8','J8',
+    'I10','I11',
+    'H10'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  const h9 = context.candidates.find(move => move.key === 'H9');
+  if (!h9) throw new Error('Historical defense H9 missing from Jev Max candidate recall');
+  if (!(h9.recallSources || []).includes('DOUBLE_OPEN_THREE_BLOCK')) {
+    throw new Error('H9 missing DOUBLE_OPEN_THREE_BLOCK recall source');
+  }
+
+  const keys = [...new Set([
+    ...context.candidates.map(move => move.key),
+    'H9',
+    'I7'
+  ])];
+  const threat = await engine.threatAnalyze(
+    keys,
+    'max',
+    { timeBudgetMs: 1450, maxThreatTurns: 6, branch: 9 }
+  );
+  const i7 = (threat?.analyses || []).find(row => row.move === 'I7');
+  const i7DoubleOpenThree = i7?.counterThreat?.risk === 'CRITICAL'
+    && (i7?.counterThreat?.networkMoves || []).some(row =>
+      row.move === 'H9' && row.kind === 'DOUBLE_OPEN_THREE' && row.openThreeDirections >= 2
+    );
+  if (!i7DoubleOpenThree) {
+    throw new Error('Historical I7 must expose CRITICAL H9 double-open-three evidence: '
+      + JSON.stringify(i7 || null));
+  }
+
+  for (const row of threat?.analyses || []) {
+    const exposesDoubleOpenThree = row?.counterThreat?.risk === 'CRITICAL'
+      && (row?.counterThreat?.networkMoves || []).some(item => item.kind === 'DOUBLE_OPEN_THREE');
+    if (exposesDoubleOpenThree) unsafeKeys.add(row.move);
+  }
+  if (!unsafeKeys.size) throw new Error('Regression expected at least one CRITICAL double-open-three candidate');
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (unsafeKeys.has(result.finalChoice)) {
+    throw new Error('Jev Max selected a hard-proved double-open-three loss: ' + result.finalChoice);
+  }
+  if (result.finalChoice === 'I7') {
+    throw new Error('Historical losing move I7 survived the deterministic double-open-three veto');
+  }
+
+  const finalFacts = result.candidates.find(move => move.key === result.finalChoice)?.analysis?.facts || {};
+  if (finalFacts.tactical_safety === 'LOSING') {
+    throw new Error('Final move remained locally marked LOSING after double-open-three filtering');
+  }
+
+  console.log('double-open-three historical regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    unsafe: [...unsafeKeys],
+    h9Sources: h9.recallSources,
+    i7Threat: i7
+  }));
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2071,6 +2186,7 @@ await testRealGameMove36CounterfactualThreatAudit();
 await testRealGameMove44AllMainLossTriggersRescueSweep();
 await testRealGameMove42ProofBoundary();
 await testDiagonalOpenThreeDirectDoubleWinVeto();
+await testHistoricalDoubleOpenThreeForkDefense();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();

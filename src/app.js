@@ -2421,6 +2421,39 @@
     };
   }
 
+  function directDoubleOpenThreeCreators(color, radius = 2, maxCount = Infinity) {
+    const movesFound = [];
+    for (const move of nearbyMoves(radius)) {
+      if (!isLegalMoveForColor(move.r, move.c, color)) continue;
+      board[move.r][move.c] = color;
+      let row = null;
+      try {
+        if (isWin(move.r, move.c, color)) continue;
+        const profile = threatPatternProfilePlaced(move.r, move.c, color);
+        // Recall only: keep this main-thread scan cheap. Counter-forcing
+        // resources are verified later by the Threat Worker before filtering.
+        if (profile.openThreeDirections < 2) continue;
+        row = {
+          ...move,
+          openThreeDirections: profile.openThreeDirections,
+          multiAxis: profile.multiAxis,
+          patternScore: Math.round(profile.score)
+        };
+      } finally {
+        board[move.r][move.c] = EMPTY;
+      }
+      if (row) {
+        movesFound.push(row);
+        if (movesFound.length >= maxCount) break;
+      }
+    }
+    return {
+      count: movesFound.length,
+      points: movesFound.map(move => move.key),
+      moves: movesFound
+    };
+  }
+
   function countForkCreators(color, limit = 10, radius = 2, maxCount = Infinity) {
     let count = 0;
     let complete = true;
@@ -2827,6 +2860,7 @@
       let hotspots = [];
       let defensiveHotspots = [];
       let directDoubleWinBlocks = [];
+      let doubleOpenThreeBlocks = [];
       let opponentForkBlocks = [];
       let counterThreatBlocks = [];
 
@@ -2838,6 +2872,12 @@
         roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
       } else {
         const opponentDirectDoubleWins = directDoubleWinCreators(opponent, cfg.radius, 4);
+        // Double-open-three creators are one ply earlier than the existing
+        // direct-double-win/open-four detector. They matter in the early-midgame
+        // too, so do not gate them behind the old moves.length >= 16 threshold.
+        const opponentDoubleOpenThrees = mode === 'max' && moves.length < 16 && !localSearchExpired()
+          ? directDoubleOpenThreeCreators(opponent, cfg.radius, 3)
+          : { count: 0, points: [], moves: [] };
         const opponentForks = moves.length >= 16 && !localSearchExpired()
           ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
           : { count: 0, points: [], moves: [] };
@@ -2848,6 +2888,9 @@
           primaryRoots = orderedMoves(side, cfg.root, cfg.radius);
           directDoubleWinBlocks = mode === 'max'
             ? opponentDirectDoubleWins.moves.filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
+          doubleOpenThreeBlocks = mode === 'max'
+            ? opponentDoubleOpenThrees.moves.filter(move => isLegalMoveForColor(move.r, move.c, side))
             : [];
           hotspots = localSearchExpired() ? [] : patternHotspots(side, mode === 'max' ? 5 : 3, cfg.radius);
           defensiveHotspots = mode === 'max' && !localSearchExpired()
@@ -2866,7 +2909,11 @@
           // single-move proof: a second forcing branch may still exist.
           roots = mergeRootCandidates(
             mergeRootCandidates(
-              mergeRootCandidates(primaryRoots, directDoubleWinBlocks, cfg.root),
+              mergeRootCandidates(
+                mergeRootCandidates(primaryRoots, directDoubleWinBlocks, cfg.root),
+                doubleOpenThreeBlocks,
+                cfg.root
+              ),
               opponentForkBlocks,
               cfg.root
             ),
@@ -2901,6 +2948,7 @@
         };
 
         directDoubleWinBlocks.slice(0, 4).forEach(move => add(move, 'DIRECT_OPEN_FOUR_BLOCK'));
+        doubleOpenThreeBlocks.slice(0, 3).forEach(move => add(move, 'DOUBLE_OPEN_THREE_BLOCK'));
         scored.slice(0, 2).forEach(move => add(move, 'LOCAL_ALPHA_BETA'));
         hotspots.slice(0, 2).forEach(move => add(move, 'PATTERN_EXPERT'));
         opponentForkBlocks.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_FORK_BLOCK'));
@@ -4082,11 +4130,18 @@
       .forEach(add);
     candidates
       .filter(move => (move.recallSources || []).some(source =>
-        ['DIRECT_OPEN_FOUR_BLOCK', 'DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
+        ['DIRECT_OPEN_FOUR_BLOCK', 'DOUBLE_OPEN_THREE_BLOCK', 'DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
       ))
       .forEach(add);
     candidates.forEach(add);
     return selected;
+  }
+
+  function leavesCriticalDoubleOpenThree(move) {
+    const counter = move?.threatSearch?.counterThreat;
+    if (counter?.risk !== 'CRITICAL') return false;
+    return Array.isArray(counter.networkMoves)
+      && counter.networkMoves.some(item => item?.kind === 'DOUBLE_OPEN_THREE');
   }
 
   function hardFilterMaxCandidates(candidates, threatAnalysis) {
@@ -4101,6 +4156,16 @@
 
     const safeFromThreatProof = filtered.filter(move => move.threatSearch?.forced !== true);
     if (safeFromThreatProof.length) filtered = safeFromThreatProof;
+
+    // A DOUBLE_OPEN_THREE is one tempo earlier than an open-four fork. It is
+    // not always a mathematical forced loss because the defender may have a
+    // counter-forcing resource, so do not label it LOSING globally. But when
+    // at least one candidate prevents the CRITICAL junction, never let Jev
+    // prefer a move that voluntarily leaves that junction available.
+    if (moves.length < 16) {
+      const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
+      if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    }
 
     return filtered.slice(0, maxCandidateLimit());
   }
@@ -4594,7 +4659,7 @@
     });
   }
 
-  const MAX_CRITIC_POLICY = 'Assume the candidate is wrong and search for the strongest opponent refutation: immediate tactic, forcing sequence, multi-axis counterattack, residual threat network after a forced defense, premature spending of a forcing resource, or loss of initiative. If no concrete refutation is convincing, choose SURVIVES_BEST_REPLY.';
+  const MAX_CRITIC_POLICY = 'Assume the candidate is wrong and search for the strongest opponent refutation: immediate tactic, forcing sequence, double-open-three or other multi-axis counterattack, residual threat network after a forced defense, premature spending of a forcing resource, or loss of initiative. If no concrete refutation is convincing, choose SURVIVES_BEST_REPLY.';
 
   function addCriticQuestions(questions, candidates) {
     for (const move of candidates) {

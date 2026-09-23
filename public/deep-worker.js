@@ -964,7 +964,9 @@ function threatNetworkMoves(color, limit = 6, radius = 2) {
             ? 'DOUBLE_WINNING_POINTS'
             : winningPoints === 1
               ? 'FORCING_EXTENSION'
-              : 'MULTI_AXIS_JUNCTION',
+              : profile.openThreeDirections >= 2
+                ? 'DOUBLE_OPEN_THREE'
+                : 'MULTI_AXIS_JUNCTION',
           winningPoints,
           openThreeDirections: profile.openThreeDirections,
           fourDirections: profile.fourDirections,
@@ -991,8 +993,10 @@ function threatNetworkMoves(color, limit = 6, radius = 2) {
 
 function counterThreatRisk(networkMoves) {
   const forcing = networkMoves.filter(item => item.winningPoints >= 1);
+  const doubleOpenThrees = networkMoves.filter(item => item.kind === 'DOUBLE_OPEN_THREE');
   const junctions = networkMoves.filter(item => item.kind === 'MULTI_AXIS_JUNCTION');
   if (forcing.some(item => item.winningPoints >= 2)) return 'CRITICAL';
+  if (doubleOpenThrees.length >= 1) return 'CRITICAL';
   if (forcing.length >= 2) return 'HIGH';
   if (forcing.length === 1 && junctions.length >= 1) return 'HIGH';
   if (forcing.length === 1 || junctions.length >= 2) return 'ELEVATED';
