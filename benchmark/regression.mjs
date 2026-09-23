@@ -1683,7 +1683,7 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
  * one so Threat timeout on one root cannot hide whether alternatives are
  * actually provable losses.
  */
-async function testRealGameMove42ResidualRescueProof() {
+async function testRealGameMove42ProofBoundary() {
   const engine = await loadProductionEngine({
     request: async () => {
       throw new Error('Move-42 residual rescue proof must not call Jev');
@@ -1862,7 +1862,13 @@ async function testRealGameMove44M7WorkerAudit() {
     'max',
     { timeBudgetMs: 1100, maxThreatTurns: 6, branch: 9 }
   );
-  console.log('move44 M7 worker audit:', JSON.stringify(threat));
+  const row = threat?.analyses?.find(item => item.move === 'M7');
+  if (!row?.forced || row.timedOut) {
+    throw new Error('Move-44 M7 must complete as a proven forced loss');
+  }
+  if (!Array.isArray(row.line) || !row.line.length) {
+    throw new Error('Move-44 M7 proof must expose a concrete forcing line');
+  }
 }
 
 async function testRealGameMove44ProductionRescueAudit() {
@@ -1900,13 +1906,23 @@ async function testRealGameMove44ProductionRescueAudit() {
   const position = positionFromSequence(sequence);
   engine.setPosition(position.board, position.moves, 'jev-latest');
   const result = await engine.jevMax();
-  console.log('move44 production rescue audit:', JSON.stringify({
-    finalChoice: result.finalChoice,
-    stageNote: result.stageNote,
-    requests,
-    rescue: result.decisionTrace?.rescueSweep || null,
-    shape: result.decisionTrace?.requestShape || null
-  }));
+  const rescue = result.decisionTrace?.rescueSweep || null;
+  const shape = result.decisionTrace?.requestShape || {};
+  if (shape.decisionAuthority !== 'bounded_rescue_exhausted') {
+    throw new Error('Move-44 production replay must exhaust bounded rescue, got ' + shape.decisionAuthority);
+  }
+  if (requests !== 0 || (shape.logicalRequests || 0) !== 0) {
+    throw new Error('Move-44 exhausted rescue must spend 0 Jev requests, got ' + requests);
+  }
+  if (rescue?.mode !== 'BOUNDED_RESCUE_EXHAUSTED') {
+    throw new Error('Move-44 rescue mode should be BOUNDED_RESCUE_EXHAUSTED');
+  }
+  if ((rescue?.unresolved || []).length) {
+    throw new Error('Move-44 rescue must not leave unresolved candidates: ' + rescue.unresolved.join(','));
+  }
+  if ((shape.pairwiseCount || 0) !== 0 || (shape.criticCount || 0) !== 0) {
+    throw new Error('Move-44 exhausted rescue must skip Pairwise/Critic');
+  }
 }
 
 /** The referee must derive its coordinates and board from the shared helpers. */
@@ -1929,7 +1945,7 @@ await testRealGameMove44M7WorkerAudit();
 await testRealGameMove44ProductionRescueAudit();
 await testRealGameMove36CounterfactualThreatAudit();
 await testRealGameMove44AllMainLossTriggersRescueSweep();
-await testRealGameMove42ResidualRescueProof();
+await testRealGameMove42ProofBoundary();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
