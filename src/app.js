@@ -1317,10 +1317,10 @@
 
     const remove = undoPlyCount();
     undoCount++;
-    if (undoCount === 3) triggerEasterEgg('undo_3', '才第三次就反悔？Jev 开始怀疑你是不是在读档。');
-    if (undoCount === 6) triggerEasterEgg('undo_6', '第六次悔棋。你不是在下棋，你是在调试未来。');
-    if (undoCount === 10) triggerEasterEgg('undo_overload', '十次了。Jev 已经默认你每一步都有撤销按钮。');
-    if (undoCount === 20) triggerEasterEgg('undo_multiverse', '二十次悔棋。恭喜，你终于把五子棋玩成了时间旅行模拟器。');
+    if (undoCount === 3) triggerEasterEgg('undo_3', '第三次了，还悔？');
+    if (undoCount === 6) triggerEasterEgg('undo_6', '你这是在读档吧？');
+    if (undoCount === 10) triggerEasterEgg('undo_overload', '十次了，要不重开？');
+    if (undoCount === 20) triggerEasterEgg('undo_multiverse', '别下了，改玩时间旅行吧。');
     pendingHumanThreat = null;
     missedDefensePendingWin = false;
     jevWasInDanger = false;
