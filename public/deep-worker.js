@@ -1027,6 +1027,39 @@ function analyzeCounterThreatNetwork(attacker, defender, branch, radius) {
   };
 }
 
+function directForkCreator(color, radius = 2) {
+  const opponent = otherColor(color);
+  for (const move of nearbyMoves(radius)) {
+    assertTime();
+    if (!isLegalMoveForColor(move.r, move.c, color)) continue;
+    if (!mayContainForcingPattern(move, color)) continue;
+
+    playMove(move, color);
+    let result = null;
+    try {
+      if (isWin(move.r, move.c, color)) continue;
+      const profile = threatPatternProfilePlaced(move.r, move.c, color);
+      if (profile.winningPoints < 2) continue;
+
+      // Pattern geometry is only a prefilter. The proof uses the same legal
+      // immediate-win generator as the rest of the engine so BLACK forbidden
+      // moves / exact-five semantics remain authoritative.
+      const legalWins = immediateWins(color, radius);
+      if (legalWins.length < 2) continue;
+      if (immediateWins(opponent, radius).length) continue;
+
+      result = {
+        move: move.key,
+        winningPoints: legalWins.slice(0, 4).map(item => item.key)
+      };
+    } finally {
+      undoMove(move, color);
+    }
+    if (result) return result;
+  }
+  return null;
+}
+
 function forcingProofKey(attacker, turns) {
   return 'TS:' + attacker + ':' + turns + ':' + hashA + ':' + hashB;
 }
@@ -1122,6 +1155,25 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
   const key = forcingProofKey(attacker, turns);
   const cached = memo.get(key);
   if (cached) return cached;
+
+  // Direct fork creators are deterministic one-ply tactical proofs and must
+  // never depend on generic move-order branch width. This catches positions
+  // such as J5 creating two legal winning points F5/K5 even when J5 is outside
+  // orderedMoves(attacker, branch).
+  if (turns >= 2) {
+    const fork = directForkCreator(attacker, radius);
+    if (fork) {
+      const result = {
+        forced: true,
+        attackerTurns: 2,
+        line: [fork.move],
+        winningPoints: fork.winningPoints,
+        reason: 'direct_double_winning_points'
+      };
+      memo.set(key, result);
+      return result;
+    }
+  }
 
   const candidates = orderedMoves(attacker, branch, radius);
   for (const move of candidates) {
