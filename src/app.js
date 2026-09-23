@@ -1057,6 +1057,9 @@
         atomicScore: Number.isFinite(m.atomicScore) ? m.atomicScore : null,
         pairScore: Number.isFinite(m.pairScore) ? m.pairScore : null,
         finalScore: Number.isFinite(m.finalScore) ? m.finalScore : null,
+        sources: Array.isArray(m.recallSources) ? [...m.recallSources] : [],
+        deepEvidence: m.deepEvidence ? JSON.parse(JSON.stringify(m.deepEvidence)) : null,
+        criticSummary: m.criticSummary ? JSON.parse(JSON.stringify(m.criticSummary)) : null,
         threatSearch: m.threatSearch ? JSON.parse(JSON.stringify(m.threatSearch)) : null,
         facts: m.analysis?.facts ? { ...m.analysis.facts } : null
       }));
@@ -1086,9 +1089,9 @@
   }
 
   function appendDecisionTrace(lines, d) {
-    const modeLabel = d.mode === 'local' ? '本地引擎'
-      : d.mode === 'jev' ? '纯 Jev'
-      : d.mode === 'strong' ? 'Jev 强化'
+    const modeLabel = d.mode === 'local' ? '本地降级'
+      : d.mode === 'jev' ? 'Jev 直觉'
+      : d.mode === 'max' ? 'Jev Max'
       : d.mode === 'grandmaster' ? 'Jev 宗师'
       : 'Jev 大师';
     lines.push(`第 ${d.moveNo} 手 · ${colorShortZh(aiColor())} ${d.chosen}`);
@@ -1101,7 +1104,21 @@
       const v = d.trace.preJevDeepSearch;
       lines.push(`  Jev 前置深搜：source=${v.source || '—'}；status=${v.status || '—'}；depth=${v.depthReached ?? '—'}；elapsed=${v.elapsedMs ?? '—'}ms`);
       if (Array.isArray(v.scores) && v.scores.length) {
-        lines.push(`    深搜评分：${v.scores.map(item => `${item.move}=${compactNumber(item.score, 1)}`).join('；')}`);
+        if (v.status === 'no_completed_depth' || v.rankingOnly) {
+          lines.push(`    深搜：未完成有效 depth，仅保留 fallback rank：${v.scores.map(item => `${item.move}#${item.fallbackRank ?? '—'}`).join('；')}`);
+        } else {
+          lines.push(`    深搜评分：${v.scores.map(item => item.forcedResult
+            ? `${item.move}=${item.forcedResult.result === 'win' ? 'FORCED_WIN' : 'FORCED_LOSS'}`
+            : `${item.move}=${compactNumber(item.score, 1)}`).join('；')}`);
+        }
+        v.scores.slice(0, 5).forEach(item => {
+          if (Array.isArray(item.principalVariation) && item.principalVariation.length) {
+            lines.push(`      ${item.move} PV: ${item.principalVariation.join(' > ')}`);
+          }
+          if (Array.isArray(item.opponentBestReplies) && item.opponentBestReplies.length) {
+            lines.push(`      ${item.move} 对手最强回复：${item.opponentBestReplies.map(reply => reply.move).join(' / ')}`);
+          }
+        });
       }
     }
     if (d.trace?.preJevThreatSearch) {
@@ -1136,7 +1153,11 @@
     if (d.model) lines.push(`  模型：${d.model}`);
     if (d.confidence != null) lines.push(`  最终置信度：${(d.confidence * 100).toFixed(1)}%`);
     if (d.usage) lines.push(`  Token：${d.usage.input_tokens ?? '?'} in / ${d.usage.output_tokens ?? '?'} out`);
-    if (d.client) lines.push(`  API：${d.client.cached ? '命中会话缓存' : `${d.client.attempts || 1} 次请求`}`);
+    if (d.client) {
+      const logical = d.trace?.requestShape?.logicalRequests ?? d.client.logicalRequests ?? null;
+      const actual = d.trace?.requestShape?.httpRequests ?? d.client.attempts ?? null;
+      lines.push(`  Jev requests：${logical ?? (d.client.cached ? 0 : 1)} logical / ${actual ?? 0} upstream`);
+    }
     if (d.thinkDurationMs != null) lines.push(`  本手思考：${formatElapsed(d.thinkDurationMs)}`);
     if (d.fallbackReason) lines.push(`  降级原因：${d.fallbackReason}`);
     if (d.probabilities.length) {
@@ -1147,7 +1168,7 @@
       d.candidates.forEach(c => {
         const f = c.facts || {};
         lines.push(
-          `    #${c.localRank ?? c.rank ?? '—'} ${c.move} | search=${compactNumber(c.searchScore, 1)} | deep=${compactNumber(c.deepSearchScore, 1)} | deepRank=${c.deepSearchRank ?? '—'} | local=${compactNumber(c.localNorm)}`
+          `    #${c.localRank ?? c.rank ?? '—'} ${c.move} | sources=${c.sources?.length ? c.sources.join('+') : '—'} | search=${compactNumber(c.searchScore, 1)} | deep=${compactNumber(c.deepSearchScore, 1)} | deepRank=${c.deepSearchRank ?? '—'} | atomic=${compactNumber(c.atomicScore)} | pair=${compactNumber(c.pairScore)}`
         );
         const factText = [
           f.forced_role && `role=${f.forced_role}`,
@@ -1187,6 +1208,33 @@
           : '';
         lines.push(`    ${item.left} vs ${item.right} -> ${item.choice || '—'}${probs ? ` [${probs}]` : ''}`);
       });
+    }
+
+    if (d.trace?.critic?.length) {
+      lines.push('  Jev Critic / Refutation：');
+      d.trace.critic.forEach(item => {
+        const probs = item.probabilities
+          ? Object.entries(item.probabilities)
+              .sort((a,b) => Number(b[1]) - Number(a[1]))
+              .slice(0, 3)
+              .map(([k,v]) => `${k} ${(Number(v) * 100).toFixed(1)}%`)
+              .join('，')
+          : '';
+        lines.push(`    ${item.move}: ${item.choice || '—'}${probs ? ` [${probs}]` : ''}`);
+      });
+    }
+
+    if (d.trace?.wildcard) {
+      const w = d.trace.wildcard;
+      lines.push(`  Wildcard：requested=${Boolean(w.requested)}；proposed=${w.proposed || '—'}；accepted=${w.accepted || '—'}；enteredFinal=${Boolean(w.enteredFinalists)}；chosen=${Boolean(w.chosen)}`);
+    }
+
+    if (d.trace?.requestShape) {
+      const s = d.trace.requestShape;
+      lines.push(`  性能：local=${s.localSearchElapsedMs ?? '—'}ms；deep=${s.deepElapsedMs ?? '—'}ms；threat=${s.threatElapsedMs ?? '—'}ms；workers<=${s.maxWorkers ?? '—'}`);
+      if (Array.isArray(s.payloadEstimatedInputTokens)) {
+        lines.push(`  Payload 估算：${s.payloadEstimatedInputTokens.join(' / ')} tokens（target<${s.payloadTokenBudgetTarget ?? 5000}，hard<${s.payloadTokenBudgetHard ?? 7000}）`);
+      }
     }
 
     if (d.trace?.pureJev) {
