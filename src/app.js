@@ -1869,15 +1869,37 @@
     return score;
   }
 
+  function createdWinningPointsThroughPlaced(r, c, color) {
+    const points = new Map();
+    for (const [dr, dc] of RENJU_DIRS) {
+      const tokens = lineTokensThrough(r, c, color, dr, dc);
+      const center = 5;
+      for (const index of lineWinningCompletionIndexes(tokens, center)) {
+        const offset = index - center;
+        const rr = r + dr * offset;
+        const cc = c + dc * offset;
+        if (rr < 0 || rr >= SIZE || cc < 0 || cc >= SIZE || board[rr][cc] !== EMPTY) continue;
+        if (!isLegalMoveForColor(rr, cc, color)) continue;
+        if (!wouldWin(rr, cc, color)) continue;
+        const key = coord(rr, cc);
+        points.set(key, { r: rr, c: cc, key });
+      }
+    }
+    return [...points.values()];
+  }
+
   function directDoubleWinCreators(color, radius = 2, maxCount = Infinity) {
     const movesFound = [];
+    // Callers only use this after confirming the side has no win-now point.
+    // Therefore every newly-created immediate win must pass through the creator,
+    // so four directional lines are sufficient; no nested full-board win scan.
     for (const move of nearbyMoves(radius)) {
       if (!isLegalMoveForColor(move.r, move.c, color)) continue;
       board[move.r][move.c] = color;
       let winningPoints = [];
       try {
         if (isWin(move.r, move.c, color)) continue;
-        winningPoints = immediateWins(color, radius);
+        winningPoints = createdWinningPointsThroughPlaced(move.r, move.c, color);
       } finally {
         board[move.r][move.c] = EMPTY;
       }
