@@ -2,7 +2,7 @@
   'use strict';
 
   const TIMEOUT_SCALE = 2;
-const SIZE = 15;
+  const SIZE = 15;
   const COLS = 'ABCDEFGHIJKLMNO'.split('');
   const EMPTY = 0, BLACK = 1, WHITE = 2;
 
