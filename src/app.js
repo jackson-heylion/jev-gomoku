@@ -2457,17 +2457,96 @@
     return { common, criteria: compactCriteria };
   }
 
-  function buildFinalJevPayload(context, candidates, deepAnalysis, threatAnalysis = null) {
-    const deepRows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
-    const threatRows = Array.isArray(threatAnalysis?.analyses) ? threatAnalysis.analyses : [];
-    const threatByMove = new Map(threatRows.map(item => [item.move, item]));
-    const deepByMove = new Map(deepRows.map((item, index) => [
-      item.move,
+  function isSentinelSearchScore(score) {
+    return Number.isFinite(score) && Math.abs(score) >= MATE_SCORE * .9;
+  }
+
+  function structuredForcedResult(score, proofType = 'SEARCH') {
+    if (!isSentinelSearchScore(score)) return null;
+    return {
+      forced: true,
+      result: score > 0 ? 'win' : 'loss',
+      proof_type: proofType
+    };
+  }
+
+  function localScoreEvidence(score) {
+    if (!Number.isFinite(score)) return {};
+    const forced = structuredForcedResult(score, 'LOCAL_ALPHA_BETA');
+    return forced
+      ? { local_forced_result: forced }
+      : { local_alpha_beta_score: Number(score.toFixed(2)) };
+  }
+
+  function deepRowForJev(row, deepAnalysis) {
+    if (!row) return null;
+    const noDepth = deepAnalysis?.status === 'no_completed_depth'
+      || Number(deepAnalysis?.depthReached || 0) <= 0
+      || deepAnalysis?.rankingOnly === true;
+    if (noDepth) {
+      return compactEvidence({
+        status: 'no_completed_depth',
+        ranking_only: true,
+        fallback_rank: row.fallbackRank ?? null
+      });
+    }
+
+    const forced = row.forcedResult?.forced
+      ? {
+          forced: true,
+          result: row.forcedResult.result,
+          proof_type: row.forcedResult.proofType || 'DEEP_SEARCH',
+          mate_or_forcing_distance: row.forcedResult.mateOrForcingDistance ?? null
+        }
+      : structuredForcedResult(row.score, 'DEEP_SEARCH');
+
+    const replies = Array.isArray(row.opponentBestReplies)
+      ? row.opponentBestReplies.slice(0, 2).map(reply => compactEvidence({
+          move: reply.move,
+          score: Number.isFinite(reply.score) && !isSentinelSearchScore(reply.score)
+            ? Number(reply.score.toFixed(2))
+            : null,
+          forced_result: reply.forcedResult?.forced
+            ? compactEvidence({
+                result: reply.forcedResult.result,
+                proof_type: reply.forcedResult.proofType || 'DEEP_SEARCH',
+                mate_or_forcing_distance: reply.forcedResult.mateOrForcingDistance ?? null
+              })
+            : structuredForcedResult(reply.score, 'DEEP_SEARCH_REPLY'),
+          tactical_facts: reply.tacticalFacts || null
+        }))
+      : [];
+
+    return compactEvidence({
+      status: 'completed',
+      ranking_only: false,
+      score: !forced && Number.isFinite(row.score) ? Number(row.score.toFixed(2)) : null,
+      forced_result: forced,
+      principal_variation: Array.isArray(row.principalVariation)
+        ? row.principalVariation.slice(0, 8)
+        : null,
+      opponent_best_replies: replies.length ? replies : null
+    });
+  }
+
+  function deepEvidenceMap(deepAnalysis) {
+    const rows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+    return new Map(rows.map((row, index) => [
+      row.move,
       {
-        score: Number.isFinite(item.score) ? item.score : null,
-        rank: index + 1
+        row,
+        rank: deepAnalysis?.status === 'completed' && Number(deepAnalysis?.depthReached || 0) > 0
+          ? index + 1
+          : null,
+        evidence: deepRowForJev(row, deepAnalysis)
       }
     ]));
+  }
+
+  function buildFinalJevPayload(context, candidates, deepAnalysis, threatAnalysis = null) {
+    const threatRows = Array.isArray(threatAnalysis?.analyses) ? threatAnalysis.analyses : [];
+    const threatByMove = new Map(threatRows.map(item => [item.move, item]));
+    const deepByMove = deepEvidenceMap(deepAnalysis);
     const criteria = {};
 
     for (const move of candidates) {
@@ -2476,12 +2555,13 @@
       const facts = move.analysis?.facts || {};
       criteria[move.key] = compactEvidence({
         local_rank: move.rank ?? null,
-        local_alpha_beta_score: Number.isFinite(move.searchScore) ? Number(move.searchScore.toFixed(2)) : null,
+        ...localScoreEvidence(move.searchScore),
         deep_search_rank: deep?.rank ?? null,
-        deep_search_score: Number.isFinite(deep?.score) ? Number(deep.score.toFixed(2)) : null,
+        deep_search: deep?.evidence || null,
         opponent_forcing_proof: threat?.forced === true ? 'FOUND' : threat?.timedOut ? 'TIMEOUT' : threat ? 'NOT_FOUND' : null,
-        opponent_forcing_line: Array.isArray(threat?.line) && threat.line.length ? threat.line.join(' > ') : null,
+        opponent_forcing_line: Array.isArray(threat?.line) && threat.line.length ? threat.line.slice(0, 12).join(' > ') : null,
         opponent_forcing_attacker_turns: Number.isFinite(threat?.attackerTurns) ? threat.attackerTurns : null,
+        candidate_sources: Array.isArray(move.recallSources) && move.recallSources.length ? move.recallSources : null,
         forced_role: facts.forced_role || 'NORMAL',
         tactical_safety: facts.tactical_safety || 'UNKNOWN',
         attack_shape: facts.attack_shape || 'POSITIONAL',
@@ -2523,6 +2603,7 @@
           source: deepAnalysis?.source || 'unavailable',
           status: deepAnalysis?.status || 'unavailable',
           depth_reached: deepAnalysis?.depthReached ?? null,
+          ranking_only: Boolean(deepAnalysis?.rankingOnly),
           timed_out: Boolean(deepAnalysis?.timedOut)
         }),
         threat_space_search: threatAnalysis ? compactEvidence({
