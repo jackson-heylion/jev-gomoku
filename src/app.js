@@ -4438,6 +4438,7 @@
         || (a.localRank || 999) - (b.localRank || 999))
       .slice(0, Math.min(4, candidates.length));
 
+    const preCoverageCandidates = [...candidates];
     const coverage = await closeMaxThreatCoverage(candidates, atomicTop4, threatAnalysis);
     candidates = coverage.candidates;
     threatAnalysis = coverage.threatAnalysis;
@@ -4446,10 +4447,11 @@
         || (a.localRank || 999) - (b.localRank || 999))
       .slice(0, Math.min(4, candidates.length));
 
-    if (allMaxCandidatesHardLost(candidates)) {
+    if (!candidates.length || allMaxCandidatesHardLost(candidates)) {
+      const rescueBaseline = candidates.length ? candidates : preCoverageCandidates;
       return runMaxRescueSweep(
         context,
-        candidates,
+        rescueBaseline,
         deepAnalysis,
         threatAnalysis,
         {
