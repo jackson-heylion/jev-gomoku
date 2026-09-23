@@ -305,3 +305,17 @@ ChatGPT Sites 配置：
 ### Wildcard Threat-proof 安全边界
 
 Jev 的 `OTHER` 只能扩大候选召回，不能绕过确定性安全规则。主候选被 VCF / Threat-space / deterministic fork proof 判定为必败后，同一落点不能通过 wildcard 再次进入 Final。若对手已经存在两个不同的立即胜点，则记为 `forced_loss_double_win`，Jev Max 直接 0 请求短路，不再让 Atomic / Pairwise / Final 在多个必败防点之间投票。
+
+
+### Threat coverage closure
+
+Jev Max 仍保留 6～8 个异构候选，但初始 Threat Worker 只分析最多 6 个。为避免低排名候选因为“缺少风险证据”反而在 Jev 阶段占便宜：
+
+- 本地战术预算耗尽时，候选标记为 `UNVERIFIED_BUDGET`，不再伪装成 `SAFE`。
+- Atomic 仍可独立评价全部主候选。
+- 如果 Atomic 把尚未完成 Threat 校验的 #7/#8 候选抬入 Top 4，会触发一次最多 2 候选、850ms 上限的 supplemental Threat Worker。
+- supplemental 校验发生在 Pairwise / Critic 之前；已证明 forced-loss 的候选直接移除。
+- supplemental 超时或缺失结果时 fail-closed：该未验证候选不能进入 Pairwise / Final。
+- 该补检与初始 Deep/Threat Worker 不并发叠加，因此重型 Worker 并发数仍不超过 2。
+
+这样 Final Judge 不再比较“风险证据完整的候选”和“因为没分析而看起来干净的候选”。
