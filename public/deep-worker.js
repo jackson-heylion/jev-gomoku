@@ -1240,34 +1240,53 @@ function runThreatSearch(message) {
       risk: 'NONE',
       reason: 'not_analyzed',
       forcedDefenseMove: null,
-      networkMoves: []
+      networkMoves: [],
+      timedOut: false
     };
 
     playMove(move, rootSide);
     try {
       if (!isWin(move.r, move.c, rootSide)) {
         const memo = new Map();
-        proof = proveForcingWin(opponentSide, maxThreatTurns, branch, radius, memo);
-        if (!proof.forced) {
-          counterThreat = analyzeCounterThreatNetwork(
-            opponentSide,
-            rootSide,
-            branch,
-            radius
-          );
-        } else {
+        try {
+          proof = proveForcingWin(opponentSide, maxThreatTurns, branch, radius, memo);
+        } catch (error) {
+          if (error !== TIMEOUT) throw error;
+          timedOut = true;
+          anyTimedOut = true;
+        }
+
+        if (!timedOut && !proof.forced) {
+          try {
+            counterThreat = {
+              ...analyzeCounterThreatNetwork(
+                opponentSide,
+                rootSide,
+                branch,
+                radius
+              ),
+              timedOut: false
+            };
+          } catch (error) {
+            if (error !== TIMEOUT) throw error;
+            counterThreat = {
+              risk: 'UNKNOWN',
+              reason: 'advisory_timeout',
+              forcedDefenseMove: null,
+              networkMoves: [],
+              timedOut: true
+            };
+          }
+        } else if (proof.forced) {
           counterThreat = {
             risk: 'PROVEN_FORCED_LOSS',
             reason: 'hard_forcing_proof_available',
             forcedDefenseMove: null,
-            networkMoves: []
+            networkMoves: [],
+            timedOut: false
           };
         }
       }
-    } catch (error) {
-      if (error !== TIMEOUT) throw error;
-      timedOut = true;
-      anyTimedOut = true;
     } finally {
       undoMove(move, rootSide);
     }
@@ -1279,14 +1298,7 @@ function runThreatSearch(message) {
       attackerTurns: proof.attackerTurns ?? null,
       line: Array.isArray(proof.line) ? proof.line : [],
       reason: timedOut ? 'timeout' : proof.reason,
-      counterThreat: timedOut
-        ? {
-            risk: 'UNKNOWN',
-            reason: 'timeout',
-            forcedDefenseMove: counterThreat.forcedDefenseMove || null,
-            networkMoves: counterThreat.networkMoves || []
-          }
-        : counterThreat
+      counterThreat
     });
   }
 
