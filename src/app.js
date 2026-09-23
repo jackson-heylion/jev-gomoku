@@ -2877,7 +2877,7 @@
         // Double-open-three creators are one ply earlier than the existing
         // direct-double-win/open-four detector. They matter in the early-midgame
         // too, so do not gate them behind the old moves.length >= 16 threshold.
-        const opponentDoubleOpenThrees = mode === 'max' && !localSearchExpired()
+        const opponentDoubleOpenThrees = mode === 'max' && moves.length < 16 && !localSearchExpired()
           ? directDoubleOpenThreeCreators(opponent, cfg.radius, 3)
           : { count: 0, points: [], moves: [] };
         const opponentForks = moves.length >= 16 && !localSearchExpired()
