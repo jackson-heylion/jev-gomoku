@@ -80,7 +80,7 @@ FINAL MOVE
 - Atomic / Pairwise Top1 一致率。
 - wildcard 请求、通过验证、进入 final、最终被选次数。
 - VCF 选择、Threat filter 命中。
-- 平均 Jev 请求数、input/output token。
+- Jev 请求分布：0/1/2/>2 请求回合、1-request 命中率、Fan-Out 单请求收敛率、平均 Jev 请求数、input/output token。
 - Local / Deep / Threat 阶段耗时、整手决策耗时。
 - Worker timeout、`no_completed_depth`。
 - Payload >5k / >7k 次数。
