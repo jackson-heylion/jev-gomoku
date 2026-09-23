@@ -1251,6 +1251,15 @@
     if (d.trace?.wildcard) {
       const w = d.trace.wildcard;
       lines.push(`  Wildcard：requested=${Boolean(w.requested)}；proposed=${w.proposed || '—'}；accepted=${w.accepted || '—'}；enteredFinal=${Boolean(w.enteredFinalists)}；chosen=${Boolean(w.chosen)}`);
+      if (Array.isArray(w.excludedByThreatProof) && w.excludedByThreatProof.length) {
+        lines.push(`    Threat proof 排除：${w.excludedByThreatProof.join(' / ')}`);
+      }
+      if (w.validation) {
+        lines.push(`    Wildcard 校验：accepted=${Boolean(w.validation.accepted)}；reason=${w.validation.reason || '—'}；source=${w.validation.source || '—'}；elapsed=${w.validation.elapsedMs ?? '—'}ms`);
+        if (Array.isArray(w.validation.forcedLine) && w.validation.forcedLine.length) {
+          lines.push(`    Wildcard forced line：${w.validation.forcedLine.join('>')}`);
+        }
+      }
     }
 
     if (d.trace?.requestShape) {
