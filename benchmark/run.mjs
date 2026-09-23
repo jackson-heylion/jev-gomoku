@@ -386,6 +386,10 @@ function engineClientTrace(result) {
       finalistCount: shape.finalistCount ?? null,
       maxWorkers: shape.maxWorkers ?? null,
       threatFilterCount: shape.threatFilterCount ?? 0,
+      threatSupplementalElapsedMs: shape.threatSupplementalElapsedMs ?? null,
+      threatSupplementalCandidates: shape.threatSupplementalCandidates ?? [],
+      threatCoverageRejectedIncomplete: shape.threatCoverageRejectedIncomplete ?? [],
+      pairwiseThreatCoverageComplete: shape.pairwiseThreatCoverageComplete ?? null,
       payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens ?? null,
       localSearchElapsedMs: shape.localSearchElapsedMs ?? null,
       deepElapsedMs: shape.deepElapsedMs ?? null,
@@ -688,6 +692,10 @@ function emptyVolume() {
     counterThreatHighCritical: 0,
     counterThreatForcedDefenseResidual: 0,
     counterThreatAdvisoryTimeouts: 0,
+    threatCoverageSupplementalTurns: 0,
+    threatCoverageSupplementalCandidates: 0,
+    threatCoverageRejectedIncomplete: 0,
+    threatCoverageSupplementalElapsed: [],
     workerTimeouts: 0,
     payloadOverTarget: 0,
     payloadOverHard: 0,
@@ -742,6 +750,16 @@ function accumulate(volume, record, options) {
   if (Number.isFinite(shape.localSearchElapsedMs)) volume.localElapsed.push(shape.localSearchElapsedMs);
   if (Number.isFinite(shape.deepElapsedMs)) volume.deepElapsed.push(shape.deepElapsedMs);
   if (Number.isFinite(shape.threatElapsedMs)) volume.threatElapsed.push(shape.threatElapsedMs);
+  if (Number.isFinite(shape.threatSupplementalElapsedMs)) {
+    volume.threatCoverageSupplementalTurns++;
+    volume.threatCoverageSupplementalElapsed.push(shape.threatSupplementalElapsedMs);
+  }
+  volume.threatCoverageSupplementalCandidates += Array.isArray(shape.threatSupplementalCandidates)
+    ? shape.threatSupplementalCandidates.length
+    : 0;
+  volume.threatCoverageRejectedIncomplete += Array.isArray(shape.threatCoverageRejectedIncomplete)
+    ? shape.threatCoverageRejectedIncomplete.length
+    : 0;
 
   if (record.engine === 'jev-max') {
     if (!record.isOverride) volume.finalLocal1Matches++;
@@ -847,6 +865,20 @@ function accumulate(volume, record, options) {
           kind: 'jev_max_unbounded_analysis',
           ply: record.ply,
           detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
+        });
+      }
+      if ((shape.threatSupplementalCandidates || []).length > 2) {
+        volume.violations.push({
+          kind: 'jev_max_threat_supplemental_limit',
+          ply: record.ply,
+          detail: 'supplemental candidates=' + JSON.stringify(shape.threatSupplementalCandidates)
+        });
+      }
+      if (shape.pairwiseThreatCoverageComplete === false) {
+        volume.violations.push({
+          kind: 'jev_max_pairwise_threat_coverage',
+          ply: record.ply,
+          detail: 'Pairwise received a candidate without completed Threat evidence'
         });
       }
       if ((shape.maxWorkers || 0) > 2) {
@@ -1034,6 +1066,12 @@ function summarize(games, arms, options) {
       counterThreatHighCritical: volume.counterThreatHighCritical,
       counterThreatForcedDefenseResidual: volume.counterThreatForcedDefenseResidual,
       counterThreatAdvisoryTimeouts: volume.counterThreatAdvisoryTimeouts,
+      threatCoverageSupplementalTurns: volume.threatCoverageSupplementalTurns,
+      threatCoverageSupplementalCandidates: volume.threatCoverageSupplementalCandidates,
+      threatCoverageRejectedIncomplete: volume.threatCoverageRejectedIncomplete,
+      avgThreatCoverageSupplementalElapsedMs: volume.threatCoverageSupplementalElapsed.length
+        ? volume.threatCoverageSupplementalElapsed.reduce((sum, value) => sum + value, 0) / volume.threatCoverageSupplementalElapsed.length
+        : 0,
       workerTimeouts: volume.workerTimeouts,
       payloadOverTarget: volume.payloadOverTarget,
       payloadOverHard: volume.payloadOverHard,
@@ -1328,8 +1366,8 @@ function renderMarkdown(report) {
     lines.push('');
     lines.push('## Jev Max 专项指标');
     lines.push('');
-    lines.push('| Atomic/Pairwise 一致率 | 与 Local #1 一致 | 与 Deep #1 一致 | wildcard 请求/接受/最终选择 | VCF 选择 | Threat filter 命中 | Counter-threat 告警(H/C) | Forced-defense residual | Advisory timeout | Worker timeout | Payload >5k / >7k |');
-    lines.push('|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
+    lines.push('| Atomic/Pairwise 一致率 | 与 Local #1 一致 | 与 Deep #1 一致 | wildcard 请求/接受/最终选择 | VCF 选择 | Threat filter 命中 | Counter-threat 告警(H/C) | Forced-defense residual | Coverage 补检(候选/拒绝) | Advisory timeout | Worker timeout | Payload >5k / >7k |');
+    lines.push('|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
     lines.push(
       '| ' + (max.atomicPairwiseConsistency == null ? 'n/a' : pct(max.atomicPairwiseConsistency)) +
       ' | ' + max.finalLocal1Matches + '/' + max.decisions +
@@ -1339,6 +1377,7 @@ function renderMarkdown(report) {
       ' | ' + max.threatFilterHits +
       ' | ' + max.counterThreatWarnings + ' (' + max.counterThreatHighCritical + ')' +
       ' | ' + max.counterThreatForcedDefenseResidual +
+      ' | ' + max.threatCoverageSupplementalTurns + ' (' + max.threatCoverageSupplementalCandidates + '/' + max.threatCoverageRejectedIncomplete + ')' +
       ' | ' + max.counterThreatAdvisoryTimeouts +
       ' | ' + max.workerTimeouts +
       ' | ' + max.payloadOverTarget + ' / ' + max.payloadOverHard + ' |'
@@ -1346,6 +1385,7 @@ function renderMarkdown(report) {
     lines.push('');
     lines.push('- 本地 / Deep / Threat 平均耗时：'
       + num(max.avgLocalElapsedMs) + ' / ' + num(max.avgDeepElapsedMs) + ' / ' + num(max.avgThreatElapsedMs) + ' ms');
+    lines.push('- Threat coverage 补检平均耗时：' + num(max.avgThreatCoverageSupplementalElapsedMs) + ' ms（仅触发回合统计）');
   }
 
   lines.push('');

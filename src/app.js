@@ -1197,6 +1197,8 @@
         const factText = [
           f.forced_role && `role=${f.forced_role}`,
           f.tactical_safety && `safety=${f.tactical_safety}`,
+          f.tactical_verification && `localVerify=${f.tactical_verification}`,
+          f.threat_verification && `threatVerify=${f.threat_verification}`,
           f.attack_shape && `attack=${f.attack_shape}`,
           f.initiative && `initiative=${f.initiative}`,
           f.vcf_status && `VCF=${f.vcf_status}`,
@@ -1246,6 +1248,14 @@
           : '';
         lines.push(`    ${item.move}: ${item.choice || '—'}${probs ? ` [${probs}]` : ''}`);
       });
+    }
+
+    if (d.trace?.threatCoverage?.supplementalTriggered) {
+      const tc = d.trace.threatCoverage;
+      lines.push(`  Threat coverage 补检：${(tc.supplementalCandidates || []).join(' / ') || '—'}；elapsed=${tc.elapsedMs ?? '—'}ms`);
+      if (Array.isArray(tc.rejectedIncomplete) && tc.rejectedIncomplete.length) {
+        lines.push(`    未完成校验而 fail-closed：${tc.rejectedIncomplete.join(' / ')}`);
+      }
     }
 
     if (d.trace?.wildcard) {
@@ -1849,11 +1859,15 @@
 
   function countForkCreators(color, limit = 10, radius = 2, maxCount = Infinity) {
     let count = 0;
+    let complete = true;
     const points = [];
     const movesFound = [];
     const candidates = orderedMoves(color, limit, radius);
     for (const m of candidates) {
-      if (localSearchExpired()) break;
+      if (localSearchExpired()) {
+        complete = false;
+        break;
+      }
       board[m.r][m.c] = color;
       const wins = isWin(m.r, m.c, color) ? 2 : immediateWins(color, radius).length;
       const defenderImmediate = wins >= 2 ? immediateWins(otherColor(color), radius).length : 0;
@@ -1865,7 +1879,7 @@
         if (count >= maxCount) break;
       }
     }
-    return { count, points, moves: movesFound };
+    return { count, points, moves: movesFound, complete };
   }
 
   function forcingExtensions(color, limit = 8, radius = 2) {
@@ -2056,7 +2070,7 @@
     return 'MULTIPLE';
   }
 
-  function analyzeAdvancedCandidate(move, forced, cfg) {
+  function analyzeAdvancedCandidate(move, forced, cfg, mode = 'expert') {
     const side = aiColor();
     const opponent = otherColor(side);
     const blockedOpponentPattern = previewThreatPattern(move, opponent);
@@ -2078,7 +2092,9 @@
       && searchVCTPressure(opponent, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
-    let safety = 'SAFE';
+    const tacticalVerificationComplete = opponentForks.complete !== false
+      && !Boolean(activeLocalSearch?.timedOut);
+    let safety = mode === 'max' && !tacticalVerificationComplete ? 'UNVERIFIED_BUDGET' : 'SAFE';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
     else if (opponentForks.count >= 1) safety = 'LOSING';
@@ -2111,6 +2127,7 @@
       facts: {
         forced_role: forcedRole,
         tactical_safety: safety,
+        tactical_verification: tacticalVerificationComplete ? 'COMPLETE' : 'BUDGET_EXHAUSTED',
         attack_shape: attack,
         initiative,
         own_immediate_winning_points_after_move: countLabel(ownImmediate),
@@ -2312,7 +2329,7 @@
 
       selected.forEach((m, i) => {
         m.rank = i + 1;
-        m.analysis = analyzeAdvancedCandidate(m, forced, cfg);
+        m.analysis = analyzeAdvancedCandidate(m, forced, cfg, mode);
         m.analysis.facts.candidate_sources = [...(m.recallSources || [])];
         if (m.analysis.vcf) addRecallSource(m, 'VCF');
         if (m.analysis.vct) addRecallSource(m, 'VCT');
@@ -2368,7 +2385,7 @@
       counter_threat: 'A move is not automatically safe just because it creates one forcing threat. If the opponent has a forced defensive reply, inspect the board after that reply: residual forcing extensions, fork creators, and multi-axis junctions may leave the original attack intact.',
       geometry: 'Inspect horizontal, vertical, and both diagonals equally. Multi-axis intersections and moves that reduce the opponent reply set are strategically important.',
       opening: 'In the early game, value connected central influence, multiple two-to-three extension routes, and denying the opponent equivalent extension routes over isolated stones.',
-      caution: 'pattern_* fields are fast heuristic shape evidence, not mathematical proof. threat-space FOUND and proven VCF remain higher authority.'
+      caution: 'pattern_* fields are fast heuristic shape evidence, not mathematical proof. Missing or timed-out tactical evidence is UNKNOWN, never SAFE. Before comparing finalists, require equivalent Threat-space coverage; threat-space FOUND and proven VCF remain higher authority.'
     };
   }
 
@@ -3276,6 +3293,7 @@
       const evidence = byMove.get(move.key) || null;
       move.threatSearch = evidence;
       if (!evidence || !move.analysis?.facts) continue;
+      move.analysis.facts.threat_verification = evidence.timedOut ? 'TIMEOUT' : 'COMPLETED';
       move.analysis.facts.opponent_forcing_proof = evidence.forced
         ? 'FOUND'
         : evidence.timedOut ? 'TIMEOUT' : 'NOT_FOUND';
@@ -3293,9 +3311,14 @@
         move.analysis.facts.tactical_safety = 'LOSING';
       } else if (
         ['CRITICAL', 'HIGH'].includes(counterThreat?.risk)
-        && move.analysis.facts.tactical_safety === 'SAFE'
+        && !['LOSING', 'UNSAFE'].includes(move.analysis.facts.tactical_safety)
       ) {
         move.analysis.facts.tactical_safety = 'TACTICALLY_RISKY';
+      } else if (
+        move.analysis.facts.tactical_safety === 'UNVERIFIED_BUDGET'
+        && !evidence.timedOut
+      ) {
+        move.analysis.facts.tactical_safety = 'THREAT_VETTED_NO_FORCED_LOSS';
       }
     }
     return byMove;
@@ -3454,6 +3477,31 @@
     }
   }
 
+  function selectMaxThreatCandidates(candidates, limit = 6) {
+    const selected = [];
+    const seen = new Set();
+    const add = move => {
+      if (!move || selected.length >= limit || seen.has(move.key)) return;
+      selected.push(move);
+      seen.add(move.key);
+    };
+
+    // Preserve strong root coverage, then spend remaining slots on candidates
+    // whose local tactical verification is incomplete. Missing evidence should
+    // increase verification priority rather than make a candidate look safer.
+    candidates.slice(0, Math.min(4, candidates.length)).forEach(add);
+    candidates
+      .filter(move => move.analysis?.facts?.tactical_safety === 'UNVERIFIED_BUDGET')
+      .forEach(add);
+    candidates
+      .filter(move => (move.recallSources || []).some(source =>
+        ['DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
+      ))
+      .forEach(add);
+    candidates.forEach(add);
+    return selected;
+  }
+
   function hardFilterMaxCandidates(candidates, threatAnalysis) {
     attachThreatEvidence(candidates, threatAnalysis);
     let filtered = candidates;
@@ -3468,6 +3516,97 @@
     if (safeFromThreatProof.length) filtered = safeFromThreatProof;
 
     return filtered.slice(0, maxCandidateLimit());
+  }
+
+  function mergeThreatAnalysis(primary, supplemental) {
+    if (!primary) return supplemental || null;
+    if (!supplemental) return primary;
+    const byMove = new Map();
+    for (const row of primary.analyses || []) byMove.set(row.move, row);
+    for (const row of supplemental.analyses || []) byMove.set(row.move, row);
+    return {
+      ...primary,
+      status: primary.status === 'completed' && supplemental.status === 'completed'
+        ? 'completed'
+        : primary.status || supplemental.status || 'unavailable',
+      timedOut: Boolean(primary.timedOut || supplemental.timedOut),
+      elapsedMs: (Number(primary.elapsedMs) || 0) + (Number(supplemental.elapsedMs) || 0),
+      budgetMs: (Number(primary.budgetMs) || 0) + (Number(supplemental.budgetMs) || 0),
+      nodes: (Number(primary.nodes) || 0) + (Number(supplemental.nodes) || 0),
+      analyses: [...byMove.values()],
+      supplemental: {
+        trigger: supplemental.trigger || null,
+        status: supplemental.status || null,
+        timedOut: Boolean(supplemental.timedOut),
+        elapsedMs: supplemental.elapsedMs ?? null,
+        budgetMs: supplemental.budgetMs ?? null,
+        candidates: (supplemental.analyses || []).map(row => row.move)
+      }
+    };
+  }
+
+  function hasCompletedThreatEvidence(threatAnalysis, key) {
+    const row = threatEvidenceForMove(threatAnalysis, key);
+    return Boolean(row && !row.timedOut);
+  }
+
+  async function closeMaxThreatCoverage(candidates, provisionalTop4, threatAnalysis) {
+    const promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+    if (!promotedNeedsProof) {
+      return {
+        candidates,
+        threatAnalysis,
+        supplemental: null,
+        rejectedIncomplete: []
+      };
+    }
+
+    // Initial Threat Search intentionally checks at most six candidates. If
+    // Atomic promotes #7/#8 into Top 4, validate all remaining unvetted main
+    // candidates in one bounded supplemental batch (normally at most two).
+    const missingTop = provisionalTop4
+      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+    const missingAll = candidates
+      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+    const unvetted = [...new Map(
+      [...missingTop, ...missingAll].map(move => [move.key, move])
+    ).values()].slice(0, 2);
+    if (!unvetted.length) {
+      return {
+        candidates,
+        threatAnalysis,
+        supplemental: null,
+        rejectedIncomplete: []
+      };
+    }
+
+    updateApiState('busy', 'Jev Max：校验 Atomic 晋级候选的 Threat 安全性…');
+    const supplemental = await runThreatWorkerAnalysis(
+      unvetted,
+      'max',
+      'jev_max_atomic_promotion_validation',
+      { timeBudgetMs: 850, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 8 }
+    );
+    const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
+    attachThreatEvidence(candidates, merged);
+
+    // Once coverage closure is triggered, missing evidence is never allowed to
+    // become a comparative advantage. Candidates still lacking a completed
+    // Threat result are fail-closed before Pairwise, even if the 2-candidate
+    // supplemental budget could not reach all of them.
+    const rejectedIncomplete = candidates
+      .filter(move => !hasCompletedThreatEvidence(merged, move.key))
+      .map(move => move.key);
+    const rejectedSet = new Set(rejectedIncomplete);
+    const covered = candidates.filter(move => !rejectedSet.has(move.key));
+    const filtered = hardFilterMaxCandidates(covered, merged);
+
+    return {
+      candidates: filtered,
+      threatAnalysis: merged,
+      supplemental,
+      rejectedIncomplete
+    };
   }
 
   function threatEvidenceForMove(threatAnalysis, key) {
@@ -3670,6 +3809,8 @@
       attack_shape: facts.attack_shape || null,
       initiative: facts.initiative || null,
       tactical_safety: facts.tactical_safety || null,
+      local_tactical_verification: facts.tactical_verification || null,
+      threat_verification: facts.threat_verification || (move.threatSearch ? (move.threatSearch.timedOut ? 'TIMEOUT' : 'COMPLETED') : 'NOT_RUN'),
       vcf_status: facts.vcf_status || null,
       vct_status: facts.vct_status || null,
       threat_search: move.threatSearch ? compactEvidence({
@@ -3938,12 +4079,13 @@
     }
 
     const deepCandidates = candidates.slice(0, Math.min(5, candidates.length));
-    const threatCandidates = candidates.slice(0, Math.min(6, candidates.length));
+    const threatCandidates = selectMaxThreatCandidates(candidates, 6);
     updateApiState('busy', 'Jev Max：Deep 与 Threat Worker 并行准备证据…');
-    const [deepAnalysis, threatAnalysis] = await Promise.all([
+    const [deepAnalysis, initialThreatAnalysis] = await Promise.all([
       runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel'),
       runThreatWorkerAnalysis(threatCandidates, 'max', 'jev_max_parallel')
     ]);
+    let threatAnalysis = initialThreatAnalysis;
 
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
@@ -3968,12 +4110,28 @@
     updateApiState('busy', 'Jev Max：Atomic 独立评估候选…');
     const atomicData = await callJev(atomicPayload);
     const atomic = atomicTraceFor(candidates, atomicData?.answers || {});
+    const atomicCandidateCount = candidates.length;
     const recallChoice = String(atomicData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
 
-    const atomicTop4 = [...candidates]
+    let atomicTop4 = [...candidates]
       .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
         || (a.localRank || 999) - (b.localRank || 999))
       .slice(0, Math.min(4, candidates.length));
+
+    const coverage = await closeMaxThreatCoverage(candidates, atomicTop4, threatAnalysis);
+    candidates = coverage.candidates;
+    threatAnalysis = coverage.threatAnalysis;
+    atomicTop4 = [...candidates]
+      .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
+        || (a.localRank || 999) - (b.localRank || 999))
+      .slice(0, Math.min(4, candidates.length));
+
+    const pairwiseThreatCoverageComplete = atomicTop4.every(move =>
+      hasCompletedThreatEvidence(threatAnalysis, move.key)
+    );
+    if (!pairwiseThreatCoverageComplete) {
+      throw new Error('Jev Max Threat coverage closure invariant failed before Pairwise');
+    }
 
     const tournament = buildPairwisePayload(atomicTop4);
     tournament.payload.state.task = 'Jev Max stage 2: order-balanced pairwise tournament plus adversarial refutation analysis.';
@@ -4135,11 +4293,17 @@
           }))
         } : null,
         preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
+        threatCoverage: {
+          supplementalTriggered: Boolean(coverage.supplemental),
+          supplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
+          rejectedIncomplete: coverage.rejectedIncomplete,
+          elapsedMs: coverage.supplemental?.elapsedMs ?? null
+        },
         finalDecision: finalData ? compactAnswer(answer) : null,
         requestShape: {
           decisionAuthority: finalData ? 'jev_max_final' : 'jev_max_pairwise_convergence',
           candidateCount: candidates.length,
-          atomicCount: candidates.length,
+          atomicCount: atomicCandidateCount,
           pairwiseCount: tournament.pairs.length * 2,
           criticCount: atomicTop4.length,
           finalistCount: finalists.length,
@@ -4154,6 +4318,10 @@
           localSearchTimedOut: Boolean(context.localSearch?.timedOut),
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
           threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
+          threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
+          threatSupplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
+          threatCoverageRejectedIncomplete: coverage.rejectedIncomplete,
+          pairwiseThreatCoverageComplete,
           threatFilterCount: context.candidates.length - candidates.length
         },
         localEvidence: finalCandidates.map(move => ({

@@ -163,3 +163,20 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 - `I7` 不得进入 `wildcard_pool`。
 - Jev Max 最终必须从 `H5/H9` 的存活防点中选择。
 - 若强制重放错误线到 `... I7 H5`，白方面对 `H4/H9` 两个立即胜点时必须标记 `forced_loss_double_win`，并保持 0 次 Jev 请求。
+
+
+## Threat coverage closure regression
+
+新增 37 手实战败局的“counter-threat 续命 → 证据断层”固定回归：
+
+1. 白 `E14` 会制造立即威胁，必须先迫使黑 `E13` 防守；它只能标为高风险 counter-threat，不能被错误硬判为 forced loss。
+2. 黑 `E13` 后，历史尾部候选 `G14` 不再享有“未做 Threat 检查所以看起来干净”的优势。若 Atomic 将其晋级 Top 4，必须先完成 supplemental Threat validation。
+3. 根节点直接双胜点 proof 不依赖 Pattern 分数或通用 branch 排名；若对手能通过 `F5/J5` 一手制造两个合法成五点，该候选必须在 Pairwise 前被证明并移除。
+
+契约要求：
+
+- Jev Max 的 `UNVERIFIED_BUDGET` 只影响 Max，不改变旧 Grandmaster 候选行为。
+- 初始 Threat 最多 6；supplemental 最多 2、850ms。
+- supplemental fail-closed，Pairwise 的主候选 Threat coverage 必须 100% 完成。
+- 重型 Worker 并发仍 ≤2。
+- benchmark 记录补检触发回合、候选数、fail-closed 拒绝数、补检耗时，并把 supplemental >2 或 Pairwise coverage 不完整记为契约违规。

@@ -1027,11 +1027,42 @@ function analyzeCounterThreatNetwork(attacker, defender, branch, radius) {
   };
 }
 
+function directForkCreator(color, radius = 2) {
+  const opponent = otherColor(color);
+  for (const move of nearbyMoves(radius)) {
+    assertTime();
+    if (!isLegalMoveForColor(move.r, move.c, color)) continue;
+    if (!mayContainForcingPattern(move, color)) continue;
+
+    playMove(move, color);
+    let result = null;
+    try {
+      if (isWin(move.r, move.c, color)) continue;
+
+      // This is a proof path, so do not gate it on pattern heuristics. Enumerate
+      // legal immediate wins directly; BLACK exact-five / forbidden-move rules
+      // are therefore authoritative even when shape classification is imperfect.
+      const legalWins = immediateWins(color, radius);
+      if (legalWins.length < 2) continue;
+      if (immediateWins(opponent, radius).length) continue;
+
+      result = {
+        move: move.key,
+        winningPoints: legalWins.slice(0, 4).map(item => item.key)
+      };
+    } finally {
+      undoMove(move, color);
+    }
+    if (result) return result;
+  }
+  return null;
+}
+
 function forcingProofKey(attacker, turns) {
   return 'TS:' + attacker + ':' + turns + ':' + hashA + ':' + hashB;
 }
 
-function proveForcingWin(attacker, turns, branch, radius, memo) {
+function proveForcingWin(attacker, turns, branch, radius, memo, scanDirectFork = true) {
   assertTime();
   const defender = otherColor(attacker);
 
@@ -1092,7 +1123,7 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
             playMove(forcedReply, defender);
             try {
               if (!isWin(forcedReply.r, forcedReply.c, defender)) {
-                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo);
+                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo, false);
                 if (child.forced) {
                   defensiveResult = {
                     forced: true,
@@ -1122,6 +1153,25 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
   const key = forcingProofKey(attacker, turns);
   const cached = memo.get(key);
   if (cached) return cached;
+
+  // Direct fork creators are deterministic one-ply tactical proofs and must
+  // never depend on generic move-order branch width. This catches positions
+  // such as J5 creating two legal winning points F5/K5 even when J5 is outside
+  // orderedMoves(attacker, branch).
+  if (scanDirectFork && turns >= 2) {
+    const fork = directForkCreator(attacker, radius);
+    if (fork) {
+      const result = {
+        forced: true,
+        attackerTurns: 2,
+        line: [fork.move],
+        winningPoints: fork.winningPoints,
+        reason: 'direct_double_winning_points'
+      };
+      memo.set(key, result);
+      return result;
+    }
+  }
 
   const candidates = orderedMoves(attacker, branch, radius);
   for (const move of candidates) {
@@ -1160,7 +1210,7 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
             playMove(block, defender);
             try {
               if (!isWin(block.r, block.c, defender)) {
-                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo);
+                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo, false);
                 if (child.forced) {
                   result = {
                     forced: true,
