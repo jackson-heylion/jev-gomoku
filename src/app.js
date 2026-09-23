@@ -2121,15 +2121,15 @@
     const opponentDirectDoubleWins = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
       ? directDoubleWinCreators(opponent, cfg.radius, 2)
       : { count: 0, points: [], moves: [] };
-    const opponentForks = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
+    const opponentForks = (!winsNow && ownImmediate === 0 && oppImmediate === 0 && opponentDirectDoubleWins.count === 0)
       ? countForkCreators(opponent, 12, cfg.radius, 2)
-      : { count: 0, points: [], moves: [] };
+      : { count: 0, points: [], moves: [], complete: true };
     const conn = localConnectivity(move.r, move.c, side);
     const vcf = winsNow || (!oppImmediate && continuationVCFAfterCandidate(side, cfg.vcfDepth, cfg.radius));
     const vct = !vcf && !oppImmediate && cfg.vctDepth > 0 && continuationVCTAfterCandidate(side, cfg.vctDepth, cfg.radius);
-    const opponentCounterVCF = !winsNow && !ownImmediate && !opponentForks.count
+    const opponentCounterVCF = !winsNow && !ownImmediate && !opponentDirectDoubleWins.count && !opponentForks.count
       && searchVCF(opponent, Math.min(2, cfg.vcfDepth), cfg.radius, new Map());
-    const opponentCounterVCT = !winsNow && !ownImmediate && !opponentForks.count && !opponentCounterVCF && cfg.vctDepth > 0
+    const opponentCounterVCT = !winsNow && !ownImmediate && !opponentDirectDoubleWins.count && !opponentForks.count && !opponentCounterVCF && cfg.vctDepth > 0
       && searchVCTPressure(opponent, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
