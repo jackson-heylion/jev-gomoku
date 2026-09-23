@@ -1,66 +1,211 @@
 # Jev Gomoku
 
-一个 15×15 五子棋网页项目。开局前可选择玩家执黑或执白，并独立配置黑棋长连、四四、三三禁手；AI 由本地搜索引擎提供候选与战术证据，必要时由 **Jev 做最终落子决定**。
+15×15 五子棋网页项目。玩家可在开局前选择执黑/执白，并分别配置黑棋长连、四四、三三禁手。AI 保留本地 Alpha-Beta / VCF / VCT / Pattern / Deep / Threat-space 作为搜索器和证据提供者，Jev 模式下由 Jev 参与或完成最终决策。
 
-每局开始前会打开开局设置：选择执黑 / 执白，并分别开关长连、四四、三三。规则在开局后锁定，并同时应用于玩家落子、本地 Alpha-Beta/VCF/VCT、Deep Worker、Threat-space Search 与 Jev。长连禁手开启时黑棋恰好五连获胜；关闭时黑棋五连及以上均可获胜。白棋始终五连及以上获胜。
+## 模式
 
-## AI 决策架构
+产品 UI 只保留：
+
+| 模式 | 说明 |
+|---|---|
+| **Jev Max** | 默认最强模式。6–8 个异构候选 + Deep/Threat 双 Worker + Atomic + 双向 Pairwise + Critic + opponent best reply + optional wildcard + final judge |
+| **Jev 宗师（等级 4）** | 原高强度稳定模式：Deep / Threat 并行，证据分歧时 Jev 裁决 |
+| **Jev 大师（等级 3）** | 深本地搜索提供候选和证据，Jev 最终落子 |
+| **Jev 直觉** | 普通 Jev / 实验基线，直接从合法点判断 |
+
+已删除用户可选的 **等级 2 / Jev 快速** 和 **纯 Local**。Local Engine 没有删除：它仍是所有高强度模式的底层搜索器，并在 Jev 网络失败时承担安全降级。
+
+旧 localStorage 自动迁移：
+
+- `local` → `grandmaster`
+- `strong`（旧等级 2）→ `grandmaster`
+- 新用户/无效值默认 → `max`
+
+## Jev Max
 
 ```text
 Board
   ↓
-Local Engine        Alpha-Beta / VCF / VCT / 立即取胜与必防 / fork 防守 /
-                    Renju 禁手过滤 / 候选生成
+多个本地算法提供证据
+  ├─ Alpha-Beta
+  ├─ Pattern Expert
+  ├─ VCF / VCT
+  ├─ Deep Search
+  ├─ Threat-space
+  └─ Defensive / counter-threat recall
   ↓
-Optional Deep Search（Web Worker，1.5s 预算）
+6–8 heterogeneous Candidate Universe
   ↓
-Local evidence
+Deep Worker Top 4–5 ─┐
+Threat Worker Top ≤6 ┴─ parallel, max 2 heavy Workers
   ↓
-Jev                 ← 最终落子决定者
+确定性 proof filter
+  ↓
+Request 1
+  ├─ Atomic evaluation
+  └─ MAIN_SET / OTHER recall audit
+  ↓
+Atomic Top 4
+  ↓
+Request 2
+  ├─ 6 pairs × A/B + B/A = ≤12 Pairwise questions
+  ├─ Critic / refutation for Top 4
+  └─ optional wildcard pick from 10–16 extra legal points
+  ↓
+Request 3（仅未高置信收敛时）
+  └─ Final Judge
   ↓
 FINAL MOVE
 ```
 
-- 候选数 > 1 时，每个白棋回合最多调用 Jev **1 次**。
-- 候选唯一（强制必胜/必防/唯一防 fork）时 **0 次** Jev 调用，直接落子。
-- Local 主线程搜索增加墙钟时间预算：Strong 900ms、Expert 2200ms、Grandmaster 2400ms；根搜索采用迭代加深，超时保留最后一轮完整结果，再继续必要的一手战术安全检查。
-- 开局性能保护：仅 `moves.length < 4` 使用较浅的 Local 搜索；从第 5 个落子位置开始 Expert/Grandmaster 恢复完整本地参数。额外 Deep Worker 仍按原策略在前 10 手跳过。
-- Jev 返回非法落点或调用失败时，自动降级由 Local 接管本回合。
+### 候选召回
 
-## 功能
+Jev Max 不再使用 `filtered.slice(0, 3)` 作为 Jev 的视野。主候选由多个来源去重合并：
 
-- Alpha-Beta 搜索
-- 根节点低成本棋形专家：活四/冲四类完成点、活三扩展、多轴威胁、占据对手强点
-- Deep Worker：迭代加深 + 有界 TT + 2 层 Threat Quiescence，只在叶子继续搜索强制/高威胁着法
-- VCF / VCT 威胁判断
-- 立即取胜 / 必防 / fork 防守 / Renju 禁手过滤
-- 开局前选择玩家执黑 / 执白，AI 可执黑先行
-- 长连 / 四四 / 三三禁手可独立开关，开局后锁定
-- 本地、快速、大师、宗师（Alpha-Beta + Threat-space Search 并行）与纯 Jev 多种模式
-- 可选的离线 Deep Worker 深搜证据
-- 宗师模式：Deep Search 与强制威胁证明双 Worker 并行；证据一致时 0 次 Jev，分歧时最多 1 次 Jev
-- Jev 失败时自动降级到本地引擎
-- 对局结束胜负弹窗
-- 一键复制完整棋谱与 AI 决策记录
-- ChatGPT Sites / Cloudflare Worker 同源部署
+- Local Alpha-Beta Top
+- Local deeper-search seeds
+- Pattern Expert
+- defensive / counter-threat hotspots
+- VCF / VCT 标记
+- strategic wildcard seed
 
-## 宗师模式
+默认最多 8 个；低核心浏览器自动收紧。Deep 只重点分析 Top 4–5，Threat 最多 6 个。
 
-宗师模式不引入 MCTS。同步根搜索先用低成本棋形专家补充候选召回，但不扩大 Alpha-Beta 根宽度；后台再并行运行 Deep Alpha-Beta 与 Threat-space 强制威胁证明。Deep Worker 的普通叶子会额外做最多 2 层 Threat Quiescence，只延伸立即胜/必防/冲四与活三类高威胁着法。若 Threat-space 证明某候选会遭遇对手强制胜，则优先过滤；Local、Deep、Threat 与高置信棋形专家一致时可直接落子，否则交给 Jev。
+### 硬安全规则
 
-## Jev 决策纲领
+以下规则不交给 Jev 覆盖：
 
-不会把整篇“五子棋口诀/兵法”原文塞进每次请求。Jev 只接收一份短小、结构化的 `gomoku_doctrine`，内容包括：
+1. 非法落子。
+2. 黑棋已启用的长连 / 四四 / 三三禁手。
+3. 当前立即取胜。
+4. 对方下一手立即取胜时的唯一合法防守。
+5. VCF / Threat-space 已严格证明的 forced result。
+6. 已证明 forced-loss / illegal candidate。
 
-- 证据优先级：合法性/数学证明 > 强制威胁 > Deep Search > 棋形启发 > 位置偏好
-- 威胁等级：成五 > 活四/双四/四三 > 四 > 活三/VCT > 多路二 > 普通位置
-- 强调着法次序、保留潜在先手、攻守转换、四个方向同时检查
-- 防守优先选择“既消除对方主威胁，又制造己方反先/切断多轴交叉点”的落子
-- 开局关注多路二→三扩展和阻断对方扩展，而不是只追求中心或贴子
+普通 Local 排名、Deep 数值、Pattern score 不是数学证明，只作为证据。
 
-每个最终候选同时携带 `pattern_class`、`pattern_score`、四/活三方向数、multi-axis、以及该点原本是否是对手强棋形点。棋形证据只是启发，不得覆盖 VCF/Threat-space 等确定性证明。
+### Atomic / Pairwise / Critic
 
-## Jev 架构
+Atomic 独立评价每个候选，刻意隐藏 `local_rank` 和 `local_engine_grade`，避免 Jev 锚定 Local 排名。
+
+Atomic Top 4 再进入 Pairwise。每一对同时询问 `A vs B` 与 `B vs A`，最多 12 个 choice question，使用概率 margin + 胜负关系聚合，降低 option 顺序偏差。Pairwise question 只引用共享 `state.candidate_facts`，不会为每道题复制棋盘和完整证据。
+
+同一个第二阶段请求还会对 Top 4 做 adversarial Critic：
+
+- immediate tactical refutation
+- forcing sequence
+- multi-axis counterattack
+- forcing resource spent too early
+- initiative loss
+- survives best reply
+
+这样第三次 Final Judge 可以看到已经实际返回的 Atomic、Pairwise、Critic 结果，而不是要求第四次 HTTP 请求。
+
+### Opponent best reply / PV
+
+Deep Worker 的完成深度结果现在可返回：
+
+```json
+{
+  "move": "G8",
+  "score": 125.3,
+  "principalVariation": ["G8", "H7", "G10", "F9"],
+  "opponentBestReplies": [
+    {
+      "move": "H7",
+      "score": 82.1,
+      "tacticalFacts": {}
+    }
+  ]
+}
+```
+
+Final Judge 因此能比较“我走这步后，对方最强反击是什么”，而不只看到一个 scalar score。
+
+如果 Deep Worker 在时间内没有完成任何有效 iterative-deepening depth：
+
+```json
+{
+  "status": "no_completed_depth",
+  "depthReached": 0,
+  "rankingOnly": true
+}
+```
+
+此时只保留 `fallbackRank`，不会再把 `0/-1/-2` 当作真实 evaluation score 发送给 Jev。
+
+内部 mate/forced sentinel（如 `1e14+`）也不会直接进入 prompt，而会转换为结构化 `forced_result`。
+
+### OTHER / wildcard
+
+Atomic 可返回 `OTHER`，表示主候选可能漏招。系统不会把 200+ 空位全部塞给 Jev，而是本地生成 10–16 个额外合理合法点，第二阶段只让 Jev提议其中 1 个。
+
+wildcard 进入 Final 前必须重新通过：
+
+- 空位/坐标合法性
+- 黑棋禁手
+- 一手立即败着检查
+
+通过后才可成为最终候选。
+
+## 浏览器性能保护
+
+Jev Max 明确使用 bounded implementation：
+
+- 主线程：UI、候选聚合、轻量 pattern/一手战术、请求调度、结果整合。
+- 重型 Worker：最多 2 个并行（Deep + Threat）。
+- Local 根搜索预算：Max 2500ms。
+- Deep Worker：约 1.3–1.8s。
+- Threat Worker：约 1.1–1.45s。
+- 候选：最多 8；Deep ≤5；Threat ≤6。
+- Jev：0–3 个逻辑请求/回合；普通 Max 非确定性局面通常 2–3 次。
+- Pairwise ≤12；Critic ≤4；wildcard pool ≤16。
+- 每请求 payload 估算目标 <5000 input tokens，硬目标 <7000。
+- sessionStorage Jev cache 继续有 TTL、条数、单项和总容量上限。
+- Worker timeout 后正常降级，不在主线程补跑重型同步搜索。
+- 支持 `PerformanceObserver('longtask')` 的浏览器会在棋谱记录本手思考期间的 long-task 数量。
+- Jev 失败仍由内部 Local Engine 安全接管本回合。
+
+## 棋谱 / 决策日志
+
+Jev Max 棋谱会记录：
+
+- 候选及来源（Local / Deep / Pattern / Threat / wildcard 等）。
+- Atomic label + 概率。
+- Pairwise 双向聚合结果。
+- Deep PV 与 opponent best replies。
+- Critic / refutation。
+- wildcard requested / proposed / accepted / chosen。
+- Final choice / confidence。
+- Jev logical requests / upstream attempts。
+- input/output token。
+- Local / Deep / Threat / total think time。
+- Worker timeout / `no_completed_depth`。
+- payload token 估算。
+- browser long-task（浏览器支持时）。
+
+这些字段可直接用于后续 regression position 与 benchmark。
+
+## 规则与现有功能
+
+保持：
+
+- 玩家执黑 / 执白。
+- 长连 / 四四 / 三三独立配置。
+- 长连开启时黑棋恰好五连获胜；关闭时黑棋五连及以上获胜。
+- Alpha-Beta。
+- VCF / VCT。
+- Threat-space Search。
+- Deep Worker / Web Worker。
+- 悔棋。
+- 棋谱复制。
+- Jev 决策日志。
+- 对局 seed 与有界缓存。
+- Jev 失败自动降级。
+- ChatGPT Sites / Cloudflare Worker。
+- 同源服务端 `POST /api/jev`。
+
+## Jev 请求架构
 
 浏览器只请求：
 
@@ -68,13 +213,13 @@ FINAL MOVE
 POST /api/jev
 ```
 
-服务端再请求 TypeSafe System One。API Key 仅从服务端环境变量读取：
+server-side endpoint 再请求 TypeSafe System One。API Key 只从服务端环境变量读取：
 
 ```text
 JEV_API_KEY
 ```
 
-不会把密钥写入前端代码、HTML、localStorage 或日志。
+不会把 API Key 写入浏览器、HTML、JS、localStorage 或日志。服务端继续负责 429 / 529 Retry-After / 指数退避。
 
 ## 本地运行
 
@@ -84,32 +229,49 @@ export JEV_API_KEY='your-api-key'
 npm run dev
 ```
 
-检查构建、引擎回归与 benchmark 冒烟：
+完整检查：
 
 ```bash
 npm run check
 ```
 
-## 基准测试
+包含语法检查、benchmark smoke、回归测试、包含 Jev Max 的离线 mock benchmark，以及生产构建。
 
-`benchmark/` 用于回答「Jev 作为最终落子决策者，是否真的比 Local 单独决策更强」，
-而不是旧的 challenger / fusion 思路。生产引擎已支持 AI 执黑或执白；benchmark 的具体座位由对应测试场景决定。
+## Benchmark
+
+`benchmark/` 保留内部 Local 基线，同时新增独立 `jev-max` arm，不会用 Max 覆盖旧 `jev-final`。重点统计：
+
+- W-L-D / 得分率。
+- override Local #1 及 deeper-search hindsight。
+- wildcard 使用效果。
+- Atomic / Pairwise 一致率。
+- Final 与 Local #1 / Deep #1 一致率。
+- VCF / Threat filter。
+- 平均 Jev 请求/token/回合耗时。
+- Local/Deep/Threat 分阶段耗时。
+- Worker timeout / `no_completed_depth`。
+- payload >5k / >7k。
+- 契约违规和战术错误。
 
 ```bash
-npm run benchmark:smoke       # 不调用 Jev，验证 harness / 裁判 / Deep Worker
-npm run benchmark:regression  # 引擎与禁手规则回归
-npm run benchmark:mock        # 离线 mock Jev，验证完整报告管线
+npm run benchmark:smoke
+npm run benchmark:regression
+npm run benchmark:mock
 
 export JEV_API_KEY='...'
 npm run benchmark -- --seeds 6 --confirm-cost
 ```
 
-详见 [`benchmark/README.md`](benchmark/README.md)。
+详见 [benchmark/README.md](benchmark/README.md)。
 
 ## 部署
 
-项目主要用于 **ChatGPT Sites** 部署，Sites 配置位于：
+主要用于 ChatGPT Sites，同时保留 Cloudflare Worker / 普通 server-side endpoint。
+
+ChatGPT Sites 配置：
 
 ```text
 .openai/hosting.json
 ```
+
+所有部署形态都应保持浏览器只访问同源 `/api/jev`，不得把 `JEV_API_KEY` 暴露到前端。
