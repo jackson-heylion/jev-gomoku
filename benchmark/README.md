@@ -167,13 +167,16 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 
 ## Threat coverage closure regression
 
-新增 37 手实战败局中白第 34 手前的固定局面。历史版本的 `H14` 是候选 #7，没有进入初始最多 6 个候选的 Threat Worker，却被 Atomic / Final 晋级；随后黑 `J5` 形成 `F5/K5` 双胜点。
+新增 37 手实战败局的“counter-threat 续命 → 证据断层”固定回归：
 
-回归要求：
+1. 白 `E14` 会制造立即威胁，必须先迫使黑 `E13` 防守；它只能标为高风险 counter-threat，不能被错误硬判为 forced loss。
+2. 黑 `E13` 后，历史尾部候选 `G14` 不再享有“未做 Threat 检查所以看起来干净”的优势。若 Atomic 将其晋级 Top 4，必须先完成 supplemental Threat validation。
+3. 根节点直接双胜点 proof 不依赖 Pattern 分数或通用 branch 排名；若对手能通过 `F5/J5` 一手制造两个合法成五点，该候选必须在 Pairwise 前被证明并移除。
 
-- `H14` 必须仍能进入异构 recall，防止简单删除难题。
-- 若本地战术预算耗尽，不能把未完成验证的候选标成 `SAFE`。
-- Atomic 若晋级 `H14`，必须触发 supplemental Threat coverage。
-- supplemental 必须证明 `H14 -> J5` 为 forced loss，并在 Pairwise 前移除 `H14`。
-- supplemental 最多验证两个剩余未覆盖主候选，仍不增加重型 Worker 并发数。
-- benchmark 记录补检触发回合、候选数、fail-closed 拒绝数与补检耗时。
+契约要求：
+
+- Jev Max 的 `UNVERIFIED_BUDGET` 只影响 Max，不改变旧 Grandmaster 候选行为。
+- 初始 Threat 最多 6；supplemental 最多 2、850ms。
+- supplemental fail-closed，Pairwise 的主候选 Threat coverage 必须 100% 完成。
+- 重型 Worker 并发仍 ≤2。
+- benchmark 记录补检触发回合、候选数、fail-closed 拒绝数、补检耗时，并把 supplemental >2 或 Pairwise coverage 不完整记为契约违规。
