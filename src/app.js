@@ -1144,10 +1144,7 @@
       if (Array.isArray(t.analyses) && t.analyses.length) {
         t.analyses.forEach(item => {
           const line = Array.isArray(item.line) && item.line.length ? `；line=${item.line.join('>')}` : '';
-          const proofMeta = item.reason === 'residual_fork_rescue_exhausted'
-            ? `；fork=${item.forkCreator || '—'}；wins=${(item.forkWinningPoints || []).join('/') || '—'}；rescues=${(item.rescueReplies || []).map(row => `${row.move}:${row.forced ? 'LOSE' : 'OPEN'}`).join('/') || '—'}`
-            : '';
-          lines.push(`    ${item.move}: ${item.forced ? 'OPPONENT_FORCED_WIN' : item.timedOut ? 'TIMEOUT' : 'NO_PROOF'}${line}${proofMeta}`);
+          lines.push(`    ${item.move}: ${item.forced ? 'OPPONENT_FORCED_WIN' : item.timedOut ? 'TIMEOUT' : 'NO_PROOF'}${line}`);
           const counter = item.counterThreat;
           if (counter && counter.risk && !['NONE', 'PROVEN_FORCED_LOSS'].includes(counter.risk)) {
             const network = Array.isArray(counter.networkMoves) && counter.networkMoves.length
@@ -3368,15 +3365,6 @@
         attackerTurns: item.attackerTurns ?? null,
         line: Array.isArray(item.line) ? item.line.slice(0, 16) : [],
         reason: item.reason || null,
-        forkCreator: item.forkCreator || null,
-        forkWinningPoints: Array.isArray(item.forkWinningPoints) ? item.forkWinningPoints.slice(0, 4) : [],
-        rescueReplies: Array.isArray(item.rescueReplies)
-          ? item.rescueReplies.slice(0, 10).map(row => ({
-              move: row.move,
-              forced: Boolean(row.forced),
-              attackerTurns: row.attackerTurns ?? null
-            }))
-          : [],
         counterThreat: item.counterThreat ? {
           risk: item.counterThreat.risk || 'NONE',
           reason: item.counterThreat.reason || null,
