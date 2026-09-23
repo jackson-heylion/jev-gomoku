@@ -16,9 +16,9 @@
  *      final move score better than letting Local decide alone?
  *   2. When Jev overrides Local's #1, is the override actually better according
  *      to a deeper deterministic search?
- *   3. Does the shipped cost/policy contract hold (<=1 Jev call per white turn,
- *      0 calls when Local already collapsed to a single candidate, shallow
- *      opening profile, no extra Deep Worker in the opening)?
+ *   3. Does the shipped cost/policy contract hold (legacy Jev Final <=1 request,
+ *      Jev Max <=3 requests, 0 calls for deterministic single-candidate proof,
+ *      bounded candidates / workers / payload, and no fake depth=0 scores)?
  *   4. Is the Renju rule set consistent between the benchmark game engine and
  *      production?
  *
@@ -53,8 +53,9 @@ const RETRYABLE = new Set([429, 529]);
 const MAX_ATTEMPTS = 3;
 
 const ARM_LABELS = {
-  local: 'Local (0 次 Jev)',
-  'jev-final': 'Jev Final (Jev 最终落子)',
+  local: 'Local (内部基线)',
+  'jev-final': 'Jev Final (原高强度链路)',
+  'jev-max': 'Jev Max (多阶段最终裁决)',
   'jev-blind': 'Jev Blind (诊断基线)'
 };
 
@@ -73,7 +74,7 @@ const OPENINGS = [
   { name: 'balanced-four', moves: ['H8', 'I9', 'G9', 'I7'] }
 ];
 
-const DEFAULT_ARMS = ['local', 'jev-final'];
+const DEFAULT_ARMS = ['local', 'jev-final', 'jev-max'];
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -202,32 +203,52 @@ function createMockJev({ onRequest }) {
   return async function request({ payload }) {
     onRequest?.();
     call++;
-    const question = payload?.questions?.best_move;
-    const keys = Object.keys(question?.criteria || {});
-    if (!keys.length) throw new Error('Mock Jev received no candidate choices');
+    const questions = payload?.questions || {};
+    const answers = {};
 
-    const firstCriteria = question.criteria[keys[0]];
-    const isFinalDecision = firstCriteria !== null && typeof firstCriteria === 'object';
-    let choice;
-    if (isFinalDecision) {
-      choice = keys[Math.min(1, keys.length - 1)];
-    } else {
-      // Blind mode: every legal point is a choice whose criterion is null.
-      choice = keys.reduce((best, key) => (
-        chebyshevToCenter(key) < chebyshevToCenter(best) ? key : best
-      ), keys[0]);
+    for (const [id, question] of Object.entries(questions)) {
+      const keys = Object.keys(question?.criteria || {});
+      if (!keys.length) throw new Error('Mock Jev received no choices for ' + id);
+
+      let choice;
+      if (id === 'recall_check') {
+        choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+      } else if (id.startsWith('judge_')) {
+        const move = id.slice('judge_'.length);
+        const parity = [...move].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % 3;
+        choice = parity === 0 && keys.includes('EXCELLENT')
+          ? 'EXCELLENT'
+          : parity === 1 && keys.includes('GOOD')
+            ? 'GOOD'
+            : keys.includes('NEUTRAL') ? 'NEUTRAL' : keys[0];
+      } else if (id.startsWith('critic_')) {
+        choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+      } else if (id.startsWith('duel_') || id === 'wildcard_pick') {
+        choice = keys.reduce((best, key) => (
+          chebyshevToCenter(key) < chebyshevToCenter(best) ? key : best
+        ), keys[0]);
+      } else if (id === 'best_move') {
+        const isBlind = keys.every(key => question.criteria[key] == null);
+        choice = isBlind
+          ? keys.reduce((best, key) => (
+              chebyshevToCenter(key) < chebyshevToCenter(best) ? key : best
+            ), keys[0])
+          : keys[Math.min(1, keys.length - 1)];
+      } else {
+        choice = keys[0];
+      }
+
+      answers[id] = {
+        type: 'choice',
+        choice,
+        confidence: 1,
+        probabilities: Object.fromEntries(keys.map(key => [key, key === choice ? 1 : 0]))
+      };
     }
 
     return {
       model: 'mock-jev',
-      answers: {
-        best_move: {
-          type: 'choice',
-          choice,
-          confidence: 1,
-          probabilities: Object.fromEntries(keys.map(key => [key, key === choice ? 1 : 0]))
-        }
-      },
+      answers,
       usage: { input_tokens: 0, output_tokens: 0 },
       __client: { attempts: 1, cached: false, transport: 'benchmark-mock', latencyMs: 0 },
       __mock: { call }
@@ -254,6 +275,14 @@ const ARMS = {
     expectsJev: true,
     async run(engine, mode) {
       return engine.jevFinal(mode);
+    }
+  },
+  'jev-max': {
+    key: 'jev-max',
+    label: ARM_LABELS['jev-max'],
+    expectsJev: true,
+    async run(engine) {
+      return engine.jevMax();
     }
   },
   'jev-blind': {
@@ -339,6 +368,7 @@ function blackReferenceDecision(engine, referee, mode) {
 function engineClientTrace(result) {
   const shape = result?.decisionTrace?.requestShape || {};
   const deep = result?.decisionTrace?.preJevDeepSearch || null;
+  const threat = result?.decisionTrace?.preJevThreatSearch || null;
   const client = result?.client || null;
   const usage = result?.usage || null;
   return {
@@ -348,7 +378,18 @@ function engineClientTrace(result) {
       httpRequests: client?.cached ? 0 : (shape.httpRequests ?? (client?.attempts || 0)),
       localOpeningAdaptive: shape.localOpeningAdaptive ?? null,
       deepSearchPolicy: shape.deepSearchPolicy ?? null,
-      localEvidenceVisibleToJev: shape.localEvidenceVisibleToJev ?? null
+      localEvidenceVisibleToJev: shape.localEvidenceVisibleToJev ?? null,
+      logicalRequests: shape.logicalRequests ?? null,
+      atomicCount: shape.atomicCount ?? null,
+      pairwiseCount: shape.pairwiseCount ?? null,
+      criticCount: shape.criticCount ?? null,
+      finalistCount: shape.finalistCount ?? null,
+      maxWorkers: shape.maxWorkers ?? null,
+      threatFilterCount: shape.threatFilterCount ?? 0,
+      payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens ?? null,
+      localSearchElapsedMs: shape.localSearchElapsedMs ?? null,
+      deepElapsedMs: shape.deepElapsedMs ?? null,
+      threatElapsedMs: shape.threatElapsedMs ?? null
     },
     deepSearch: deep
       ? {
@@ -360,6 +401,15 @@ function engineClientTrace(result) {
         budgetMs: deep.budgetMs ?? null
       }
       : null,
+    threatSearch: threat
+      ? {
+        status: threat.status || null,
+        source: threat.source || null,
+        timedOut: Boolean(threat.timedOut),
+        elapsedMs: threat.elapsedMs ?? null,
+        budgetMs: threat.budgetMs ?? null
+      }
+      : null,
     jev: {
       participated: Boolean(client),
       upstreamAttempts: client?.attempts ?? 0,
@@ -367,6 +417,13 @@ function engineClientTrace(result) {
       transport: client?.transport || null,
       inputTokens: Number(usage?.input_tokens) || 0,
       outputTokens: Number(usage?.output_tokens) || 0
+    },
+    max: {
+      atomic: Array.isArray(result?.decisionTrace?.atomic) ? result.decisionTrace.atomic : [],
+      pairwise: Array.isArray(result?.decisionTrace?.pairwise) ? result.decisionTrace.pairwise : [],
+      critic: Array.isArray(result?.decisionTrace?.critic) ? result.decisionTrace.critic : [],
+      wildcard: result?.decisionTrace?.wildcard || null,
+      localEvidence: Array.isArray(result?.decisionTrace?.localEvidence) ? result.decisionTrace.localEvidence : []
     }
   };
 }
@@ -618,8 +675,23 @@ function emptyVolume() {
     leftImmediateReplies: 0,
     openedImmediateReplies: 0,
     blockedForcedWins: 0,
+    wildcardRequested: 0,
+    wildcardAccepted: 0,
+    wildcardChosen: 0,
+    atomicPairwiseCompared: 0,
+    atomicPairwiseAgreements: 0,
+    finalLocal1Matches: 0,
+    finalDeep1Matches: 0,
+    vcfChosen: 0,
+    threatFilterHits: 0,
+    workerTimeouts: 0,
+    payloadOverTarget: 0,
+    payloadOverHard: 0,
     latencies: [],
-    deepSearch: { completed: 0, timeout: 0, error: 0, unavailable: 0, skipped: 0 },
+    localElapsed: [],
+    deepElapsed: [],
+    threatElapsed: [],
+    deepSearch: { completed: 0, timeout: 0, error: 0, unavailable: 0, skipped: 0, noCompletedDepth: 0 },
     violations: []
   };
 }
@@ -635,6 +707,8 @@ function accumulate(volume, record, options) {
   const shape = record.trace?.requestShape || {};
   const jev = record.trace?.jev || {};
   const deep = record.trace?.deepSearch || null;
+  const threat = record.trace?.threatSearch || null;
+  const maxTrace = record.trace?.max || {};
   const candidateCount = shape.candidateCount ?? record.candidateCount ?? 0;
   const httpRequests = shape.httpRequests ?? 0;
 
@@ -656,6 +730,40 @@ function accumulate(volume, record, options) {
     else if (status === 'error') volume.deepSearch.error++;
     else if (status === 'unavailable') volume.deepSearch.unavailable++;
     else if (status === 'skipped_opening') volume.deepSearch.skipped++;
+    else if (status === 'no_completed_depth') volume.deepSearch.noCompletedDepth++;
+    if (deep.timedOut) volume.workerTimeouts++;
+  }
+  if (threat?.timedOut) volume.workerTimeouts++;
+
+  if (Number.isFinite(shape.localSearchElapsedMs)) volume.localElapsed.push(shape.localSearchElapsedMs);
+  if (Number.isFinite(shape.deepElapsedMs)) volume.deepElapsed.push(shape.deepElapsedMs);
+  if (Number.isFinite(shape.threatElapsedMs)) volume.threatElapsed.push(shape.threatElapsedMs);
+
+  if (record.engine === 'jev-max') {
+    if (!record.isOverride) volume.finalLocal1Matches++;
+    const deepTop = (maxTrace.localEvidence || []).find(item => item.deepSearchRank === 1)?.move;
+    if (deepTop && deepTop === record.choice) volume.finalDeep1Matches++;
+
+    const atomicRows = (maxTrace.localEvidence || []).filter(item => Number.isFinite(item.atomicScore));
+    const pairRows = (maxTrace.localEvidence || []).filter(item => Number.isFinite(item.pairScore));
+    if (atomicRows.length && pairRows.length) {
+      volume.atomicPairwiseCompared++;
+      const atomicTop = [...atomicRows].sort((a,b) => b.atomicScore - a.atomicScore)[0]?.move;
+      const pairTop = [...pairRows].sort((a,b) => b.pairScore - a.pairScore)[0]?.move;
+      if (atomicTop && atomicTop === pairTop) volume.atomicPairwiseAgreements++;
+    }
+
+    const wildcard = maxTrace.wildcard;
+    if (wildcard?.requested) volume.wildcardRequested++;
+    if (wildcard?.accepted) volume.wildcardAccepted++;
+    if (wildcard?.chosen) volume.wildcardChosen++;
+    if (record.facts?.vcf_status === 'FORCED_SEQUENCE_FOUND') volume.vcfChosen++;
+    volume.threatFilterHits += Number(shape.threatFilterCount || 0);
+
+    for (const estimate of shape.payloadEstimatedInputTokens || []) {
+      if (estimate > 5000) volume.payloadOverTarget++;
+      if (estimate > 7000) volume.payloadOverHard++;
+    }
   }
 
   if (record.tactical?.missedImmediateWin) volume.missedImmediateWins++;
@@ -675,11 +783,12 @@ function accumulate(volume, record, options) {
   const arm = ARMS[record.engine];
 
   if (arm?.expectsJev) {
-    if (candidateCount > 1 && httpRequests > 1) {
+    const maxRequests = record.engine === 'jev-max' ? 3 : 1;
+    if (candidateCount > 1 && httpRequests > maxRequests) {
       volume.violations.push({
         kind: 'jev_calls_per_turn',
         ply: record.ply,
-        detail: 'candidateCount=' + candidateCount + ' but httpRequests=' + httpRequests
+        detail: 'candidateCount=' + candidateCount + ' but httpRequests=' + httpRequests + ' (max=' + maxRequests + ')'
       });
     }
     if (candidateCount === 1 && jev.participated) {
@@ -702,6 +811,37 @@ function accumulate(volume, record, options) {
         });
       }
     }
+    if (record.engine === 'jev-max' && candidateCount > 1) {
+      if (!['jev_max_final', 'jev_max_pairwise_convergence'].includes(shape.decisionAuthority)) {
+        volume.violations.push({
+          kind: 'jev_max_decision_authority',
+          ply: record.ply,
+          detail: 'unexpected decisionAuthority=' + shape.decisionAuthority
+        });
+      }
+      if ((shape.atomicCount || 0) > 8 || (shape.pairwiseCount || 0) > 12 || (shape.criticCount || 0) > 4) {
+        volume.violations.push({
+          kind: 'jev_max_unbounded_analysis',
+          ply: record.ply,
+          detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
+        });
+      }
+      if ((shape.maxWorkers || 0) > 2) {
+        volume.violations.push({
+          kind: 'jev_max_worker_limit',
+          ply: record.ply,
+          detail: 'maxWorkers=' + shape.maxWorkers
+        });
+      }
+      if ((shape.payloadEstimatedInputTokens || []).some(value => value > 7000)) {
+        volume.violations.push({
+          kind: 'jev_max_payload_hard_limit',
+          ply: record.ply,
+          detail: 'payload estimates=' + JSON.stringify(shape.payloadEstimatedInputTokens)
+        });
+      }
+    }
+
     if (record.engine === 'jev-final' && shape.localEvidenceVisibleToJev === false) {
       volume.violations.push({
         kind: 'local_evidence_hidden',
@@ -853,6 +993,32 @@ function summarize(games, arms, options) {
       p50DecisionMs: percentile(volume.latencies, 0.5),
       p95DecisionMs: percentile(volume.latencies, 0.95),
       deepSearch: volume.deepSearch,
+      wildcardRequested: volume.wildcardRequested,
+      wildcardAccepted: volume.wildcardAccepted,
+      wildcardChosen: volume.wildcardChosen,
+      atomicPairwiseCompared: volume.atomicPairwiseCompared,
+      atomicPairwiseAgreements: volume.atomicPairwiseAgreements,
+      atomicPairwiseConsistency: volume.atomicPairwiseCompared
+        ? volume.atomicPairwiseAgreements / volume.atomicPairwiseCompared
+        : null,
+      finalLocal1Matches: volume.finalLocal1Matches,
+      finalDeep1Matches: volume.finalDeep1Matches,
+      finalLocal1Rate: volume.decisions ? volume.finalLocal1Matches / volume.decisions : null,
+      finalDeep1Rate: volume.decisions ? volume.finalDeep1Matches / volume.decisions : null,
+      vcfChosen: volume.vcfChosen,
+      threatFilterHits: volume.threatFilterHits,
+      workerTimeouts: volume.workerTimeouts,
+      payloadOverTarget: volume.payloadOverTarget,
+      payloadOverHard: volume.payloadOverHard,
+      avgLocalElapsedMs: volume.localElapsed.length
+        ? volume.localElapsed.reduce((sum, value) => sum + value, 0) / volume.localElapsed.length
+        : 0,
+      avgDeepElapsedMs: volume.deepElapsed.length
+        ? volume.deepElapsed.reduce((sum, value) => sum + value, 0) / volume.deepElapsed.length
+        : 0,
+      avgThreatElapsedMs: volume.threatElapsed.length
+        ? volume.threatElapsed.reduce((sum, value) => sum + value, 0) / volume.threatElapsed.length
+        : 0,
       violations: volume.violations
     };
   }
@@ -1130,6 +1296,29 @@ function renderMarkdown(report) {
     + '，并保留 production 的 VCF/VCT 战术分析）再比较战术安全等级与分数。它只用于测量，不参与对局。');
 
   lines.push('');
+  if (report.summary.arms['jev-max']) {
+    const max = report.summary.arms['jev-max'];
+    lines.push('');
+    lines.push('## Jev Max 专项指标');
+    lines.push('');
+    lines.push('| Atomic/Pairwise 一致率 | 与 Local #1 一致 | 与 Deep #1 一致 | wildcard 请求/接受/最终选择 | VCF 选择 | Threat filter 命中 | Worker timeout | Payload >5k / >7k |');
+    lines.push('|---:|---:|---:|---:|---:|---:|---:|---:|');
+    lines.push(
+      '| ' + (max.atomicPairwiseConsistency == null ? 'n/a' : pct(max.atomicPairwiseConsistency)) +
+      ' | ' + max.finalLocal1Matches + '/' + max.decisions +
+      ' | ' + max.finalDeep1Matches + '/' + max.decisions +
+      ' | ' + max.wildcardRequested + '/' + max.wildcardAccepted + '/' + max.wildcardChosen +
+      ' | ' + max.vcfChosen +
+      ' | ' + max.threatFilterHits +
+      ' | ' + max.workerTimeouts +
+      ' | ' + max.payloadOverTarget + ' / ' + max.payloadOverHard + ' |'
+    );
+    lines.push('');
+    lines.push('- 本地 / Deep / Threat 平均耗时：'
+      + num(max.avgLocalElapsedMs) + ' / ' + num(max.avgDeepElapsedMs) + ' / ' + num(max.avgThreatElapsedMs) + ' ms');
+  }
+
+  lines.push('');
   lines.push('## 成本与调用契约');
   lines.push('');
   lines.push('| Arm | Jev 调用 | 每手调用 | 0 调用回合 | 唯一候选回合 | input/output token | 上游尝试 |');
@@ -1150,13 +1339,14 @@ function renderMarkdown(report) {
   lines.push('');
   lines.push('## 深搜与性能保护');
   lines.push('');
-  lines.push('| Arm | completed | timeout | error | unavailable | skipped(opening) |');
-  lines.push('|---|---:|---:|---:|---:|---:|');
+  lines.push('| Arm | completed | no_completed_depth | timeout | error | unavailable | skipped(opening) |');
+  lines.push('|---|---:|---:|---:|---:|---:|---:|');
   for (const arm of arms) {
     const deep = report.summary.arms[arm].deepSearch;
     lines.push(
       '| ' + ARM_LABELS[arm] +
       ' | ' + deep.completed +
+      ' | ' + (deep.noCompletedDepth || 0) +
       ' | ' + deep.timeout +
       ' | ' + deep.error +
       ' | ' + deep.unavailable +
@@ -1406,7 +1596,7 @@ async function main() {
   const arms = parseArmList(values.arms);
   const maxPlies = Math.max(4, Math.min(SIZE * SIZE, Number(values['max-plies']) || 60));
   const delayMs = Math.max(0, Number(values['delay-ms']) || 0);
-  const mode = values.mode === 'strong' ? 'strong' : 'expert';
+  const mode = ['expert', 'grandmaster'].includes(values.mode) ? values.mode : 'expert';
   const model = values.model || 'jev-latest';
   const arbitrationDepth = Math.max(1, Math.min(11, Number(values['arbitration-depth']) || 7));
   const arbitrationBranch = Math.max(2, Math.min(12, Number(values['arbitration-branch']) || 6));

@@ -14,7 +14,7 @@
     "benchmark": "node benchmark/run.mjs",
     "benchmark:smoke": "node benchmark/run.mjs --smoke",
     "benchmark:regression": "node benchmark/regression.mjs",
-    "benchmark:mock": "node benchmark/run.mjs --mock-jev --openings 1 --arms local,jev-final --max-plies 6 --no-arbitration --output benchmark/results/mock"
+    "benchmark:mock": "node benchmark/run.mjs --mock-jev --openings 1 --arms local,jev-final,jev-max --max-plies 6 --no-arbitration --output benchmark/results/mock"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

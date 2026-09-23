@@ -636,7 +636,7 @@ function mayContainForcingPattern(move, color) {
   return false;
 }
 
-function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache, lastMove = null) {
+function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache, lastMove = null, rootReplyTrace = null) {
   assertTime();
   if (depth <= 0) {
     if (lastMove) {
@@ -692,6 +692,22 @@ function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache, lastMove =
     } else {
       child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), branch, radius, cache, move);
     }
+
+    if (rootReplyTrace) {
+      const profile = threatPatternProfilePlaced(move.r, move.c, toMove);
+      rootReplyTrace.push({
+        move: move.key,
+        score: child,
+        tacticalFacts: {
+          immediateWin: isWin(move.r, move.c, toMove),
+          patternClass: profile.className,
+          winningPoints: profile.winningPoints,
+          fourDirections: profile.fourDirections,
+          openThreeDirections: profile.openThreeDirections,
+          multiAxis: profile.multiAxis
+        }
+      });
+    }
     undoMove(move, toMove);
 
     if (maximizing) {
@@ -711,20 +727,97 @@ function alphaBeta(depth, alpha, beta, toMove, branch, radius, cache, lastMove =
   return value;
 }
 
+function forcingResultFromScore(score, principalVariation = []) {
+  if (!Number.isFinite(score) || Math.abs(score) < MATE_SCORE * .9) return null;
+  return {
+    forced: true,
+    result: score > 0 ? 'win' : 'loss',
+    proofType: 'DEEP_SEARCH',
+    mateOrForcingDistance: Array.isArray(principalVariation) && principalVariation.length
+      ? principalVariation.length
+      : null
+  };
+}
+
+function extractPrincipalVariation(toMove, depth, cache) {
+  const line = [];
+  const played = [];
+  let side = toMove;
+
+  for (let ply = 0; ply < Math.max(0, depth); ply++) {
+    const entry = cache.get(boardKey(side));
+    const move = coordToPoint(entry?.bestMove);
+    if (!move || board[move.r]?.[move.c] !== EMPTY || !isLegalMoveForColor(move.r, move.c, side)) break;
+    playMove(move, side);
+    line.push(move.key);
+    played.push({ move, side });
+    if (isWin(move.r, move.c, side)) break;
+    side = otherColor(side);
+  }
+
+  for (let i = played.length - 1; i >= 0; i--) {
+    undoMove(played[i].move, played[i].side);
+  }
+  return line;
+}
+
 function evaluateRootCandidate(move, depth, branch, radius, cache) {
   assertTime();
-  if (!move || board[move.r]?.[move.c] !== EMPTY) return -Infinity;
+  if (!move || board[move.r]?.[move.c] !== EMPTY) {
+    return { move: move?.key || null, score: -Infinity, principalVariation: [], opponentBestReplies: [] };
+  }
 
   playMove(move, rootSide);
   let score;
+  let principalVariation = [move.key];
+  let opponentBestReplies = [];
+
   if (isWin(move.r, move.c, rootSide)) {
     score = MATE_SCORE * 10;
   } else {
-    score = alphaBeta(depth - 1, -Infinity, Infinity, opponentSide, branch, radius, cache, move);
+    const replyTrace = [];
+    score = alphaBeta(
+      depth - 1,
+      -Infinity,
+      Infinity,
+      opponentSide,
+      branch,
+      radius,
+      cache,
+      move,
+      replyTrace
+    );
     score += evaluateStatic() * .035;
+
+    const continuation = extractPrincipalVariation(opponentSide, depth - 1, cache);
+    principalVariation = [move.key, ...continuation].slice(0, 8);
+    opponentBestReplies = replyTrace
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 2)
+      .map(item => ({
+        ...item,
+        forcedResult: forcingResultFromScore(item.score, [item.move])
+      }));
+
+    if (!opponentBestReplies.length && continuation.length) {
+      opponentBestReplies = [{
+        move: continuation[0],
+        score: null,
+        forcedResult: null,
+        tacticalFacts: { source: 'transposition_principal_variation' }
+      }];
+    }
   }
+
+  const forcedResult = forcingResultFromScore(score, principalVariation);
   undoMove(move, rootSide);
-  return score;
+  return {
+    move: move.key,
+    score,
+    forcedResult,
+    principalVariation,
+    opponentBestReplies
+  };
 }
 
 function runSearch(message) {
@@ -759,8 +852,7 @@ function runSearch(message) {
     const scores = [];
     try {
       for (const move of candidates) {
-        const score = evaluateRootCandidate(move, depth, branch, radius, cache);
-        scores.push({ move: move.key, score });
+        scores.push(evaluateRootCandidate(move, depth, branch, radius, cache));
       }
       scores.sort((a, b) => b.score - a.score);
       completed = { depth, scores };
@@ -774,16 +866,30 @@ function runSearch(message) {
   }
 
   if (!completed) {
-    // The deadline may already have expired. Do not start another expensive
-    // evaluation after timeout; keep the caller's first candidate as the safe fallback.
-    completed = {
-      depth: 0,
+    // No complete iterative-deepening layer means there is no numeric evaluation.
+    // Preserve only the caller ordering as an explicitly non-numeric fallback rank.
+    timedOut = true;
+    return {
+      status: 'no_completed_depth',
+      source: 'web-worker',
+      winner: candidates[0].key,
+      depthReached: 0,
+      rankingOnly: true,
       scores: candidates.map((move, index) => ({
         move: move.key,
-        score: index === 0 ? 0 : -index
-      }))
+        fallbackRank: index + 1,
+        scoreStatus: 'not_a_numeric_evaluation',
+        principalVariation: [],
+        opponentBestReplies: []
+      })),
+      timedOut,
+      nodes,
+      elapsedMs: Math.round(performance.now() - started),
+      budgetMs,
+      branch,
+      transpositionEntries: cache.size,
+      quiescenceDepth: 2
     };
-    timedOut = true;
   }
 
   return {
@@ -791,6 +897,7 @@ function runSearch(message) {
     source: 'web-worker',
     winner: completed.scores[0]?.move || candidates[0].key,
     depthReached: completed.depth,
+    rankingOnly: false,
     scores: completed.scores,
     timedOut,
     nodes,

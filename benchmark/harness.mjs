@@ -194,6 +194,14 @@ function injectBenchmarkHook(source) {
     // --- decision entry points (the real product paths) ---------------------
     "    local(mode) { return localOnlyDecision(mode || 'expert'); },",
     "    jevFinal(mode) { return advancedDecision(mode || 'expert'); },",
+    "    jevMax() { return jevMaxDecision(); },",
+    "    normalizeDeepRow(row, analysis) { return deepRowForJev(row, analysis); },",
+    "    maxAtomicPayload(mode) { const context = buildAdvancedCandidates(mode || 'max'); return buildMaxAtomicPayload(context, context.candidates); },",
+    "    maxPairwisePayload(mode) { const context = buildAdvancedCandidates(mode || 'max'); const candidates = context.candidates.slice(0, 4); return buildPairwisePayload(candidates); },",
+    "    deepAnalyze(keys, mode) {",
+    "      const candidates = (keys || []).map(key => { const point = parseCoord(key); return point ? { ...point, key } : null; }).filter(Boolean);",
+    "      return runDeepWorkerVerification(candidates, mode || 'grandmaster', 'regression_position');",
+    "    },",
     '    async jevBlind() {',
     '      const decision = buildPureJevRequest();',
     '      const data = await callJev(decision.payload);',
@@ -264,7 +272,7 @@ function injectBenchmarkHook(source) {
     // --- offline oracle: deeper deterministic comparison, never used in game
     '    arbitrate(aKey, bKey, options) {',
     '      const opts = options || {};',
-    '      const preset = ENGINE_PRESETS[opts.mode === \'strong\' ? \'strong\' : \'expert\'];',
+    "      const preset = ENGINE_PRESETS[opts.mode === 'grandmaster' ? 'grandmaster' : 'expert'];",
     '      const cfg = {',
     '        ...preset,',
     '        depth: Number.isFinite(opts.depth) ? opts.depth : preset.depth + 2,',
@@ -396,6 +404,7 @@ export async function loadProductionEngine({ request, appPath, deepWorker = 'thr
   if (!engine
     || typeof engine.local !== 'function'
     || typeof engine.jevFinal !== 'function'
+    || typeof engine.jevMax !== 'function'
     || typeof engine.judge !== 'function') {
     throw new Error('Benchmark hook was not initialized from src/app.js');
   }

@@ -1,142 +1,127 @@
 # Benchmark
 
-## 这个 benchmark 回答什么
+## 目标
 
-生产架构是：
+Benchmark 直接复用生产 `src/app.js`、Renju 规则和 `public/deep-worker.js`，比较同一固定对手、同一 opening 下三条决策链：
+
+| arm | 说明 | Jev 请求 |
+|---|---|---:|
+| `local` | 内部 Local 基线，只用于测量/降级 | 0 |
+| `jev-final` | 现有高强度链路：Local/Deep 证据 → Jev Final | 每回合最多 1 |
+| `jev-max` | 异构候选 → Deep/Threat → Atomic → Pairwise/Critic → Final | 每回合最多 3 |
+| `jev-blind` | 诊断基线：Jev 直接面对全部合法点 | 1 |
+
+默认运行 `local,jev-final,jev-max`。纯 Local 已从产品 UI 删除，但 benchmark 仍保留它作为内部对照组；这不会恢复用户可选的 Local 模式。
+
+## Jev Max 被测契约
+
+生产 Jev Max 的有界流程：
 
 ```text
 Board
   ↓
-Local Engine        Alpha-Beta / VCF / VCT / 立即取胜与必防 / fork 防守 /
-                    Renju 禁手过滤 / 候选生成
+Local Alpha-Beta / Pattern / VCF / VCT / defensive recall
   ↓
-Optional Deep Search（Web Worker，有 1.5s 预算）
+6–8 heterogeneous candidates
   ↓
-Local evidence
+Deep Worker (Top 4–5)  ─┐
+Threat Worker (Top ≤6) ─┴─ parallel, max 2 heavy Workers
   ↓
-Jev                 ← 最终落子决定者
+hard proof filter
+  ↓
+Request 1: Atomic + MAIN_SET/OTHER
+  ↓
+Atomic Top 4
+  ↓
+Request 2: 6 pairs × reversed order = ≤12 Pairwise questions
+           + Critic Top 4
+           + optional wildcard pick from 10–16 extra points
+  ↓
+Request 3: Final Judge when stage 2 has not already converged
   ↓
 FINAL MOVE
 ```
 
-Jev 是最终决策者，所以这里不再问这几件事：
+硬约束仍由确定性代码执行：非法点、黑棋禁手、立即取胜、唯一必须防守、VCF/Threat-space 已证明的 forced result。普通 Local/Deep/Pattern 排名只能作为证据。
 
-```text
-Jev 是否成功挑战 Local        ← challenger 视角，已废弃
-Deep Search 是否推翻 Jev      ← 仲裁视角，已废弃
-Local / Jev fusion 权重哪个好 ← 融合视角，已废弃
-```
+### 性能/载荷契约
 
-现在只问四件事：
+- 主候选：最多 8；低核心浏览器自动收紧。
+- Deep：最多重点分析 5 个候选。
+- Threat：最多 6 个候选。
+- 重型 Worker：最多 2 个并行。
+- Jev：最多 3 个逻辑请求/回合；确定性唯一解 0 次。
+- Pairwise：Top 4，最多 12 个双向 choice question。
+- Critic：最多 4 个。
+- wildcard：额外池 10–16 个，只提议 1 个，必须重新通过本地合法性与一手败着检查。
+- Payload：目标 < 5000 input tokens / 请求，硬目标 < 7000。
+- Deep 若没有完成任何有效 depth：`no_completed_depth + ranking_only`，不能把 `0/-1/-2` 当评估分。
+- mate-like sentinel：转换成结构化 `forced_result` 且标记 `proven=false / advisory=true`，不得把超大内部 score 当作数学证明发送给 Jev；VCF / Threat-space proof 仍单独标记为确定性证据。
 
-1. **同一对手、同一开局下，把最终落子权交给 Jev，是否比让 Local 自己决定得分更高？**
-2. **Jev 改写 Local #1 时改得对不对？**（离线更深搜索裁判）
-3. **承诺的成本与性能契约是否成立？**（每白棋回合 ≤ 1 次 Jev、唯一候选 0 次 Jev、开局前 8 手浅搜、前 10 手跳过额外 Deep Worker）
-4. **Renju 禁手规则在对局引擎里是否和生产一致？**
+## 核心指标
 
-## 实验设计
+除了 W-L-D / 得分率 / Wilson 95% CI，报告还记录：
 
-被测的 arm 永远执 **白棋**。生产引擎只实现了白棋座位（提示词、战术过滤、禁手处理都以白棋视角写成），
-所以不存在「同一个引擎执黑再和它自己对打」的干净做法。
+- Jev override Local #1 次数、override 后的离线 deeper-search hindsight。
+- Jev 最终选择与 Local #1 / Deep #1 的一致次数。
+- Atomic / Pairwise Top1 一致率。
+- wildcard 请求、通过验证、进入 final、最终被选次数。
+- VCF 选择、Threat filter 命中。
+- 平均 Jev 请求数、input/output token。
+- Local / Deep / Threat 阶段耗时、整手决策耗时。
+- Worker timeout、`no_completed_depth`。
+- Payload >5k / >7k 次数。
+- 漏立即胜、自造对手立即胜等战术错误。
+- 契约违规：候选/Pairwise/Critic/Worker/请求数/载荷是否越界。
 
-黑棋由固定的 **Ref Local** 参照对手扮演：把生产 Local 引擎放到颜色互换的棋盘上复用，
-每个候选点再交给 Renju 裁判复核，取排名最高的合法点。两个 arm 面对**完全相同的对手、完全相同的开局**，
-因此得分率差异只能来自白棋的决策策略。
+## 回归测试
 
-```text
-每个 opening 跑 2 局：
-  Game A：white = Local      vs black = Ref Local
-  Game B：white = Jev Final  vs black = Ref Local
-```
+`npm run benchmark:regression` 会覆盖生产路径，重点包括：
 
-| arm | 说明 | Jev 调用 |
-|---|---|---|
-| `local` | 只用生产 Local 决策（`localOnlyDecision`） | 0 |
-| `jev-final` | 生产完整链路（`advancedDecision`）：Local 候选 + 可选深搜证据 → Jev 最终落子 | 每回合 ≤ 1 |
-| `jev-blind` | 诊断基线：Jev 直接看棋盘和全部合法点，绕过 Local 候选集 | 每回合 1 |
-
-`jev-blind` 只用于观察候选生成器是否漏手，默认不参与，需要显式 `--arms` 打开。
-
-## 离线裁判（不是 challenger）
-
-「裁判」只用于**测量**，不参与对局，也不会改写任何落点。当 Jev 的落点不等于 Local #1 时，
-benchmark 用生产引擎的同一套原语对两个点各做一轮更深搜索：
-
-```text
-depth 7 / branch 6，保留 production 的 VCF/VCT 战术深度
-先比 tactical safety 等级，再比 Alpha-Beta 分数
-```
-
-输出三个结果：`Jev 更优` / `Local 更优` / `持平`，聚合成 **改写质量**。
-改判结论对深度敏感（实测 depth 5 与 depth 7 会给出不同结论），所以默认 depth 7，可用
-`--arbitration-depth` 调整。
+1. Jev Final 仍拥有旧高强度模式的最终决策权。
+2. Expert/Grandmaster 本地搜索时间预算与 opening 阈值。
+3. Threat-space 已证明 forced-loss 时的确定性过滤。
+4. VCF/禁手/黑棋恰好五连规则一致性。
+5. `depth=0` 不得被序列化为真实 numeric score。
+6. forced-win sentinel 必须结构化。
+7. Jev Max Atomic 不得看到 `local_rank/local_engine_grade`。
+8. Top4 Pairwise 不得超过 12 个双向问题，候选 facts 通过共享 state 引用，不重复完整棋盘/证据。
+9. `OTHER` → bounded wildcard → 本地合法/一手败着校验 → final judge 的完整链路。
+10. Jev Max 每回合重型 Worker ≤2、Jev 请求 ≤3、候选 ≤8。
+11. 最近两盘真实棋谱固定位置：`D5 ↔ I6` Local/Deep 分歧召回、Threat-space forced-loss 过滤、VCF proof lock，以及历史 `depth=0` 语义回归。
 
 ## 运行
+
+离线 CI / 本地管线验证：
+
+```bash
+npm run benchmark:smoke
+npm run benchmark:regression
+npm run benchmark:mock
+```
+
+真实 Jev benchmark 会产生费用，必须显式确认：
 
 ```bash
 export JEV_API_KEY='...'
 npm run benchmark -- --seeds 6 --confirm-cost
 ```
 
-规模更大的一轮：
-
-```bash
-npm run benchmark -- --seeds 12 --max-plies 60 --confirm-cost
-```
-
-不花钱、只用 mock Jev 验证管线（CI 用这个）：
-
-```bash
-npm run benchmark:mock
-```
-
-不调用 Jev，只验证 harness / 裁判 / Deep Worker 通路：
-
-```bash
-npm run benchmark:smoke
-```
-
-引擎回归（Jev 最终决策权、唯一候选短路、禁手一致性、裁判对称性）：
-
-```bash
-npm run benchmark:regression
-```
-
-> `--seeds N` = 使用前 N 个 opening，每个 opening 产生「arm 数量」局。
-> `--seeds 6` + 默认两个 arm = 12 局。真实调用会产生费用，所以默认必须显式 `--confirm-cost`
-> （或 `BENCHMARK_CONFIRM=1`，或 `--mock-jev`）。
-
-### 常用参数
+常用参数：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--seeds N` | 6 | opening 数量（1–12） |
-| `--arms a,b` | `local,jev-final` | 被测 arm（白棋） |
+| `--seeds N` | 6 | opening 数量，最多 12 |
+| `--arms a,b` | `local,jev-final,jev-max` | 被测 arm |
 | `--max-plies N` | 60 | 单局最大手数 |
-| `--mode expert\|strong` | expert | 引擎档位 |
-| `--arbitration-depth N` | 7 | 裁判深搜深度 |
-| `--arbitration-branch N` | 6 | 裁判分支宽度 |
-| `--no-arbitration` | 关 | 跳过裁判，只统计成本与契约 |
-| `--deep-worker thread\|sync` | thread | `thread` 用 node worker_threads 复刻浏览器 Worker；`sync` 用引擎内同步回退（更慢、无预算） |
-| `--mock-jev` | 关 | 离线确定性 mock，不发 API 请求 |
+| `--mode expert\|grandmaster` | expert | 非 Max 生产档位 |
+| `--arbitration-depth N` | 7 | override 离线 hindsight 深度 |
+| `--no-arbitration` | 关 | 跳过 hindsight 裁判 |
+| `--deep-worker thread\|sync` | thread | thread 复刻浏览器 Worker |
+| `--mock-jev` | 关 | 离线确定性多问题 mock |
 | `--model` | jev-latest | Jev 模型 |
 
-## 运行时间参考
-
-单局是**串行**跑的，每一手都要走完整的生产链路，所以时间开销不小：
-
-| 场景 | 实测 |
-|---|---|
-| `benchmark:smoke` | 约 20s（含真实 Deep Worker 一次） |
-| `benchmark:regression` | 约 12s |
-| `benchmark:mock`（1 opening × 2 arm × 6 手） | 约 45s |
-| 真实 Jev，expert 档，60 手一局 | 数分钟到十几分钟（含裁判与 API 延迟） |
-
-建议先用 `--seeds 2` 验证通路，再跑 `--seeds 6`；`--seeds 12 --max-plies 60` 属于长跑，
-建议放到 CI 手动触发里跑，并在本地先确认时长。若只想看成本与契约，加 `--no-arbitration` 会明显变快
-（裁判是整条流程里最慢的一步）。
-
-## 输出
+输出：
 
 ```text
 benchmark/results/latest.json
@@ -145,32 +130,15 @@ benchmark/results/<timestamp>.json
 benchmark/results/<timestamp>.md
 ```
 
-报告包含：
+## 解读
 
-- 主结论表：W-L-D、得分率 + Wilson 95% CI、平均 / p95 决策耗时
-- 配对比较：两个 arm 在同一对手、同一开局下的得分率差值与逐开局结果
-- 决策质量：改写率、改写质量、漏必胜、自造必防
-- 成本与调用契约：Jev 调用数、每手调用、0 调用回合、唯一候选回合、token
-- 深搜与性能保护：completed / timeout / error / skipped(opening) 分布
-- 契约校验：逐条列出违反承诺的回合
-- Renju 禁手一致性：禁手替换次数、白棋非法落点、胜因分布
-- 自动生成的优化方向
+少量 opening 只能用于 regression 和方向判断，不能当作稳定棋力结论。优先检查：
 
-## 怎么看这份报告
-
-1. **先看样本量。** 少于 12 局不要下棋力结论，五子棋单局方差很大。
-2. **Jev Final 与 Local 的得分率差值**是主指标；CI 重叠就说明还没有结论。
-3. **改写质量**比改写率重要。改写率高但质量低，说明 Jev 在降低棋力。
-4. **漏必胜 / 自造必防**必须为 0。这两项大于 0 说明最终决策绕过了硬战术过滤，优先级高于一切调参。
-5. **每局 Jev 调用与 token** 决定这个棋力增益值不值。
-6. 黑棋参照的**禁手替换率**如果偏高，说明参照对手偏弱，结论要保守解读。
-
-## 已知局限
-
-- 生产引擎只有白棋座位，因此无法做真正的双向换色对局；黑棋是固定参照对手，不是同等强度的对手。
-- 黑棋参照用颜色互换复用白棋引擎，互换后它看不到黑棋禁手，需要裁判逐点复核并可能替换落点；替换次数会单独统计。
-- 判分依赖 opening 数量，12 个 opening 也只是小样本。
-- 裁判本身也是有限视野搜索（默认 depth 7），只能作为代理指标，不是真值。
-- `--mock-jev` 只是管线自检，不代表任何棋力结论。
+1. 漏立即胜 / 自造立即败是否为 0。
+2. Threat / VCF proof 是否从未被 Jev 破坏。
+3. override hindsight 是否改善，而不是只看 override 次数。
+4. Jev Max 相比 Jev Final 的胜率、override 质量、请求/token/耗时是否值得。
+5. Worker timeout、`no_completed_depth`、payload hard-limit violation 是否异常。
+6. wildcard 是否偶尔补到 Local candidate universe 漏掉的强手，而不是高频制造噪声。
 
 Benchmark 不会输出或保存 `JEV_API_KEY`。

@@ -872,6 +872,412 @@ async function testArbitrationOracle() {
   }
 }
 
+/**
+ * Deep search with no completed iterative depth is ranking-only evidence.
+ * Sentinel mate scores are structured instead of leaking huge numeric values.
+ */
+async function testDeepEvidenceSemantics() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Deep evidence semantics regression must not call Jev');
+    }
+  });
+
+  const depth0 = engine.normalizeDeepRow(
+    { move: 'H8', score: 0, fallbackRank: 1 },
+    { status: 'no_completed_depth', depthReached: 0, rankingOnly: true }
+  );
+  if (depth0?.status !== 'no_completed_depth' || depth0?.ranking_only !== true) {
+    throw new Error('depth=0 must be marked no_completed_depth + ranking_only');
+  }
+  if ('score' in depth0) {
+    throw new Error('depth=0 fallback score must not be exposed as a numeric evaluation');
+  }
+
+  const sentinel = engine.normalizeDeepRow(
+    {
+      move: 'H8',
+      score: 1e15,
+      forcedResult: {
+        forced: true,
+        result: 'win',
+        proofType: 'DEEP_SEARCH',
+        mateOrForcingDistance: 3
+      },
+      principalVariation: ['H8', 'H9', 'I8']
+    },
+    { status: 'completed', depthReached: 5, rankingOnly: false }
+  );
+  if (sentinel?.forced_result?.result !== 'win') {
+    throw new Error('Mate sentinel must become a structured forced_result');
+  }
+  if ('score' in sentinel) {
+    throw new Error('Mate sentinel must not be exposed as a normal deep score');
+  }
+}
+
+/**
+ * Jev Max must keep Atomic independent from Local ranking and keep a 4-candidate
+ * pairwise tournament bounded to 12 order-balanced choice questions.
+ */
+async function testJevMaxPayloadBounds() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Payload-bound regression must not call Jev');
+    }
+  });
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const atomicPayload = engine.maxAtomicPayload('max');
+  const atomicFacts = Object.values(atomicPayload?.state?.candidate_facts || {});
+  if (!atomicFacts.length || atomicFacts.length > 8) {
+    throw new Error('Jev Max Atomic candidate universe must contain 1..8 candidates');
+  }
+  for (const facts of atomicFacts) {
+    if ('local_rank' in facts || 'local_engine_grade' in facts) {
+      throw new Error('Atomic payload leaked Local rank/grade anchoring evidence');
+    }
+  }
+
+  const pairwise = engine.maxPairwisePayload('max');
+  const duelIds = Object.keys(pairwise?.payload?.questions || {}).filter(id => id.startsWith('duel_'));
+  if (pairwise.pairs.length === 6 && duelIds.length !== 12) {
+    throw new Error('Top-4 pairwise tournament must contain 6 pairs x 2 option orders');
+  }
+  if (duelIds.length > 12) throw new Error('Jev Max pairwise question count exceeded 12');
+  for (const id of duelIds) {
+    const values = Object.values(pairwise.payload.questions[id].criteria || {});
+    if (values.some(value => typeof value !== 'string' || !value.startsWith('See candidate_facts.'))) {
+      throw new Error('Pairwise questions must reference shared candidate facts instead of duplicating them');
+    }
+  }
+}
+
+/**
+ * End-to-end Jev Max regression: Atomic can request OTHER, the bounded wildcard
+ * proposal is validated locally, Pairwise/Critic stay batched, and the third
+ * request receives real prior-stage results before making the final choice.
+ */
+async function testJevMaxPipelineAndWildcard() {
+  let requestCount = 0;
+  let finalTarget = null;
+  const captured = [];
+
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      captured.push(payload);
+      const answers = {};
+
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Jev Max mock question has no criteria: ' + id);
+        let choice;
+
+        if (id === 'recall_check') {
+          choice = 'OTHER';
+        } else if (id.startsWith('judge_')) {
+          choice = keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('duel_')) {
+          // Pick the first displayed option; reversed duplicate cancels the
+          // order bias and deliberately prevents high-confidence early exit.
+          choice = keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id === 'wildcard_pick') {
+          choice = keys[0];
+        } else if (id === 'best_move') {
+          const candidateEvidence = payload?.state?.candidates || {};
+          finalTarget = keys.find(key =>
+            Array.isArray(candidateEvidence[key]?.candidate_sources)
+            && candidateEvidence[key].candidate_sources.includes('JEV_WILDCARD')
+          ) || keys[Math.min(1, keys.length - 1)];
+          choice = finalTarget;
+        } else {
+          choice = keys[0];
+        }
+
+        answers[id] = oneHotChoice(choice, keys);
+      }
+
+      return {
+        model: 'mock-jev-max',
+        answers,
+        usage: { input_tokens: 100, output_tokens: 10 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+
+  console.log('jev-max pipeline regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    localChoice: result.localChoice,
+    requests: requestCount,
+    requestShape: result.decisionTrace?.requestShape,
+    wildcard: result.decisionTrace?.wildcard
+  }));
+
+  if (result.mode !== 'max') throw new Error('Jev Max result mode not preserved');
+  if (requestCount !== 3) throw new Error('Expected Atomic + Pairwise/Critic + Final = 3 Jev requests, got ' + requestCount);
+  if (result.decisionTrace?.requestShape?.maxWorkers !== 2) throw new Error('Jev Max must declare at most two heavy workers');
+  if ((result.decisionTrace?.requestShape?.candidateCount || 0) > 8) throw new Error('Jev Max candidate universe exceeded 8');
+  if ((result.decisionTrace?.requestShape?.pairwiseCount || 0) > 12) throw new Error('Jev Max pairwise budget exceeded 12 questions');
+  if ((result.decisionTrace?.requestShape?.criticCount || 0) > 4) throw new Error('Jev Max critic budget exceeded Top 4');
+  if ((result.decisionTrace?.requestShape?.payloadEstimatedInputTokens || []).some(value => value > 7000)) {
+    throw new Error('Jev Max estimated request payload exceeded the 7000-token hard target');
+  }
+
+  const first = captured[0];
+  for (const facts of Object.values(first?.state?.candidate_facts || {})) {
+    if ('local_rank' in facts || 'local_engine_grade' in facts) {
+      throw new Error('Jev Max Atomic stage leaked Local rank/grade');
+    }
+  }
+
+  const second = captured[1];
+  const duelIds = Object.keys(second?.questions || {}).filter(id => id.startsWith('duel_'));
+  if (duelIds.length > 12) throw new Error('Pairwise stage exceeded 12 duel questions');
+  if (!Object.keys(second?.questions || {}).some(id => id.startsWith('critic_'))) {
+    throw new Error('Pairwise request must batch adversarial critic questions');
+  }
+  if (!second?.questions?.wildcard_pick) throw new Error('OTHER must trigger a bounded wildcard proposal question');
+  if ((second?.state?.wildcard_pool || []).length > 16) throw new Error('Wildcard pool exceeded 16');
+
+  const wildcard = result.decisionTrace?.wildcard;
+  if (!wildcard?.requested || !wildcard?.accepted || !wildcard?.enteredFinalists) {
+    throw new Error('Validated wildcard did not enter final candidates');
+  }
+  if (!finalTarget || result.finalChoice !== finalTarget || wildcard.chosen !== true) {
+    throw new Error('Final judge did not retain authority to choose the validated wildcard');
+  }
+  if (result.finalChoice === result.localChoice) {
+    throw new Error('Regression should demonstrate Jev Max can override Local #1');
+  }
+
+  const finalPayload = captured[2];
+  const finalEvidence = finalPayload?.state?.candidates?.[result.finalChoice];
+  if (!finalEvidence?.critic_summary && !Array.isArray(finalEvidence?.candidate_sources)) {
+    throw new Error('Final judge did not receive structured prior-stage evidence');
+  }
+}
+
+/**
+ * Real position from the recent Jev/Local game: Local preferred D5 while the
+ * completed deeper search preferred I6. Keep both moves in the candidate recall
+ * so Jev Max can actually override instead of losing the alternative upstream.
+ */
+async function testRecentGameLocalDeepDisagreementRecall() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        let choice;
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'I6' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : move === 'D5' && keys.includes('GOOD')
+              ? 'GOOD'
+              : keys.includes('NEUTRAL') ? 'NEUTRAL' : keys[0];
+        } else if (id.startsWith('duel_')) {
+          choice = keys.includes('I6') ? 'I6' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          const move = id.slice('critic_'.length);
+          choice = move === 'I6' && keys.includes('SURVIVES_BEST_REPLY')
+            ? 'SURVIVES_BEST_REPLY'
+            : keys.includes('LOSES_INITIATIVE') ? 'LOSES_INITIATIVE' : keys[0];
+        } else if (id === 'best_move') {
+          choice = keys.includes('I6') ? 'I6' : keys[0];
+        } else {
+          choice = keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-real-override',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  const sequence = [
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  const keys = new Set(context.candidates.map(move => move.key));
+  if (!keys.has('I6')) {
+    throw new Error('Jev Max candidate recall lost the real-game Jev alternative I6');
+  }
+  if (!keys.has('D5')) {
+    throw new Error('Jev Max candidate recall lost the real-game Local alternative D5');
+  }
+
+  const deep = await engine.deepAnalyze(['D5','I6','F9','E10'], 'max');
+  const deepKeys = new Set((deep.scores || []).map(item => item.move));
+  if (!deepKeys.has('D5') || !deepKeys.has('I6')) {
+    throw new Error('Real-game deep evidence must retain both D5 and I6 for comparison');
+  }
+  if (Number(deep.depthReached || 0) === 0 && deep.status !== 'no_completed_depth' && deep.status !== 'timeout') {
+    throw new Error('Real-game deep disagreement returned invalid depth=0 semantics: ' + deep.status);
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (!result.candidates.some(candidate => candidate.key === 'I6')) {
+    throw new Error('I6 disappeared before Jev Max final selection');
+  }
+  if (result.finalChoice !== 'I6') {
+    throw new Error('Jev Max could not exercise final authority for the real-game I6 alternative: ' + result.finalChoice);
+  }
+  if (requestCount < 2 || requestCount > 3) {
+    throw new Error('Real-game Jev Max override must stay within the 2–3 request budget, got ' + requestCount);
+  }
+}
+
+/**
+ * Real position from the same game: Threat-space proved L7 loses by force.
+ * That mathematical proof must remain visible and L7 must not survive the
+ * deterministic filter into Jev's final candidate set.
+ */
+async function testRecentGameThreatForcedLossFilter() {
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        let choice;
+        if (id === 'recall_check') choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        else if (id.startsWith('judge_')) choice = keys.includes('GOOD') ? 'GOOD' : keys[0];
+        else if (id.startsWith('critic_')) choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        else choice = keys[0];
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-real-threat',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  const sequence = [
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7','I6','J5','J6','J9'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const result = await engine.jevMax();
+  const threat = result.decisionTrace?.preJevThreatSearch;
+  const l7 = threat?.analyses?.find(item => item.move === 'L7');
+  if (l7 && !l7.forced) {
+    throw new Error('Real-game L7 threat evidence exists but is no longer a forced loss');
+  }
+  if (l7?.forced && result.candidates.some(candidate => candidate.key === 'L7')) {
+    throw new Error('Threat-space proven losing L7 survived the Jev Max hard filter');
+  }
+}
+
+/**
+ * Real position from the recent depth=0 game. Depending on runner speed the
+ * worker may now finish depth >=3; if it does not, it must return ranking-only
+ * semantics and no fake 0/-1/-2 numeric evaluations.
+ */
+async function testRecentGameDepthZeroPositionSemantics() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Depth-zero real-position regression must not call Jev');
+    }
+  });
+  const sequence = [
+    'H8','G9','H9','H10','F8','G8','I11','G10','G7','G11','G12','F10','I10','D10','E10'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const deep = await engine.deepAnalyze(['I9','F12','E9','H12'], 'grandmaster');
+  if (Number(deep.depthReached || 0) === 0) {
+    if (deep.status !== 'no_completed_depth' || deep.rankingOnly !== true) {
+      throw new Error('Historical depth=0 position must use no_completed_depth ranking-only semantics');
+    }
+    for (const row of deep.scores || []) {
+      if (Number.isFinite(row.score)) {
+        throw new Error('Historical depth=0 position leaked a fake numeric score for ' + row.move);
+      }
+      if (!Number.isFinite(row.fallbackRank)) {
+        throw new Error('Historical depth=0 position lost its fallback rank for ' + row.move);
+      }
+    }
+  } else if (deep.status !== 'completed' || Number(deep.depthReached) < 3) {
+    throw new Error('Unexpected deep result for historical depth=0 position: ' + JSON.stringify(deep));
+  }
+}
+
+/**
+ * Real late-game position: I5 starts the already-proven VCF sequence. Jev Max
+ * may compare proven VCF alternatives, but it must never escape the proven set.
+ */
+async function testRecentGameVcfProofLock() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        const choice = id === 'recall_check' && keys.includes('MAIN_SET')
+          ? 'MAIN_SET'
+          : id.startsWith('judge_') && keys.includes('GOOD')
+            ? 'GOOD'
+            : id.startsWith('critic_') && keys.includes('SURVIVES_BEST_REPLY')
+              ? 'SURVIVES_BEST_REPLY'
+              : keys[keys.length - 1];
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-real-vcf',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  const sequence = [
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7','I6','J5','J6',
+    'J9','F9','E10','H11','L7','M6','E8','E9','H9','K6','L6','I12','J13','D9','C9','F8','J10','J11','F6','D8','D10'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const result = await engine.jevMax();
+  const chosen = result.candidates.find(candidate => candidate.key === result.finalChoice);
+  if (!chosen?.analysis?.vcf) {
+    throw new Error('Jev Max escaped the real-game proven VCF set at move 42: ' + result.finalChoice);
+  }
+  if (result.candidates.some(candidate => candidate.analysis?.vcf !== true)) {
+    throw new Error('Non-VCF candidate survived after a proven VCF candidate existed');
+  }
+  if (result.finalChoice !== 'I5') {
+    throw new Error('Real-game VCF regression expected I5, got ' + result.finalChoice);
+  }
+  if (result.candidates.length === 1 && requestCount !== 0) {
+    throw new Error('Single proven VCF candidate should not spend a Jev request');
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -888,6 +1294,13 @@ function testCoordinateHelpers() {
   }
 }
 
+await testRecentGameLocalDeepDisagreementRecall();
+await testRecentGameThreatForcedLossFilter();
+await testRecentGameDepthZeroPositionSemantics();
+await testRecentGameVcfProofLock();
+await testDeepEvidenceSemantics();
+await testJevMaxPayloadBounds();
+await testJevMaxPipelineAndWildcard();
 await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
 await testJevFinalDecisionAuthority();

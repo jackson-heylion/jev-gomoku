@@ -62,13 +62,13 @@
           <div class="api-state">
             <div class="api-state-left">
               <span class="indicator" id="apiIndicator"></span>
-              <span class="api-label" id="apiLabel">Jev 大师</span>
+              <span class="api-label" id="apiLabel">Jev Max</span>
             </div>
             <button class="btn compact-btn" id="quickSettingsBtn" type="button">切换等级</button>
           </div>
           <div class="level-meta">
-            <span class="level-badge" id="levelBadge">等级 4</span>
-            <span class="level-summary" id="levelSummary">战术增强：Alpha-Beta 深搜与强制威胁搜索并行；证据分歧时再由 Jev 裁决。</span>
+            <span class="level-badge" id="levelBadge">MAX</span>
+            <span class="level-summary" id="levelSummary">多算法异构召回 + Atomic + Pairwise + 对手最强回复 + Critic，由 Jev 做最终裁决。</span>
           </div>
           <div class="jev-time-row">
             <span>Jev 上一步思考</span>
@@ -115,7 +115,7 @@
 
       <input id="model" type="hidden" value="jev-latest" />
 
-      <input id="strengthMode" type="hidden" value="grandmaster" />
+      <input id="strengthMode" type="hidden" value="max" />
 
       <section class="game-options" aria-label="开局规则">
         <div class="game-option-group">
@@ -145,49 +145,40 @@
       <div class="game-config-summary" id="gameConfigSummary">你执黑先手 · 黑棋禁手：长连 / 四四 / 三三</div>
 
       <div class="level-picker" role="radiogroup" aria-label="对局等级">
+        <button class="level-option" type="button" data-mode="max" role="radio" aria-checked="false">
+          <span class="level-option-head">
+            <span class="level-option-title">MAX · Jev Max</span>
+            <span class="level-option-tag recommended">默认 / 最强</span>
+            <span class="level-option-current">✓ 当前选择</span>
+          </span>
+          <span class="level-option-desc">6～8 个异构候选；Deep / Threat 双 Worker 并行；Atomic、双向 Pairwise、Critic 与对手最强回复共同支持 Jev 最终裁决。</span>
+        </button>
+
         <button class="level-option" type="button" data-mode="grandmaster" role="radio" aria-checked="false">
           <span class="level-option-head">
             <span class="level-option-title">等级 4 · Jev 宗师</span>
-            <span class="level-option-tag recommended">默认</span>
+            <span class="level-option-tag">稳定高强度</span>
             <span class="level-option-current">✓ 当前选择</span>
           </span>
-          <span class="level-option-desc">Alpha-Beta 深搜与 Threat-space Search 并行；证据一致时直接落子，分歧时才交给 Jev 裁决。</span>
+          <span class="level-option-desc">Alpha-Beta 深搜与 Threat-space Search 并行；确定性证据一致时可直接落子，分歧时由 Jev 裁决。</span>
         </button>
 
         <button class="level-option" type="button" data-mode="expert" role="radio" aria-checked="false">
           <span class="level-option-head">
             <span class="level-option-title">等级 3 · Jev 大师</span>
-            <span class="level-option-tag">稳定</span>
+            <span class="level-option-tag">均衡</span>
             <span class="level-option-current">✓ 当前选择</span>
           </span>
-          <span class="level-option-desc">棋力优先。更深的本地搜索后，再交给 Jev 判断候选。</span>
-        </button>
-
-        <button class="level-option" type="button" data-mode="strong" role="radio" aria-checked="false">
-          <span class="level-option-head">
-            <span class="level-option-title">等级 2 · Jev 快速</span>
-            <span class="level-option-tag">更快</span>
-            <span class="level-option-current">✓ 当前选择</span>
-          </span>
-          <span class="level-option-desc">速度优先。搜索更浅一些，仍会让 Jev 参与候选判断。</span>
+          <span class="level-option-desc">更深本地搜索提供候选和战术证据，再由 Jev 做最终落子判断。</span>
         </button>
 
         <button class="level-option" type="button" data-mode="jev" role="radio" aria-checked="false">
           <span class="level-option-head">
-            <span class="level-option-title">实验 · Jev 直觉</span>
+            <span class="level-option-title">Jev · 直觉</span>
             <span class="level-option-tag experiment">实验</span>
             <span class="level-option-current">✓ 当前选择</span>
           </span>
-          <span class="level-option-desc">更直接让 Jev 从合法落点里选择，Jev 感更强，但不代表棋力更强。</span>
-        </button>
-
-        <button class="level-option" type="button" data-mode="local" role="radio" aria-checked="false">
-          <span class="level-option-head">
-            <span class="level-option-title">本地 · 本地引擎</span>
-            <span class="level-option-tag local">不使用 Jev</span>
-            <span class="level-option-current">✓ 当前选择</span>
-          </span>
-          <span class="level-option-desc">完全不调用 Jev，只使用传统搜索和战术判断。</span>
+          <span class="level-option-desc">更直接让 Jev 从合法落点中选择，用作普通 Jev / 直觉模式。</span>
         </button>
       </div>
 
@@ -196,7 +187,7 @@
         <div class="test-detail" id="connectionTestText"></div>
       </div>
 
-      <div class="selection-summary">当前选择：<strong id="currentLevelSummary">等级 4 · Jev 宗师</strong></div>
+      <div class="selection-summary">当前选择：<strong id="currentLevelSummary">MAX · Jev Max</strong></div>
 
       <div class="modal-actions">
         <button class="btn test-btn" id="testConnectionBtn" type="button">检查 Jev 状态</button>
