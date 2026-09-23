@@ -163,14 +163,14 @@ flowchart TD
     A[15×15 Board] --> B[Rules / Legality]
     B --> C[Local Candidate Recall]
 
-    C --> C1[Alpha-Beta]
+    C --> C1[Alpha-Beta<br/>Zobrist + bounded TT + PV ordering]
     C --> C2[Pattern Expert]
     C --> C3[VCF / VCT]
-    C --> C4[Deep Search Worker]
-    C --> C5[Threat-space Worker]
+    C --> C4[Persistent Deep Worker]
+    C --> C5[Persistent Threat Worker]
     C --> C6[Defensive / Counter-threat Recall]
 
-    C1 --> D[Candidate Universe]
+    C1 --> D[6–8 Candidate Universe]
     C2 --> D
     C3 --> D
     C4 --> D
@@ -178,21 +178,29 @@ flowchart TD
     C6 --> D
 
     D --> E[Deterministic Proof Filter]
-
     E -->|forced / illegal| F[Hard Decision]
-    E -->|unresolved candidates| G[Jev Atomic Evaluation]
+    E -->|unresolved| G[Request 1: Speculative Fan-Out]
 
-    G --> H[Jev Pairwise Tournament]
-    H --> I[Adversarial Critic]
-    I --> J{High-confidence convergence?}
+    G --> G1[Atomic: all main candidates]
+    G --> G2[Pairwise: likely Top ≤6]
+    G --> G3[Critic: likely Top ≤6]
+    G --> G4[Global Best]
+    G --> G5[Recall / Wildcard proposal]
 
-    J -->|Yes| K[Final Move]
-    J -->|No| L[Jev Final Judge]
-    L --> K
+    G1 --> H[Apply Atomic Top4 + Threat coverage]
+    G2 --> H
+    G3 --> H
+    G4 --> H
+    G5 --> H
 
-    G -->|OTHER| M[Bounded Wildcard Recall]
-    M --> N[Local Threat Verification]
-    N --> H
+    H --> I{High-confidence convergence?}
+    I -->|Yes| J[Final Move]
+    I -->|No / finalist pool changed| K[Request 2: Final or Resolution Fan-Out]
+    K --> J
+
+    C4 -. first idle slot .-> T[Speculative tail Threat validation]
+    C5 -. first idle slot .-> T
+    T --> H
 ~~~
 
 可以把它理解成三层：
@@ -201,7 +209,7 @@ flowchart TD
 |---|---|---|
 | **规则 / Proof 层** | 合法性、禁手、立即胜负、严格 VCF / Threat proof | **不可覆盖** |
 | **搜索 / Evidence 层** | Alpha-Beta、Deep、Pattern、Threat、PV、opponent reply | 提供证据 |
-| **Jev Decision 层** | 独立评价、候选比较、反驳、分歧裁决 | 只处理未被证明的区域 |
+| **Jev Decision 层** | Atomic、Pairwise、Critic、独立 Global Best、必要时最终裁决 | 只处理未被证明的区域 |
 
 ---
 
@@ -209,106 +217,106 @@ flowchart TD
 
 **Jev Max** 是当前默认、也是最完整的混合决策模式。
 
-它不是单次请求“问 Jev 下一步走哪里”，而是把决策拆成多个更小、更稳定的问题。
+核心目标不是减少搜索深度，而是减少**重复计算和串行等待**：相同的棋力证据尽量并行产生，同一批 Jev 独立问题尽量在一次 System One 请求中 fan-out。
 
-## Stage 0：本地搜索先做能确定的事情
+## Stage 0：确定性搜索与 Proof
 
-在调用 Jev 前，本地引擎先完成：
+在调用 Jev 前，本地引擎继续完成：
 
-- 合法点过滤；
-- 黑棋长连 / 四四 / 三三禁手；
-- immediate win；
-- opponent immediate win；
+- 合法点过滤与黑棋禁手；
+- immediate win / mandatory defense；
 - VCF / VCT；
 - direct open-four / double-winning-point proof；
 - Threat-space search；
 - Deep iterative search；
 - opponent best replies；
-- candidate recall。
+- heterogeneous candidate recall。
 
-如果答案已经被严格证明，就直接落子。
+严格 proof 已经给出唯一答案时直接落子，仍然是 **0 次 Jev 请求**。
 
-**能用算法证明的事情，不浪费 Jev 请求。**
+### Alpha-Beta 性能层
 
----
+主线程 Alpha-Beta 现在使用：
 
-## Stage 1：Atomic Evaluation
+- 双 32-bit Zobrist incremental hash；
+- EXACT / LOWER / UPPER transposition-table entry；
+- 同一次 iterative deepening 跨 depth 复用 TT；
+- 上一层 root/PV 排序；
+- TT bestMove 优先搜索；
+- bounded TT 跨回合复用，保留最近 generation，优先淘汰浅层和旧条目。
 
-Jev 对每个候选进行**独立评价**。
+这些优化不降低搜索 depth、branch 或战术候选范围，目标是让相同预算搜索更多有效节点。
 
-典型标签：
-
-- EXCELLENT
-- GOOD
-- NEUTRAL
-- RISKY
-- BAD
-
-每个候选单独判断，避免先看整体排名后产生跟随效应。
-
-Atomic 阶段重点回答：
-
-> 如果只看棋盘和这一步对应的事实，这一步本身怎么样？
-
-Local 的排名不会发送给 Jev。
+Deep Worker 侧同样保留 Zobrist TT，并在长驻 Worker 生命周期内跨任务复用 bounded TT。
 
 ---
 
-## Stage 2：Pairwise Tournament
+## Stage 0.5：两个长驻 Heavy Worker
 
-Atomic Top 候选继续进入 Pairwise。
+浏览器不再每个阶段反复创建和销毁 Worker。
 
-例如比较 G8 与 H7 时，会同时询问：
+整局维持最多 **2 个**长驻 Worker slot：
 
-- G8 vs H7
-- H7 vs G8
+- Deep Search；
+- Threat-space Search；
+- supplemental Threat；
+- wildcard / rescue Threat。
 
-然后综合概率 margin。
+任务进入统一队列；正常完成后 Worker 保留，timeout / crash 才销毁对应 slot 并按需重建。
 
-这样做是为了降低选项展示顺序对结果的影响。
-
-Pairwise 回答的是另一个问题：
-
-> 当两个看起来都不错的候选必须二选一时，哪一个更值得下？
+Jev Max 启动 Deep + Threat 后，会把最多 2 个未被首轮 Threat 覆盖的 tail candidate 提前排进队列。只要 Deep 或 Threat 任一先结束，空闲 slot 就开始计算 tail Threat。Atomic 后若 #7/#8 晋级，通常可以直接复用已经完成的结果，而不是再串行等待一次 supplemental Worker。
 
 ---
 
-## Stage 2.5：Adversarial Critic
+## Stage 1：Speculative Fan-Out
 
-同一个阶段还会让 Jev 从“反方”视角检查候选：
+普通 Max 不再先发 Atomic、等响应、再发 Pairwise/Critic。
 
-- 是否存在 immediate tactical refutation；
-- 是否有 forcing sequence；
-- 是否留下 multi-axis counterattack；
-- 对手被迫防守后，原来的威胁网络是否仍然存在；
-- 是否过早消耗 forcing resource；
-- 是否丢失主动权；
-- 在 opponent best reply 之后是否仍然成立。
+**Request 1** 同时包含：
 
-因此 Jev 不只是“选喜欢的棋”，还要尝试**推翻自己的候选**。
+- Atomic：全部主候选，最多 8；
+- Pairwise：最可能进入决赛的前 ≤6 个候选，双向比较；
+- Critic：同一 speculative pool；
+- global_best：独立全局最佳判断；
+- recall_check；
+- bounded wildcard proposal。
+
+共享的棋盘、candidate facts、Pairwise policy、Critic policy 只发送一次；各问题只引用共享 state，减少重复 payload。
+
+收到响应后，程序才根据 Atomic + deterministic Threat coverage 确定实际 Top4。只有仍然合法、未被 hard proof 排除的 Pairwise/Critic 回答会被消费，其余 speculative answer 直接丢弃。
+
+这属于**多算少等**：不减少判断维度，而是消除 API round-trip barrier。
 
 ---
 
-## Stage 3：Final Judge
+## Stage 2：本地收敛或第 2 次裁决
 
-如果 Atomic + Pairwise + Critic 已经高置信收敛，就直接结束。
+如果实际 Atomic Top4 落在 speculative pool 内，则直接复用 Request 1 已返回的双向 Pairwise 与 Critic。
 
-只有仍然存在明显分歧时，才调用 Final Judge。
+当以下信号形成高置信一致时，可以在 **1 次 Jev 请求**后直接落子：
 
-Final Judge 可以同时看到：
+- Pairwise Top1；
+- Atomic 强度；
+- Critic 生存概率；
+- 独立 global_best；
+- deterministic Deep / Threat evidence。
 
-- Atomic 概率；
-- Pairwise 结果；
-- Critic；
-- Deep PV；
-- opponent best replies；
-- Threat evidence；
-- wildcard；
-- deterministic proof 状态。
+如果存在明显分歧、validated wildcard 进入 finalist，或 Atomic 将决赛池改写到 speculative pool 之外，才使用 **Request 2**：
 
-最终从经过安全验证的候选中选择落子。
+- 普通分歧：Final Judge；
+- 决赛池被改写：Resolution Fan-Out，在同一请求中补齐实际 Top4 的 Pairwise/Critic，并附带最终 best_move。
 
-正常 Jev Max 回合最多使用 **0–3 个逻辑 Jev 请求**。
+因此正常 Jev Max 回合现在是：
+
+~~~text
+严格确定性局面：0 请求
+普通未决局面：1 请求
+困难 / 分歧局面：2 请求
+~~~
+
+**硬上限从原来的 3 次降为 2 次。**
+
+Wildcard、rescue、VCF、Threat proof 的安全边界保持不变。
 
 ---
 
@@ -399,13 +407,17 @@ Jev Max 必须在普通浏览器中运行，因此所有昂贵步骤都有边界
 主要策略：
 
 - 主线程只负责 UI、轻量计算、调度和结果整合；
-- Heavy Worker 最多同时运行 **2 个**；
+- Heavy Worker 最多同时运行 **2 个**，并使用整局长驻 Worker Pool；
+- 主线程 Alpha-Beta 使用 incremental Zobrist + bounded persistent TT + PV/TT best-move ordering；
+- Deep Worker 的 bounded TT 在 Worker 生命周期内跨回合复用；
 - 主候选通常限制在 **6–8 个**；
 - Deep 只深入分析头部候选；
-- Threat Search 使用 bounded budget；
-- Pairwise 只比较 Atomic Top 候选；
+- Threat Search 使用 bounded budget，并利用空闲 Worker 对 tail candidate 做 speculative validation；
+- Request 1 对 likely Top ≤6 预计算 Pairwise/Critic，但实际只消费最终 Top4 对应结果；
+- shared board / candidate facts / policy 只发送一次，避免每个问题重复长说明；
 - wildcard pool 有数量上限；
 - Worker timeout 后不会回主线程同步补跑重型搜索；
+- Jev Max 每回合最多 **2 次**逻辑请求；确定性唯一解为 0 次；
 - Jev 请求和缓存都有数量、TTL 和容量限制；
 - Jev 不可用时 Local Engine 自动降级接管。
 
