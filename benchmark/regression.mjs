@@ -1677,6 +1677,44 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   }
 }
 
+/**
+ * Diagnostic / future regression seed from the 49-ply real game.
+ * Position before White 42 after Black L6. Analyze the candidate family one by
+ * one so Threat timeout on one root cannot hide whether alternatives are
+ * actually provable losses.
+ */
+async function testRealGameMove42CounterfactualThreatAudit() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Move-42 counterfactual audit must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6'
+  ];
+  const position = positionFromSequence(sequence);
+  const moves = ['H2','M7','I3','G10','H11','H3'];
+  const rows = {};
+  for (const key of moves) {
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+    const threat = await engine.threatAnalyze([key], 'max');
+    rows[key] = threat?.analyses?.find(item => item.move === key) || null;
+  }
+  console.log('move42 counterfactual threat audit:', JSON.stringify(rows));
+  if (!rows.H2 || !rows.M7 || !rows.I3) {
+    throw new Error('Move-42 counterfactual audit did not return core candidates');
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1693,6 +1731,7 @@ function testCoordinateHelpers() {
   }
 }
 
+await testRealGameMove42CounterfactualThreatAudit();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
