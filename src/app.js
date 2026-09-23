@@ -1139,6 +1139,13 @@
         t.analyses.forEach(item => {
           const line = Array.isArray(item.line) && item.line.length ? `；line=${item.line.join('>')}` : '';
           lines.push(`    ${item.move}: ${item.forced ? 'OPPONENT_FORCED_WIN' : item.timedOut ? 'TIMEOUT' : 'NO_PROOF'}${line}`);
+          const counter = item.counterThreat;
+          if (counter && counter.risk && !['NONE', 'PROVEN_FORCED_LOSS'].includes(counter.risk)) {
+            const network = Array.isArray(counter.networkMoves) && counter.networkMoves.length
+              ? counter.networkMoves.map(row => `${row.move}:${row.kind}`).join(' / ')
+              : '—';
+            lines.push(`      counter-threat=${counter.risk}；forced-defense=${counter.forcedDefenseMove || '—'}；network=${network}`);
+          }
         });
       }
     }
@@ -2203,6 +2210,8 @@
       let primaryRoots = [];
       let hotspots = [];
       let defensiveHotspots = [];
+      let opponentForkBlocks = [];
+      let counterThreatBlocks = [];
 
       if (ownWins.length) {
         forced = 'win';
@@ -2214,7 +2223,7 @@
         const opponentForks = moves.length >= 16 && !localSearchExpired()
           ? countForkCreators(opponent, Math.max(12, cfg.root), cfg.radius, 2)
           : { count: 0, points: [], moves: [] };
-        if (opponentForks.count === 1) {
+        if (opponentForks.count === 1 && mode !== 'max') {
           forced = 'block_fork';
           roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
         } else {
@@ -2224,9 +2233,21 @@
             ? patternHotspots(opponent, 5, cfg.radius)
                 .filter(move => isLegalMoveForColor(move.r, move.c, side))
             : [];
-          // Keep the proven Alpha-Beta root width bounded. Max improves recall by
-          // composing a semantic candidate universe, not by widening every search.
-          roots = mergeRootCandidates(primaryRoots, hotspots, cfg.root);
+          opponentForkBlocks = mode === 'max'
+            ? opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
+          counterThreatBlocks = mode === 'max' && !localSearchExpired()
+            ? forcingExtensions(opponent, 5, cfg.radius)
+                .filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
+          // Keep the Alpha-Beta root width bounded. Jev Max treats a unique
+          // fork-creator as strong defensive evidence, not a mathematical
+          // single-move proof: a second forcing branch may still exist.
+          roots = mergeRootCandidates(
+            mergeRootCandidates(primaryRoots, opponentForkBlocks, cfg.root),
+            hotspots,
+            cfg.root
+          );
         }
       }
 
@@ -2256,6 +2277,8 @@
 
         scored.slice(0, 2).forEach(move => add(move, 'LOCAL_ALPHA_BETA'));
         hotspots.slice(0, 2).forEach(move => add(move, 'PATTERN_EXPERT'));
+        opponentForkBlocks.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_FORK_BLOCK'));
+        counterThreatBlocks.slice(0, 3).forEach(move => add(move, 'COUNTER_THREAT_BLOCK'));
         defensiveHotspots.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_COUNTER_THREAT'));
         scored.slice(2, 5).forEach(move => add(move, 'LOCAL_DEEP_SEED'));
 
@@ -2327,6 +2350,7 @@
       threat_hierarchy: 'WIN > OPEN_FOUR / DOUBLE_FOUR / FOUR_THREE > FOUR > OPEN_THREE / VCT > MULTI_TWO > POSITION',
       sequencing: 'Move order matters. Preserve latent three/four resources unless converting them creates a concrete forced gain; do not spend forcing moves just because they are available.',
       defense: 'Prefer a defense that both removes the opponent strongest continuation and creates your own forcing threat or cuts a multi-line intersection.',
+      counter_threat: 'A move is not automatically safe just because it creates one forcing threat. If the opponent has a forced defensive reply, inspect the board after that reply: residual forcing extensions, fork creators, and multi-axis junctions may leave the original attack intact.',
       geometry: 'Inspect horizontal, vertical, and both diagonals equally. Multi-axis intersections and moves that reduce the opponent reply set are strategically important.',
       opening: 'In the early game, value connected central influence, multiple two-to-three extension routes, and denying the opponent equivalent extension routes over isolated stones.',
       caution: 'pattern_* fields are fast heuristic shape evidence, not mathematical proof. threat-space FOUND and proven VCF remain higher authority.'
@@ -2632,6 +2656,14 @@
         opponent_forcing_proof: threat?.forced === true ? 'FOUND' : threat?.timedOut ? 'TIMEOUT' : threat ? 'NOT_FOUND' : null,
         opponent_forcing_line: Array.isArray(threat?.line) && threat.line.length ? threat.line.slice(0, 12).join(' > ') : null,
         opponent_forcing_attacker_turns: Number.isFinite(threat?.attackerTurns) ? threat.attackerTurns : null,
+        opponent_counter_threat: threat?.counterThreat ? compactEvidence({
+          risk: threat.counterThreat.risk || 'NONE',
+          reason: threat.counterThreat.reason || null,
+          forced_defense_move: threat.counterThreat.forcedDefenseMove || null,
+          network_moves: Array.isArray(threat.counterThreat.networkMoves)
+            ? threat.counterThreat.networkMoves.slice(0, 4)
+            : null
+        }) : null,
         candidate_sources: Array.isArray(move.recallSources) && move.recallSources.length ? move.recallSources : null,
         forced_role: facts.forced_role || 'NORMAL',
         tactical_safety: facts.tactical_safety || 'UNKNOWN',
@@ -2696,6 +2728,7 @@
           'Never choose an UNSAFE or LOSING move when a SAFE candidate is available.',
           'Treat local rank, Alpha-Beta score, deep-search score, and pattern_* fields as finite-horizon evidence; pattern evidence is useful for shape and move-order judgement but is not proof.',
           'When safe candidates are close, explicitly compare forcing tempo, number of opponent replies, multi-axis threat growth, whether a latent threat should be preserved, and whether a defensive move also creates counter-pressure.',
+          'If a candidate creates one forcing threat, inspect the forced reply and residual counter-threat evidence before calling it safe. A forced reply that preserves multiple opponent forcing extensions is a major warning, though not by itself a mathematical proof.',
           'In quiet openings prefer connected multi-direction extension potential and denial of the opponent equivalent routes; avoid isolated cosmetic central moves with little continuation.'
         ]
       },
@@ -3227,7 +3260,21 @@
       move.analysis.facts.opponent_forcing_line = Array.isArray(evidence.line) && evidence.line.length
         ? evidence.line.join('>')
         : 'NONE';
-      if (evidence.forced) move.analysis.facts.tactical_safety = 'LOSING';
+      const counterThreat = evidence.counterThreat || null;
+      move.analysis.facts.opponent_counter_threat_risk = counterThreat?.risk || 'NONE';
+      move.analysis.facts.opponent_counter_threat_reason = counterThreat?.reason || 'NONE';
+      move.analysis.facts.opponent_counter_threat_forced_defense = counterThreat?.forcedDefenseMove || 'NONE';
+      move.analysis.facts.opponent_counter_threat_moves = Array.isArray(counterThreat?.networkMoves) && counterThreat.networkMoves.length
+        ? counterThreat.networkMoves.map(item => `${item.move}:${item.kind}`).join(',')
+        : 'NONE';
+      if (evidence.forced) {
+        move.analysis.facts.tactical_safety = 'LOSING';
+      } else if (
+        ['CRITICAL', 'HIGH'].includes(counterThreat?.risk)
+        && move.analysis.facts.tactical_safety === 'SAFE'
+      ) {
+        move.analysis.facts.tactical_safety = 'TACTICALLY_RISKY';
+      }
     }
     return byMove;
   }
@@ -3260,7 +3307,22 @@
         forced: Boolean(item.forced),
         timedOut: Boolean(item.timedOut),
         attackerTurns: item.attackerTurns ?? null,
-        line: Array.isArray(item.line) ? item.line.slice(0, 16) : []
+        line: Array.isArray(item.line) ? item.line.slice(0, 16) : [],
+        counterThreat: item.counterThreat ? {
+          risk: item.counterThreat.risk || 'NONE',
+          reason: item.counterThreat.reason || null,
+          forcedDefenseMove: item.counterThreat.forcedDefenseMove || null,
+          networkMoves: Array.isArray(item.counterThreat.networkMoves)
+            ? item.counterThreat.networkMoves.slice(0, 6).map(row => ({
+                move: row.move,
+                kind: row.kind,
+                winningPoints: row.winningPoints ?? 0,
+                openThreeDirections: row.openThreeDirections ?? 0,
+                fourDirections: row.fourDirections ?? 0,
+                multiAxis: row.multiAxis ?? 0
+              }))
+            : []
+        } : null
       }))
     };
   }
@@ -3487,7 +3549,15 @@
         opponent_forced_win: Boolean(move.threatSearch.forced),
         timed_out: Boolean(move.threatSearch.timedOut),
         attacker_turns: move.threatSearch.attackerTurns ?? null,
-        line: Array.isArray(move.threatSearch.line) ? move.threatSearch.line.slice(0, 12) : null
+        line: Array.isArray(move.threatSearch.line) ? move.threatSearch.line.slice(0, 12) : null,
+        counter_threat: move.threatSearch.counterThreat ? compactEvidence({
+          risk: move.threatSearch.counterThreat.risk || 'NONE',
+          reason: move.threatSearch.counterThreat.reason || null,
+          forced_defense_move: move.threatSearch.counterThreat.forcedDefenseMove || null,
+          network_moves: Array.isArray(move.threatSearch.counterThreat.networkMoves)
+            ? move.threatSearch.counterThreat.networkMoves.slice(0, 4)
+            : null
+        }) : null
       }) : null,
       principal_variation: Array.isArray(move.deepEvidence?.principal_variation)
         ? move.deepEvidence.principal_variation
@@ -3537,11 +3607,12 @@
     for (const move of candidates) {
       questions[`critic_${move.key}`] = {
         type: 'choice',
-        instructions: `Assume candidate ${move.key} is wrong. Inspect the full board, candidate_facts.${move.key}, and atomic_results.${move.key}. Find the strongest opponent refutation: immediate tactical reply, forcing sequence, multi-axis counterattack, premature spending of a forcing resource, or loss of initiative. If none is convincing, choose SURVIVES_BEST_REPLY.`,
+        instructions: `Assume candidate ${move.key} is wrong. Inspect the full board, candidate_facts.${move.key}, and atomic_results.${move.key}. Find the strongest opponent refutation: immediate tactical reply, forcing sequence, multi-axis counterattack, or a forced defensive reply that still leaves the opponent with a residual threat network. Do not treat "I create a threat and force one reply" as automatically safe: inspect the position after that forced reply and whether the opponent still has multiple forcing extensions. Also check premature spending of a forcing resource or loss of initiative. If none is convincing, choose SURVIVES_BEST_REPLY.`,
         criteria: {
           SURVIVES_BEST_REPLY: 'No concrete refutation found; candidate remains robust against best play.',
           TACTICAL_REFUTATION: 'Opponent has a concrete tactical or forcing refutation.',
           MULTI_AXIS_COUNTERATTACK: 'Opponent gains a stronger multi-direction counterattack.',
+          RESIDUAL_COUNTER_THREAT: 'After answering this candidate\'s forcing threat, the opponent retains multiple forcing extensions or a dangerous threat-network junction.',
           FORCING_RESOURCE_SPENT_TOO_EARLY: 'Candidate wastes a forcing resource and weakens the continuation.',
           LOSES_INITIATIVE: 'Candidate yields the initiative or expands the opponent reply set.'
         }

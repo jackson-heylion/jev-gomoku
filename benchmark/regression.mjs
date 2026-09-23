@@ -1278,6 +1278,134 @@ async function testRecentGameVcfProofLock() {
   }
 }
 
+/**
+ * Old Level-4 loss regression (23 plies): before White 12 I10, Black J9 is a
+ * forcing extension. The worker should surface it as advisory counter-threat
+ * evidence even though no mathematical forced win has been proved yet.
+ */
+async function testOldGameEarlyForcingExtensionWarning() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Old-game threat regression must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = ['H8','G9','J10','I9','H9','H10','J8','I11','J12','F8','E7'];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const threat = await engine.threatAnalyze(['I10'], 'max');
+  const row = threat?.analyses?.find(item => item.move === 'I10');
+  if (!row) throw new Error('Old-game I10 threat analysis is missing');
+
+  const moves = new Set((row.counterThreat?.networkMoves || []).map(item => item.move));
+  if (!moves.has('J9')) {
+    throw new Error('Counter-threat audit failed to surface the historical J9 forcing extension');
+  }
+  if (!row.counterThreat?.risk || row.counterThreat.risk === 'NONE') {
+    throw new Error('Historical I10 must carry a non-NONE counter-threat warning');
+  }
+}
+
+/**
+ * After Black 15 I8, old logic could collapse onto the unique double-threat
+ * blocker K8. Jev Max must keep fork defense advisory and preserve multiple
+ * candidates, then recognize that White I12 forces I13 but leaves J7 + K8.
+ */
+async function testOldGameForcedDefenseResidualNetwork() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Old-game residual-network regression must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','J10','I9','H9','H10','J8','I11','J12','F8','E7','I10','J9','J11','I8'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  if (context.forced === 'block_fork') {
+    throw new Error('Jev Max must not hard-collapse a unique fork creator into a pseudo-forced move');
+  }
+  if ((context.candidates || []).length < 2) {
+    throw new Error('Jev Max must preserve multiple alternatives in the I8 threat-network position');
+  }
+
+  const recallSources = new Set(
+    (context.candidates || []).flatMap(move => move.recallSources || [])
+  );
+  if (!recallSources.has('COUNTER_THREAT_BLOCK') && !recallSources.has('DEFENSIVE_FORK_BLOCK')) {
+    throw new Error('Jev Max failed to recall any explicit counter-threat defense in the I8 position');
+  }
+
+  const threat = await engine.threatAnalyze(['I12'], 'max');
+  const row = threat?.analyses?.find(item => item.move === 'I12');
+  if (!row) throw new Error('Old-game I12 threat analysis is missing');
+  const counter = row.counterThreat || {};
+  if (counter.forcedDefenseMove !== 'I13') {
+    throw new Error('I12 must identify Black I13 as the forced defensive reply, got ' + counter.forcedDefenseMove);
+  }
+
+  const network = new Set((counter.networkMoves || []).map(item => item.move));
+  if (!network.has('J7') || !network.has('K8')) {
+    throw new Error('Residual counter-threat network must preserve both J7 and K8, got ' + [...network].join(','));
+  }
+  if (!['HIGH', 'CRITICAL'].includes(counter.risk)) {
+    throw new Error('I12 residual network should be HIGH/CRITICAL risk, got ' + counter.risk);
+  }
+}
+
+/**
+ * After Black 17 I13, White K8 is already losing by force:
+ * J7 -> J6 -> (G10 or K6) creates the double winning-point finish.
+ * This is a hard Threat-space proof and may be used as a deterministic filter.
+ */
+async function testOldGameK8ForcedLossProof() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Old-game K8 proof regression must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','J10','I9','H9','H10','J8','I11','J12','F8','E7','I10','J9','J11','I8','I12','I13'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const threat = await engine.threatAnalyze(['K8'], 'max');
+  const row = threat?.analyses?.find(item => item.move === 'K8');
+  if (!row?.forced) {
+    throw new Error('Historical K8 must be proved as an opponent forced win');
+  }
+  if (!Array.isArray(row.line) || row.line.length < 3) {
+    throw new Error('Historical K8 proof must expose the forcing line');
+  }
+  if (row.line[0] !== 'J7' || row.line[1] !== 'J6') {
+    throw new Error('Historical K8 proof must begin J7 -> J6, got ' + row.line.join('>'));
+  }
+  if (!['G10', 'K6'].includes(row.line[2])) {
+    throw new Error('Historical K8 proof must continue through G10 or K6, got ' + row.line.join('>'));
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1294,6 +1422,9 @@ function testCoordinateHelpers() {
   }
 }
 
+await testOldGameEarlyForcingExtensionWarning();
+await testOldGameForcedDefenseResidualNetwork();
+await testOldGameK8ForcedLossProof();
 await testRecentGameLocalDeepDisagreementRecall();
 await testRecentGameThreatForcedLossFilter();
 await testRecentGameDepthZeroPositionSemantics();

@@ -66,6 +66,8 @@ Jev Max 不再使用 `filtered.slice(0, 3)` 作为 Jev 的视野。主候选由�
 - Local deeper-search seeds
 - Pattern Expert
 - defensive / counter-threat hotspots
+- unique fork block（Jev Max 仅作为强证据，不再伪装成唯一数学必防）
+- opponent forcing-extension block
 - VCF / VCT 标记
 - strategic wildcard seed
 
@@ -95,11 +97,32 @@ Atomic Top 4 再进入 Pairwise。每一对同时询问 `A vs B` 与 `B vs A`，
 - immediate tactical refutation
 - forcing sequence
 - multi-axis counterattack
+- forced defensive reply 后仍残留的 counter-threat network
 - forcing resource spent too early
 - initiative loss
 - survives best reply
 
 这样第三次 Final Judge 可以看到已经实际返回的 Atomic、Pairwise、Critic 结果，而不是要求第四次 HTTP 请求。
+
+### Counter-threat aware Threat Search
+
+Threat Worker 现在把两类信息严格分开：
+
+- **hard proof**：立即胜、连续强制回复、VCF/Threat-space forced win；可用于硬过滤。
+- **advisory counter-threat**：对手被迫防守一次后，仍残留多个 forcing extension / multi-axis junction；只作为 Jev / Critic 的高优先级风险证据，不能单独当成数学证明。
+
+特别针对“我先制造一个威胁 → 对手被迫挡 → 但对手原来的杀网仍然存在”的 horizon 问题。Worker 会记录：
+
+```yaml
+counter_threat:
+  risk: HIGH | CRITICAL | ELEVATED | WATCH | NONE
+  forced_defense_move: I13
+  network_moves:
+    - J7: FORCING_EXTENSION
+    - K8: DOUBLE_WINNING_POINTS
+```
+
+为了避免附加分析拖垮原有证明，hard proof 优先执行；counter-threat advisory 自己超时不会把已完成的 hard-proof 结果改成 timeout。
 
 ### Opponent best reply / PV
 

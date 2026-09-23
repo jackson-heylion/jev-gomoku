@@ -909,6 +909,124 @@ function runSearch(message) {
   };
 }
 
+function threatNetworkMoves(color, limit = 6, radius = 2) {
+  const out = [];
+  const width = Math.max(8, Math.min(16, limit * 2));
+  for (const move of orderedMoves(color, width, radius)) {
+    assertTime();
+    playMove(move, color);
+    let row;
+    try {
+      const profile = threatPatternProfilePlaced(move.r, move.c, color);
+      const winningPoints = isWin(move.r, move.c, color)
+        ? 2
+        : profile.winningPoints;
+      const multiAxisJunction = winningPoints === 0
+        && profile.multiAxis >= 1
+        && (profile.openThreeDirections >= 1 || profile.twoDirections >= 2);
+      if (winningPoints >= 1 || multiAxisJunction) {
+        row = {
+          move: move.key,
+          kind: winningPoints >= 2
+            ? 'DOUBLE_WINNING_POINTS'
+            : winningPoints === 1
+              ? 'FORCING_EXTENSION'
+              : 'MULTI_AXIS_JUNCTION',
+          winningPoints,
+          openThreeDirections: profile.openThreeDirections,
+          fourDirections: profile.fourDirections,
+          twoDirections: profile.twoDirections,
+          multiAxis: profile.multiAxis,
+          patternScore: Math.round(profile.score)
+        };
+      }
+    } finally {
+      undoMove(move, color);
+    }
+    if (row) out.push(row);
+  }
+
+  return out
+    .sort((a, b) =>
+      b.winningPoints - a.winningPoints
+      || b.multiAxis - a.multiAxis
+      || b.openThreeDirections - a.openThreeDirections
+      || b.patternScore - a.patternScore
+    )
+    .slice(0, limit);
+}
+
+function counterThreatRisk(networkMoves) {
+  const forcing = networkMoves.filter(item => item.winningPoints >= 1);
+  const junctions = networkMoves.filter(item => item.kind === 'MULTI_AXIS_JUNCTION');
+  if (forcing.some(item => item.winningPoints >= 2)) return 'CRITICAL';
+  if (forcing.length >= 2) return 'HIGH';
+  if (forcing.length === 1 && junctions.length >= 1) return 'HIGH';
+  if (forcing.length === 1 || junctions.length >= 2) return 'ELEVATED';
+  if (junctions.length === 1) return 'WATCH';
+  return 'NONE';
+}
+
+function analyzeCounterThreatNetwork(attacker, defender, branch, radius) {
+  assertTime();
+  const defenderWins = immediateWins(defender, radius);
+  if (defenderWins.length >= 2) {
+    return {
+      risk: 'NONE',
+      reason: 'defender_has_multiple_immediate_wins',
+      forcedDefenseMove: null,
+      networkMoves: []
+    };
+  }
+
+  let forcedDefenseMove = null;
+  let networkMoves = [];
+  if (defenderWins.length === 1) {
+    const block = defenderWins[0];
+    if (!isLegalMoveForColor(block.r, block.c, attacker)) {
+      return {
+        risk: 'NONE',
+        reason: 'forced_defense_unavailable',
+        forcedDefenseMove: block.key,
+        networkMoves: []
+      };
+    }
+
+    forcedDefenseMove = block.key;
+    playMove(block, attacker);
+    try {
+      if (isWin(block.r, block.c, attacker)) {
+        networkMoves = [{
+          move: block.key,
+          kind: 'WINNING_DEFENSIVE_COUNTER',
+          winningPoints: 2,
+          openThreeDirections: 0,
+          fourDirections: 0,
+          twoDirections: 0,
+          multiAxis: 0,
+          patternScore: MATE_SCORE
+        }];
+      } else {
+        networkMoves = threatNetworkMoves(attacker, Math.min(6, branch), radius);
+      }
+    } finally {
+      undoMove(block, attacker);
+    }
+  } else {
+    networkMoves = threatNetworkMoves(attacker, Math.min(6, branch), radius);
+  }
+
+  const risk = counterThreatRisk(networkMoves);
+  return {
+    risk,
+    reason: forcedDefenseMove
+      ? (risk === 'NONE' ? 'forced_defense_dissipates_threat' : 'forced_defense_retains_threat_network')
+      : (risk === 'NONE' ? 'no_material_counter_threat' : 'latent_threat_network'),
+    forcedDefenseMove,
+    networkMoves
+  };
+}
+
 function forcingProofKey(attacker, turns) {
   return 'TS:' + attacker + ':' + turns + ':' + hashA + ':' + hashB;
 }
@@ -928,10 +1046,77 @@ function proveForcingWin(attacker, turns, branch, radius, memo) {
   }
   if (turns <= 0) return { forced: false, attackerTurns: null, line: [], reason: 'depth_limit' };
 
-  // A forcing proof is conservative: if the defender already has a direct win,
-  // this attacker line is not considered forced.
-  if (immediateWins(defender, radius).length) {
-    return { forced: false, attackerTurns: null, line: [], reason: 'defender_immediate_win' };
+  // A forcing proof may cross a forced defensive counter-threat only when the
+  // defender has exactly one immediate win and the attacker has exactly one
+  // legal blocking move. This remains deterministic: no broad defender branch
+  // is pruned or guessed.
+  const defenderWins = immediateWins(defender, radius);
+  if (defenderWins.length) {
+    if (defenderWins.length !== 1) {
+      return { forced: false, attackerTurns: null, line: [], reason: 'defender_multiple_immediate_wins' };
+    }
+    const block = defenderWins[0];
+    if (!isLegalMoveForColor(block.r, block.c, attacker)) {
+      return { forced: false, attackerTurns: null, line: [], reason: 'defender_immediate_win_unblockable' };
+    }
+
+    playMove(block, attacker);
+    let defensiveResult = null;
+    try {
+      if (isWin(block.r, block.c, attacker)) {
+        defensiveResult = {
+          forced: true,
+          attackerTurns: 1,
+          line: [block.key],
+          reason: 'winning_defensive_counter'
+        };
+      } else if (!immediateWins(defender, radius).length) {
+        const threats = immediateWins(attacker, radius);
+        if (threats.length >= 2) {
+          defensiveResult = {
+            forced: true,
+            attackerTurns: 2,
+            line: [block.key],
+            reason: 'defensive_double_threat'
+          };
+        } else if (threats.length === 1 && turns > 1) {
+          const forcedReply = threats[0];
+          if (!isLegalMoveForColor(forcedReply.r, forcedReply.c, defender)) {
+            defensiveResult = {
+              forced: true,
+              attackerTurns: 2,
+              line: [block.key],
+              reason: 'defensive_unblockable_counter'
+            };
+          } else {
+            playMove(forcedReply, defender);
+            try {
+              if (!isWin(forcedReply.r, forcedReply.c, defender)) {
+                const child = proveForcingWin(attacker, turns - 1, branch, radius, memo);
+                if (child.forced) {
+                  defensiveResult = {
+                    forced: true,
+                    attackerTurns: 1 + (child.attackerTurns || 0),
+                    line: [block.key, forcedReply.key, ...child.line],
+                    reason: 'forced_defense_counter_chain'
+                  };
+                }
+              }
+            } finally {
+              undoMove(forcedReply, defender);
+            }
+          }
+        }
+      }
+    } finally {
+      undoMove(block, attacker);
+    }
+    return defensiveResult || {
+      forced: false,
+      attackerTurns: null,
+      line: [],
+      reason: 'forced_defense_without_proven_continuation'
+    };
   }
 
   const key = forcingProofKey(attacker, turns);
@@ -1051,17 +1236,57 @@ function runThreatSearch(message) {
     deadline = performance.now() + Math.min(sliceMs, remainingBudget);
     let timedOut = false;
     let proof = { forced: false, attackerTurns: null, line: [], reason: 'not_proven' };
+    let counterThreat = {
+      risk: 'NONE',
+      reason: 'not_analyzed',
+      forcedDefenseMove: null,
+      networkMoves: [],
+      timedOut: false
+    };
 
     playMove(move, rootSide);
     try {
       if (!isWin(move.r, move.c, rootSide)) {
         const memo = new Map();
-        proof = proveForcingWin(opponentSide, maxThreatTurns, branch, radius, memo);
+        try {
+          proof = proveForcingWin(opponentSide, maxThreatTurns, branch, radius, memo);
+        } catch (error) {
+          if (error !== TIMEOUT) throw error;
+          timedOut = true;
+          anyTimedOut = true;
+        }
+
+        if (!timedOut && !proof.forced) {
+          try {
+            counterThreat = {
+              ...analyzeCounterThreatNetwork(
+                opponentSide,
+                rootSide,
+                branch,
+                radius
+              ),
+              timedOut: false
+            };
+          } catch (error) {
+            if (error !== TIMEOUT) throw error;
+            counterThreat = {
+              risk: 'UNKNOWN',
+              reason: 'advisory_timeout',
+              forcedDefenseMove: null,
+              networkMoves: [],
+              timedOut: true
+            };
+          }
+        } else if (proof.forced) {
+          counterThreat = {
+            risk: 'PROVEN_FORCED_LOSS',
+            reason: 'hard_forcing_proof_available',
+            forcedDefenseMove: null,
+            networkMoves: [],
+            timedOut: false
+          };
+        }
       }
-    } catch (error) {
-      if (error !== TIMEOUT) throw error;
-      timedOut = true;
-      anyTimedOut = true;
     } finally {
       undoMove(move, rootSide);
     }
@@ -1072,7 +1297,8 @@ function runThreatSearch(message) {
       timedOut,
       attackerTurns: proof.attackerTurns ?? null,
       line: Array.isArray(proof.line) ? proof.line : [],
-      reason: timedOut ? 'timeout' : proof.reason
+      reason: timedOut ? 'timeout' : proof.reason,
+      counterThreat
     });
   }
 

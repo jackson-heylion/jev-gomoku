@@ -142,3 +142,14 @@ benchmark/results/<timestamp>.md
 6. wildcard 是否偶尔补到 Local candidate universe 漏掉的强手，而不是高频制造噪声。
 
 Benchmark 不会输出或保存 `JEV_API_KEY`。
+
+
+## Counter-threat regression
+
+新增旧等级 4 实战败局的三个固定局面：
+
+1. 白 12 手 `I10` 后必须至少提示黑 `J9` forcing extension。
+2. 黑 `I8` 后 Jev Max 不得因为唯一 fork creator 就硬锁死 `K8`；白 `I12` 的 Threat 分析必须识别黑被迫 `I13` 后仍保留 `J7 + K8` 残余威胁网络。
+3. 黑 `I13` 后白 `K8` 必须被 Threat-space 硬证明为 forced loss，强制线从 `J7 -> J6` 开始，并经 `G10` 或 `K6` 转为双胜点。
+
+这些测试区分 hard proof 与 advisory threat network，避免为了增强二阶威胁识别而把启发式误当证明。
