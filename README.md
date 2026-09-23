@@ -134,7 +134,7 @@ Final Judge 因此能比较“我走这步后，对方最强反击是什么”�
 
 此时只保留 `fallbackRank`，不会再把 `0/-1/-2` 当作真实 evaluation score 发送给 Jev。
 
-内部 mate/forced sentinel（如 `1e14+`）也不会直接进入 prompt，而会转换为结构化 `forced_result`。
+内部 mate-like sentinel（如 `1e14+`）不会直接进入 prompt，而会转换为结构化 `forced_result`，并显式标记 `proven=false / advisory=true`。只有立即胜、VCF、Threat-space 等确定性证明才拥有 proof 权威。
 
 ### OTHER / wildcard
 
@@ -250,8 +250,10 @@ npm run check
 - 平均 Jev 请求/token/回合耗时。
 - Local/Deep/Threat 分阶段耗时。
 - Worker timeout / `no_completed_depth`。
-- payload >5k / >7k。
+- payload >5k / >7k，并在 Atomic 请求超过 7k 估算时自动把候选从 8 收紧到 6。
+- browser long-task。
 - 契约违规和战术错误。
+- 两盘真实棋谱位置：Local/Deep 分歧、Threat forced-loss、VCF proof lock、历史 depth=0。
 
 ```bash
 npm run benchmark:smoke
