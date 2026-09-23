@@ -972,6 +972,83 @@ async function testJevMaxPayloadBounds() {
 }
 
 /**
+ * Compact Fan-Out must have a real one-request path. Both order-balanced global
+ * ballots agree with a clear Atomic top candidate and Critic finds no refutation.
+ * Pairwise must not be paid in this case.
+ */
+async function testJevMaxCompactOneRequestConvergence() {
+  let requestCount = 0;
+  let target = null;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      const answers = {};
+      const mainKeys = Object.keys(payload?.state?.candidate_facts || {});
+      if (!target) target = mainKeys[0] || null;
+
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Compact convergence mock question has no choices: ' + id);
+
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === target && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('NEUTRAL') ? 'NEUTRAL' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id === 'global_best' || id === 'global_best_reverse') {
+          choice = keys.includes(target) ? target : keys[0];
+        } else if (id === 'wildcard_pick') {
+          choice = keys[0];
+        } else if (id.startsWith('duel_') || id === 'best_move') {
+          throw new Error('One-request convergence unexpectedly paid for second-stage Pairwise');
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+
+      return {
+        model: 'mock-compact-one-request',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  const shape = result.decisionTrace?.requestShape || {};
+
+  if (requestCount !== 1 || shape.logicalRequests !== 1) {
+    throw new Error('Compact consensus should finish in one Jev request, got ' + requestCount);
+  }
+  if (shape.decisionAuthority !== 'jev_max_compact_convergence') {
+    throw new Error('Unexpected compact convergence authority: ' + shape.decisionAuthority);
+  }
+  if (shape.fanoutPairwiseCount !== 0 || shape.pairwiseCount !== 0) {
+    throw new Error('Compact one-request path must pay zero Pairwise questions');
+  }
+  if (shape.globalBallotAgreement !== true || shape.compactConverged !== true) {
+    throw new Error('Compact convergence telemetry must record ballot agreement');
+  }
+  if (result.finalChoice !== target) {
+    throw new Error('Compact consensus did not retain the agreed target: ' + result.finalChoice + ' vs ' + target);
+  }
+
+  console.log('compact one-request regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    logicalRequests: shape.logicalRequests,
+    globalBallotMargin: shape.globalBallotMargin,
+    payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens
+  }));
+}
+
+/**
  * End-to-end Jev Max regression: the first compact fan-out contains Atomic,
  * full-candidate Critic, forward/reverse global ballots, recall and wildcard work.
  * A validated wildcard forces one second Top4 Pairwise Resolution request.
@@ -2207,6 +2284,7 @@ await testRecentGameDepthZeroPositionSemantics();
 await testRecentGameVcfProofLock();
 await testDeepEvidenceSemantics();
 await testJevMaxPayloadBounds();
+await testJevMaxCompactOneRequestConvergence();
 await testJevMaxPipelineAndWildcard();
 await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
