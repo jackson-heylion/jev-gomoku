@@ -4575,25 +4575,32 @@
     return payload;
   }
 
-  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = []) {
+  function buildMaxSpeculativePayload(context, candidates, speculativePool = candidates, wildcardPool = []) {
     const payload = buildMaxAtomicPayload(context, candidates);
-    const tournament = buildPairwisePayload(speculativePool);
+    const forwardCriteria = Object.fromEntries(candidates.map(move => [
+      move.key,
+      `See candidate_facts.${move.key}`
+    ]));
+    const reverseCriteria = Object.fromEntries([...candidates].reverse().map(move => [
+      move.key,
+      `See candidate_facts.${move.key}`
+    ]));
 
-    payload.state.task = 'Jev Max speculative fan-out: atomic evaluation plus precomputed pairwise/critic evidence for the likely finalist pool.';
-    payload.state.fanout_policy = 'Atomic answers determine the actual Top 4. Pairwise/Critic answers are speculative and are only consumed when their candidate is still eligible after deterministic Threat coverage. Ignore all hard-proved losing or illegal candidates.';
-    payload.state.speculative_pool = speculativePool.map(move => move.key);
-    payload.state.pairwise_policy = tournament.payload.state.pairwise_policy;
+    payload.state.task = 'Jev Max compact fan-out: independent Atomic evaluation, adversarial Critic, and two order-balanced global best ballots over the complete main candidate set.';
+    payload.state.fanout_policy = 'Atomic and Critic inspect every main candidate. global_best and global_best_reverse ask the same final-comparison question with reversed option order; their probability agreement is the one-request convergence signal. Deterministic legality and hard proof always dominate semantic judgement.';
+    payload.state.speculative_pool = candidates.map(move => move.key);
     payload.state.critic_policy = MAX_CRITIC_POLICY;
-    Object.assign(payload.questions, tournament.payload.questions);
-    addCriticQuestions(payload.questions, speculativePool);
+    addCriticQuestions(payload.questions, candidates);
 
     payload.questions.global_best = {
       type: 'choice',
       instructions: 'Independently choose the strongest supplied main candidate from the full board and candidate_facts. This is a consensus signal, not permission to override deterministic proof.',
-      criteria: Object.fromEntries(candidates.map(move => [
-        move.key,
-        `See candidate_facts.${move.key}`
-      ]))
+      criteria: forwardCriteria
+    };
+    payload.questions.global_best_reverse = {
+      type: 'choice',
+      instructions: 'Independently choose the strongest supplied main candidate from the full board and candidate_facts. The option order is intentionally reversed; judge board strength, not presentation order.',
+      criteria: reverseCriteria
     };
 
     if (wildcardPool.length) {
@@ -4610,8 +4617,8 @@
 
     return {
       payload,
-      pairs: tournament.pairs,
-      speculativePool: speculativePool.map(move => move.key)
+      pairs: [],
+      speculativePool: candidates.map(move => move.key)
     };
   }
 
@@ -4630,10 +4637,12 @@
     tournament.payload.state.atomic_results = Object.fromEntries(
       candidates.map(move => [move.key, atomicAnswers?.[`judge_${move.key}`] || null])
     );
-    addCriticQuestions(tournament.payload.questions, candidates);
+    tournament.payload.state.critic_results = Object.fromEntries(
+      candidates.map(move => [move.key, atomicAnswers?.[`critic_${move.key}`] || null])
+    );
     tournament.payload.questions.best_move = {
       type: 'choice',
-      instructions: 'Choose the strongest legal resolution candidate. Use full-board geometry, candidate_facts and prior Atomic results. Pairwise/Critic questions in this request are independent cross-checks; legality and hard proofs remain authoritative.',
+      instructions: 'Choose the strongest legal resolution candidate. Use full-board geometry, candidate_facts, prior Atomic/Critic results, and the order-balanced Pairwise questions in this request. Legality and hard proofs remain authoritative.',
       criteria: Object.fromEntries(resolutionCandidates.map(move => [
         move.key,
         `See candidate_facts.${move.key}`
@@ -4741,6 +4750,98 @@
       || (b.atomicScore || 0) - (a.atomicScore || 0)
       || (a.localRank || a.rank || 999) - (b.localRank || b.rank || 999)
     );
+  }
+
+  function maxGlobalConsensus(candidates, answers) {
+    const forward = answers?.global_best || null;
+    const reverse = answers?.global_best_reverse || null;
+    const forwardChoice = String(forward?.choice || '').toUpperCase();
+    const reverseChoice = String(reverse?.choice || '').toUpperCase();
+    const keys = candidates.map(move => move.key);
+    const probabilities = {};
+    for (const key of keys) {
+      probabilities[key] = (probabilityFor(forward, key) + probabilityFor(reverse, key)) / 2;
+    }
+    const ranked = [...keys].sort((a, b) => Number(probabilities[b] || 0) - Number(probabilities[a] || 0));
+    const first = ranked[0] || null;
+    const second = ranked[1] || null;
+    return {
+      choice: forwardChoice && forwardChoice === reverseChoice ? forwardChoice : null,
+      agreed: Boolean(forwardChoice && forwardChoice === reverseChoice),
+      forward: compactAnswer(forward),
+      reverse: compactAnswer(reverse),
+      probabilities,
+      margin: first ? Number(probabilities[first] || 0) - Number(probabilities[second] || 0) : 0,
+      topProbability: first ? Number(probabilities[first] || 0) : 0,
+      ranked
+    };
+  }
+
+  function criticHardRefutationProbability(move) {
+    const probabilities = move?.criticSummary?.probabilities || {};
+    const deterministicRisk = move?.threatSearch?.counterThreat?.risk || 'NONE';
+    const tactical = Number(probabilities.TACTICAL_REFUTATION || 0);
+    const multiAxis = Number(probabilities.MULTI_AXIS_COUNTERATTACK || 0);
+    const residual = Number(probabilities.RESIDUAL_COUNTER_THREAT || 0);
+
+    // Residual pressure is common in real midgame positions and is already
+    // measured by the deterministic Threat worker. Only promote it to a hard
+    // semantic veto when that worker independently marks the network CRITICAL.
+    return Math.max(
+      tactical,
+      multiAxis,
+      deterministicRisk === 'CRITICAL' ? residual : 0
+    );
+  }
+
+  function highConfidenceCompactConvergence(atomicTop4, consensus, recallChoice) {
+    if (recallChoice !== 'MAIN_SET' || !consensus?.agreed || !consensus.choice || atomicTop4.length < 2) {
+      return false;
+    }
+    const chosen = atomicTop4.find(move => move.key === consensus.choice);
+    if (!chosen || chosen.threatSearch?.timedOut || !chosen.threatSearch) return false;
+
+    const atomicRanked = [...atomicTop4].sort((a, b) =>
+      Number(b.atomicScore || 0) - Number(a.atomicScore || 0)
+      || Number(a.localRank || 999) - Number(b.localRank || 999)
+    );
+    const atomicTop = atomicRanked[0];
+    const atomicSecond = atomicRanked[1];
+    const topScore = Number(atomicTop?.atomicScore || 0);
+    const secondScore = Number(atomicSecond?.atomicScore || 0);
+    const chosenScore = Number(chosen.atomicScore || 0);
+    const chosenGapFromTop = topScore - chosenScore;
+    const atomicLead = topScore - secondScore;
+    const chosenProbability = Number(consensus.probabilities?.[chosen.key] || 0);
+
+    // Real Jev data shows Atomic's absolute scale varies substantially by
+    // position. Convergence therefore uses relative Atomic rank plus two
+    // reversed-order global ballots. Critic is a veto for a strong concrete
+    // refutation, not an absolute survival threshold.
+    return chosenScore >= .25
+      && chosenGapFromTop <= .04
+      && chosenProbability >= .34
+      && Number(consensus.margin || 0) >= .12
+      && (atomicLead >= .04 || Number(consensus.margin || 0) >= .20)
+      && criticHardRefutationProbability(chosen) < .55
+      && chosen.threatSearch?.forced !== true
+      && chosen.analysis?.facts?.tactical_safety !== 'LOSING';
+  }
+
+  function compactConsensusAnswer(consensus, candidates = []) {
+    const choice = consensus?.choice;
+    if (!choice) return null;
+    const allowed = new Set((candidates || []).map(move => move.key));
+    const entries = Object.entries(consensus.probabilities || {})
+      .filter(([key]) => !allowed.size || allowed.has(key))
+      .map(([key, value]) => [key, Number(value) || 0]);
+    const sum = entries.reduce((total, [, value]) => total + value, 0) || 1;
+    const probabilities = Object.fromEntries(entries.map(([key, value]) => [key, value / sum]));
+    return {
+      choice,
+      confidence: Number(probabilities[choice] || 0),
+      probabilities
+    };
   }
 
   function highConfidenceMaxConvergence(ranked, globalBest = null) {
@@ -5302,38 +5403,34 @@
 
     let hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
     let wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
-    let speculativePool = candidates.slice(0, Math.min(6, candidates.length));
-    let fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+    let fanout = buildMaxSpeculativePayload(context, candidates, candidates, wildcardPool);
     let fanoutTokens = estimatePayloadTokens(fanout.payload);
 
-    // Keep the main candidate recall intact when possible. First reduce only
-    // speculative comparisons; if the shared-state payload still crosses the
-    // historical hard target, fall back to the existing six-candidate ceiling.
-    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
-      speculativePool = candidates.slice(0, Math.min(4, candidates.length));
-      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+    // Compact fan-out should normally stay below the 7k target without
+    // sacrificing the full candidate universe. Trim only optional wildcard
+    // context first; candidate truncation remains the last-resort legacy guard.
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && wildcardPool.length > 6) {
+      wildcardPool = wildcardPool.slice(0, 6);
+      fanout = buildMaxSpeculativePayload(context, candidates, candidates, wildcardPool);
       fanoutTokens = estimatePayloadTokens(fanout.payload);
     }
     if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && candidates.length > 6) {
       candidates = candidates.slice(0, 6);
       hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
-      wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
-      speculativePool = candidates.slice(0, Math.min(6, candidates.length));
-      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      wildcardPool = extraWildcardPool(candidates, 6, hardRejectedThreatKeys);
+      fanout = buildMaxSpeculativePayload(context, candidates, candidates, wildcardPool);
       fanoutTokens = estimatePayloadTokens(fanout.payload);
-      if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
-        speculativePool = candidates.slice(0, 4);
-        fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
-        fanoutTokens = estimatePayloadTokens(fanout.payload);
-      }
     }
 
-    updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / Critic…');
+    updateApiState('busy', 'Jev Max：一次 Compact Fan-Out 执行 Atomic / Critic / 双向 Global Choice…');
     const fanoutData = await callJev(fanout.payload);
     const atomic = atomicTraceFor(candidates, fanoutData?.answers || {});
     const atomicCandidateCount = candidates.length;
+    const fanoutCritic = maxCriticTrace(candidates, fanoutData?.answers || {});
     const recallChoice = String(fanoutData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
     const globalBest = compactAnswer(fanoutData?.answers?.global_best);
+    const globalBestReverse = compactAnswer(fanoutData?.answers?.global_best_reverse);
+    const globalConsensus = maxGlobalConsensus(candidates, fanoutData?.answers || {});
 
     let atomicTop4 = [...candidates]
       .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
@@ -5386,11 +5483,15 @@
       result.decisionTrace.atomic = atomic;
       result.decisionTrace.recallCheck = compactAnswer(fanoutData?.answers?.recall_check);
       result.decisionTrace.globalBest = globalBest;
+      result.decisionTrace.globalBestReverse = globalBestReverse;
+      result.decisionTrace.globalConsensus = globalConsensus;
       Object.assign(result.decisionTrace.requestShape, {
         logicalRequests: 1,
         httpRequests: client.attempts,
-        fanoutPairwiseCount: fanout.pairs.length * 2,
+        fanoutPairwiseCount: 0,
         fanoutCriticCount: fanout.speculativePool.length,
+        globalBallotAgreement: globalConsensus.agreed,
+        globalBallotMargin: globalConsensus.margin,
         payloadEstimatedInputTokens: [fanoutTokens].filter(Number.isFinite)
       });
       result.stageNote = `Jev Max：Fan-Out 后 Threat 证明收敛到唯一候选 ${candidates[0].key}（1 次 Jev 请求）`;
@@ -5420,17 +5521,8 @@
       }
     }
 
-    const atomicTopKeys = new Set(atomicTop4.map(move => move.key));
-    const speculativePoolKeys = new Set(fanout.speculativePool);
-    const expectedPairs = atomicTop4.length * (atomicTop4.length - 1) / 2;
-    let usedPairs = fanout.pairs.filter(pair =>
-      atomicTopKeys.has(pair.a) && atomicTopKeys.has(pair.b)
-    );
-    const fanoutCovered = atomicTop4.every(move => speculativePoolKeys.has(move.key))
-      && usedPairs.length === expectedPairs;
-
     let pairwise = [];
-    let critic = [];
+    const critic = maxCriticTrace(atomicTop4, fanoutData?.answers || {});
     let ranked = [];
     let finalists = [];
     let answer = null;
@@ -5438,55 +5530,20 @@
     let secondData = null;
     let secondTokens = null;
     let decisionAuthority = null;
-    let pairwiseSource = 'speculative_fanout';
+    let pairwiseSource = 'not_needed';
+    let usedPairs = [];
 
-    if (fanoutCovered) {
-      pairwise = scorePairwiseTournament(atomicTop4, usedPairs, fanoutData?.answers || {});
-      critic = maxCriticTrace(atomicTop4, fanoutData?.answers || {});
-      ranked = pairwiseRank(atomicTop4);
-      finalists = ranked.slice(0, Math.min(2, ranked.length));
-      if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
-        finalists = [...finalists, wildcard].slice(0, 3);
-      }
+    const compactConverged = !wildcard
+      && highConfidenceCompactConvergence(atomicTop4, globalConsensus, recallChoice);
 
-      const converged = !wildcard && highConfidenceMaxConvergence(ranked, globalBest);
-      if (converged) {
-        answer = pairwiseAnswer(ranked);
-        finalChoice = answer.choice;
-        decisionAuthority = 'jev_max_fanout_convergence';
-      } else {
-        const finalPayload = buildMaxFinalPayload(finalists, context, deepAnalysis, threatAnalysis);
-        secondTokens = estimatePayloadTokens(finalPayload);
-        updateApiState('busy', 'Jev Max：证据存在分歧，执行第 2 次最终裁决…');
-        secondData = await callJev(finalPayload);
-        const raw = secondData?.answers?.best_move;
-        if (!raw || typeof raw.choice !== 'string') {
-          throw new Error('Jev Max 最终响应中缺少 answers.best_move.choice');
-        }
-        const finalistKeys = new Set(finalists.map(move => move.key));
-        finalChoice = raw.choice.toUpperCase();
-        if (!finalistKeys.has(finalChoice)) {
-          throw new Error(`Jev Max 返回候选集之外的落点：${raw.choice}`);
-        }
-        const probabilities = raw.probabilities && typeof raw.probabilities === 'object'
-          ? Object.fromEntries(Object.entries(raw.probabilities)
-              .filter(([key]) => finalistKeys.has(String(key).toUpperCase()))
-              .map(([key, value]) => [String(key).toUpperCase(), Number(value)]))
-          : { [finalChoice]: 1 };
-        answer = {
-          ...raw,
-          choice: finalChoice,
-          confidence: Number.isFinite(raw.confidence)
-            ? raw.confidence
-            : Number.isFinite(Number(probabilities[finalChoice])) ? Number(probabilities[finalChoice]) : null,
-          probabilities
-        };
-        decisionAuthority = 'jev_max_final';
-      }
+    if (compactConverged) {
+      answer = compactConsensusAnswer(globalConsensus, atomicTop4);
+      finalChoice = answer.choice;
+      finalists = atomicTop4;
+      decisionAuthority = 'jev_max_compact_convergence';
     } else {
-      // Rare difficult path: Atomic promoted a candidate outside the speculative
-      // top-six pool. Resolve Pairwise/Critic and a final best-move vote together
-      // in the second and final request, preserving the two-request ceiling.
+      // Difficult positions pay for order-balanced Pairwise only after Atomic,
+      // Threat coverage and the two global ballots have exposed the actual Top4.
       const resolution = buildMaxResolutionPayload(
         context,
         atomicTop4,
@@ -5494,11 +5551,12 @@
         wildcard
       );
       secondTokens = estimatePayloadTokens(resolution.payload);
-      updateApiState('busy', 'Jev Max：Atomic 改写决赛池，第 2 次 Fan-Out 解决分歧…');
+      updateApiState('busy', wildcard
+        ? 'Jev Max：wildcard / 证据分歧，执行第 2 次 Resolution Fan-Out…'
+        : 'Jev Max：Compact Fan-Out 未收敛，执行第 2 次 Pairwise Resolution…');
       secondData = await callJev(resolution.payload);
       usedPairs = resolution.pairs;
       pairwise = scorePairwiseTournament(atomicTop4, resolution.pairs, secondData?.answers || {});
-      critic = maxCriticTrace(atomicTop4, secondData?.answers || {});
       ranked = pairwiseRank(atomicTop4);
       pairwiseSource = 'resolution_fanout';
 
@@ -5570,6 +5628,8 @@
         atomic,
         recallCheck: compactAnswer(fanoutData?.answers?.recall_check),
         globalBest,
+        globalBestReverse,
+        globalConsensus,
         pairwise,
         critic,
         wildcard: {
@@ -5627,8 +5687,11 @@
           maxWorkers: HEAVY_WORKER_POOL_SIZE,
           workerPoolPersistent: true,
           fanoutSpeculativePool: fanout.speculativePool,
-          fanoutPairwiseCount: fanout.pairs.length * 2,
+          fanoutPairwiseCount: 0,
           fanoutCriticCount: fanout.speculativePool.length,
+          globalBallotAgreement: globalConsensus.agreed,
+          globalBallotMargin: globalConsensus.margin,
+          compactConverged,
           pairwiseSource,
           payloadEstimatedInputTokens: estimatedInputTokens,
           payloadTokenBudgetTarget: 5000,
@@ -5664,10 +5727,8 @@
         }))
       },
       stageNote: logicalRequests === 1
-        ? `Jev Max：Speculative Fan-Out 单请求收敛，选择 ${finalChoice}`
-        : decisionAuthority === 'jev_max_resolution_fanout'
-          ? `Jev Max：首轮 Fan-Out + 困难局面 Resolution Fan-Out，2 次 Jev 请求后选择 ${finalChoice}`
-          : `Jev Max：首轮 Fan-Out 后证据仍有分歧，第 2 次 Final Judge 选择 ${finalChoice}`
+        ? `Jev Max：Compact Fan-Out 双向共识单请求收敛，选择 ${finalChoice}`
+        : `Jev Max：Compact Fan-Out 未收敛，第 2 次 Pairwise Resolution 后选择 ${finalChoice}`
     };
   }
 

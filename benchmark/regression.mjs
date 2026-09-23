@@ -959,18 +959,99 @@ async function testJevMaxPayloadBounds() {
   const speculative = engine.maxSpeculativePayload('max');
   const speculativeDuelIds = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('duel_'));
   const speculativeCritics = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('critic_'));
-  if (speculativeDuelIds.length > 30) throw new Error('Top-6 speculative pairwise fan-out exceeded 30 questions');
-  if (speculativeCritics.length > 6) throw new Error('Speculative critic fan-out exceeded six candidates');
-  if (!speculative?.questions?.global_best) throw new Error('Speculative Fan-Out is missing global_best');
-  if (!speculative?.state?.pairwise_policy || !speculative?.state?.critic_policy) {
-    throw new Error('Speculative Fan-Out must hoist shared pairwise/critic policy instead of repeating it');
+  if (speculativeDuelIds.length !== 0) throw new Error('Compact Fan-Out must not prepay Pairwise questions');
+  if (speculativeCritics.length < 1 || speculativeCritics.length > 8) {
+    throw new Error('Compact critic fan-out must cover 1..8 main candidates');
+  }
+  if (!speculative?.questions?.global_best || !speculative?.questions?.global_best_reverse) {
+    throw new Error('Compact Fan-Out must include forward and reverse global-best ballots');
+  }
+  if (!speculative?.state?.critic_policy) {
+    throw new Error('Compact Fan-Out must hoist shared critic policy instead of repeating it');
   }
 }
 
 /**
- * End-to-end Jev Max regression: the first speculative fan-out contains Atomic,
- * Pairwise/Critic, recall and wildcard proposal work. A validated wildcard forces
- * at most one second Final request with structured prior-stage evidence.
+ * Compact Fan-Out must have a real one-request path. Both order-balanced global
+ * ballots agree with a clear Atomic top candidate and Critic finds no refutation.
+ * Pairwise must not be paid in this case.
+ */
+async function testJevMaxCompactOneRequestConvergence() {
+  let requestCount = 0;
+  let target = null;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      const answers = {};
+      const mainKeys = Object.keys(payload?.state?.candidate_facts || {});
+      if (!target) target = mainKeys[0] || null;
+
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Compact convergence mock question has no choices: ' + id);
+
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === target && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('NEUTRAL') ? 'NEUTRAL' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id === 'global_best' || id === 'global_best_reverse') {
+          choice = keys.includes(target) ? target : keys[0];
+        } else if (id === 'wildcard_pick') {
+          choice = keys[0];
+        } else if (id.startsWith('duel_') || id === 'best_move') {
+          throw new Error('One-request convergence unexpectedly paid for second-stage Pairwise');
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+
+      return {
+        model: 'mock-compact-one-request',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  const shape = result.decisionTrace?.requestShape || {};
+
+  if (requestCount !== 1 || shape.logicalRequests !== 1) {
+    throw new Error('Compact consensus should finish in one Jev request, got ' + requestCount);
+  }
+  if (shape.decisionAuthority !== 'jev_max_compact_convergence') {
+    throw new Error('Unexpected compact convergence authority: ' + shape.decisionAuthority);
+  }
+  if (shape.fanoutPairwiseCount !== 0 || shape.pairwiseCount !== 0) {
+    throw new Error('Compact one-request path must pay zero Pairwise questions');
+  }
+  if (shape.globalBallotAgreement !== true || shape.compactConverged !== true) {
+    throw new Error('Compact convergence telemetry must record ballot agreement');
+  }
+  if (result.finalChoice !== target) {
+    throw new Error('Compact consensus did not retain the agreed target: ' + result.finalChoice + ' vs ' + target);
+  }
+
+  console.log('compact one-request regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    logicalRequests: shape.logicalRequests,
+    globalBallotMargin: shape.globalBallotMargin,
+    payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens
+  }));
+}
+
+/**
+ * End-to-end Jev Max regression: the first compact fan-out contains Atomic,
+ * full-candidate Critic, forward/reverse global ballots, recall and wildcard work.
+ * A validated wildcard forces one second Top4 Pairwise Resolution request.
  */
 async function testJevMaxPipelineAndWildcard() {
   let requestCount = 0;
@@ -1001,7 +1082,7 @@ async function testJevMaxPipelineAndWildcard() {
         } else if (id === 'wildcard_pick') {
           choice = keys[0];
         } else if (id === 'best_move') {
-          const candidateEvidence = payload?.state?.candidates || {};
+          const candidateEvidence = payload?.state?.candidates || payload?.state?.candidate_facts || {};
           finalTarget = keys.find(key =>
             Array.isArray(candidateEvidence[key]?.candidate_sources)
             && candidateEvidence[key].candidate_sources.includes('JEV_WILDCARD')
@@ -1056,13 +1137,20 @@ async function testJevMaxPipelineAndWildcard() {
 
   const fanoutPayload = captured[0];
   const duelIds = Object.keys(fanoutPayload?.questions || {}).filter(id => id.startsWith('duel_'));
-  if (duelIds.length > 30) throw new Error('Speculative Top-6 pairwise fan-out exceeded 30 duel questions');
-  if (!Object.keys(fanoutPayload?.questions || {}).some(id => id.startsWith('critic_'))) {
-    throw new Error('Fan-Out request must batch adversarial critic questions');
+  if (duelIds.length !== 0) throw new Error('Compact first request must contain zero Pairwise duel questions');
+  const criticIds = Object.keys(fanoutPayload?.questions || {}).filter(id => id.startsWith('critic_'));
+  if (!criticIds.length || criticIds.length > 8) {
+    throw new Error('Compact Fan-Out must batch adversarial critic questions for the bounded main set');
   }
   if (!fanoutPayload?.questions?.wildcard_pick) throw new Error('Fan-Out must precompute a bounded wildcard proposal');
   if ((fanoutPayload?.state?.wildcard_pool || []).length > 16) throw new Error('Wildcard pool exceeded 16');
-  if (!fanoutPayload?.questions?.global_best) throw new Error('Fan-Out must include an independent global_best consensus question');
+  if (!fanoutPayload?.questions?.global_best || !fanoutPayload?.questions?.global_best_reverse) {
+    throw new Error('Fan-Out must include forward/reverse global-best consensus questions');
+  }
+  const secondDuels = Object.keys(captured[1]?.questions || {}).filter(id => id.startsWith('duel_'));
+  if (!secondDuels.length || secondDuels.length > 12) {
+    throw new Error('Difficult-position second request must contain bounded Top4 Pairwise questions');
+  }
 
   const wildcard = result.decisionTrace?.wildcard;
   if (!wildcard?.requested || !wildcard?.accepted || !wildcard?.enteredFinalists) {
@@ -1674,11 +1762,8 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   }
 
   const fanoutPayload = captured[0];
-  for (const [id, question] of Object.entries(fanoutPayload?.questions || {})) {
-    if ((id.startsWith('duel_') || id.startsWith('critic_'))
-      && Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'G14')) {
-      throw new Error('Tail G14 must not enter speculative Pairwise/Critic before Threat validation');
-    }
+  if (Object.keys(fanoutPayload?.questions || {}).some(id => id.startsWith('duel_'))) {
+    throw new Error('Compact first stage must not speculate Pairwise before Threat coverage closes');
   }
   const resolutionOrFinal = captured[1] || null;
   if (resolutionOrFinal?.state?.candidates?.G14) {
@@ -2078,7 +2163,7 @@ async function testHistoricalDoubleOpenThreeForkDefense() {
         } else if (id.startsWith('critic_')) {
           const move = id.slice('critic_'.length);
           if (unsafeKeys.has(move) && keys.includes('SURVIVES_BEST_REPLY')) choice = 'SURVIVES_BEST_REPLY';
-        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'global_best_reverse' || id === 'best_move') {
           choice = keys.find(key => unsafeKeys.has(key)) || keys[0];
         }
         answers[id] = oneHotChoice(choice, keys);
@@ -2199,6 +2284,7 @@ await testRecentGameDepthZeroPositionSemantics();
 await testRecentGameVcfProofLock();
 await testDeepEvidenceSemantics();
 await testJevMaxPayloadBounds();
+await testJevMaxCompactOneRequestConvergence();
 await testJevMaxPipelineAndWildcard();
 await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
