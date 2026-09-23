@@ -1108,7 +1108,13 @@
     lines.push(`第 ${d.moveNo} 手 · ${colorShortZh(aiColor())} ${d.chosen}`);
     lines.push(`  模式：${modeLabel}`);
     if (d.stageNote) lines.push(`  决策阶段：${d.stageNote}`);
-    if (d.forced) lines.push(`  强制类型：${d.forced === 'win' ? '立即取胜' : d.forced === 'block' ? '必须防守' : d.forced}`);
+    if (d.forced) lines.push(`  强制类型：${d.forced === 'win'
+      ? '立即取胜'
+      : d.forced === 'block'
+        ? '必须防守'
+        : d.forced === 'forced_loss_double_win'
+          ? '对手已有两个立即胜点，单手无解'
+          : d.forced}`);
     if (d.localChoice) lines.push(`  Local 首选：${d.localChoice}`);
     if (d.jevSuggested) lines.push(`  Jev 最终选择：${d.jevSuggested}`);
     if (d.trace?.preJevDeepSearch) {
@@ -2217,7 +2223,7 @@
         forced = 'win';
         roots = ownWins;
       } else if (opponentWins.length) {
-        forced = 'block';
+        forced = opponentWins.length >= 2 ? 'forced_loss_double_win' : 'block';
         roots = opponentWins.filter(move => isLegalMoveForColor(move.r, move.c, side));
       } else {
         const opponentForks = moves.length >= 16 && !localSearchExpired()
@@ -3446,6 +3452,9 @@
     const provenVcf = filtered.filter(move => move.analysis?.vcf === true);
     if (provenVcf.length) filtered = provenVcf;
 
+    const safeFromLocalProof = filtered.filter(move => move.analysis?.facts?.tactical_safety !== 'LOSING');
+    if (safeFromLocalProof.length) filtered = safeFromLocalProof;
+
     const safeFromThreatProof = filtered.filter(move => move.threatSearch?.forced !== true);
     if (safeFromThreatProof.length) filtered = safeFromThreatProof;
 
@@ -3495,13 +3504,16 @@
     const winsNow = isWin(move.r, move.c, side);
     const opponentWins = winsNow ? [] : immediateWins(opponent, 2);
     const ownWins = winsNow ? [] : immediateWins(side, 2);
+    const opponentForks = (!winsNow && opponentWins.length === 0)
+      ? countForkCreators(opponent, 10, 2, 1)
+      : { count: 0, points: [], moves: [] };
     const conn = localConnectivity(move.r, move.c, side);
     board[move.r][move.c] = EMPTY;
 
     // A Jev-proposed wildcard may enter the final comparison only if it passes
-    // exact legality and the one-ply loss guard. Deeper proof remains advisory
-    // unless Threat-space has explicitly established it.
-    if (!winsNow && opponentWins.length) return null;
+    // deterministic local safety first: no immediate opponent win and no legal
+    // opponent fork-creator that yields multiple immediate winning points.
+    if (!winsNow && (opponentWins.length || opponentForks.count >= 1)) return null;
 
     return {
       ...move,
@@ -3527,7 +3539,7 @@
           initiative: winsNow || ownWins.length ? 'FORCING' : ownPattern.openThreeDirections ? 'PRESSURE' : 'BALANCED',
           own_immediate_winning_points_after_move: countLabel(ownWins.length),
           opponent_immediate_winning_points_after_move: 'NONE',
-          opponent_fork_creators_after_move: 'UNKNOWN_LIGHT_SCAN',
+          opponent_fork_creators_after_move: 'NONE',
           vcf_status: 'NOT_RUN_WILDCARD',
           vct_status: 'NOT_RUN_WILDCARD',
           opponent_counter_vcf: 'NOT_RUN_WILDCARD',
@@ -3905,10 +3917,14 @@
     });
 
     const allImmediateWins = candidates.length && candidates.every(move => move.analysis?.winsNow);
-    if (allImmediateWins || candidates.length === 1) {
+    if (allImmediateWins || candidates.length === 1 || context.forced === 'forced_loss_double_win') {
       return deterministicMaxResult(
         context, candidates, candidates[0].key, null, null,
-        allImmediateWins ? 'immediate_win' : 'single_forced_candidate'
+        allImmediateWins
+          ? 'immediate_win'
+          : context.forced === 'forced_loss_double_win'
+            ? 'proven_double_immediate_loss'
+            : 'single_forced_candidate'
       );
     }
 
