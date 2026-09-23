@@ -1837,6 +1837,34 @@ async function testRealGameMove44AllMainLossTriggersRescueSweep() {
  * the supplied log; this test checks whether bounded extra recall can discover
  * a vetted rescue or correctly stop semantic voting when none exists.
  */
+async function testRealGameMove44M7WorkerAudit() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Move-44 M7 worker audit must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6','H2','H3'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const threat = await engine.threatAnalyze(
+    ['M7'],
+    'max',
+    { timeBudgetMs: 1100, maxThreatTurns: 6, branch: 9 }
+  );
+  console.log('move44 M7 worker audit:', JSON.stringify(threat));
+}
+
 async function testRealGameMove44ProductionRescueAudit() {
   let requests = 0;
   const engine = await loadProductionEngine({
@@ -1897,6 +1925,7 @@ function testCoordinateHelpers() {
   }
 }
 
+await testRealGameMove44M7WorkerAudit();
 await testRealGameMove44ProductionRescueAudit();
 await testRealGameMove36CounterfactualThreatAudit();
 await testRealGameMove44AllMainLossTriggersRescueSweep();
