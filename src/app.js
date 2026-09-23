@@ -1849,11 +1849,15 @@
 
   function countForkCreators(color, limit = 10, radius = 2, maxCount = Infinity) {
     let count = 0;
+    let complete = true;
     const points = [];
     const movesFound = [];
     const candidates = orderedMoves(color, limit, radius);
     for (const m of candidates) {
-      if (localSearchExpired()) break;
+      if (localSearchExpired()) {
+        complete = false;
+        break;
+      }
       board[m.r][m.c] = color;
       const wins = isWin(m.r, m.c, color) ? 2 : immediateWins(color, radius).length;
       const defenderImmediate = wins >= 2 ? immediateWins(otherColor(color), radius).length : 0;
@@ -1865,7 +1869,7 @@
         if (count >= maxCount) break;
       }
     }
-    return { count, points, moves: movesFound };
+    return { count, points, moves: movesFound, complete };
   }
 
   function forcingExtensions(color, limit = 8, radius = 2) {
@@ -2078,7 +2082,9 @@
       && searchVCTPressure(opponent, Math.min(2, cfg.vctDepth + 1), cfg.radius, new Map());
     board[move.r][move.c] = EMPTY;
 
-    let safety = 'SAFE';
+    const tacticalVerificationComplete = opponentForks.complete !== false
+      && !Boolean(activeLocalSearch?.timedOut);
+    let safety = tacticalVerificationComplete ? 'SAFE' : 'UNVERIFIED_BUDGET';
     if (oppImmediate >= 2) safety = 'LOSING';
     else if (oppImmediate === 1) safety = 'UNSAFE';
     else if (opponentForks.count >= 1) safety = 'LOSING';
@@ -2111,6 +2117,7 @@
       facts: {
         forced_role: forcedRole,
         tactical_safety: safety,
+        tactical_verification: tacticalVerificationComplete ? 'COMPLETE' : 'BUDGET_EXHAUSTED',
         attack_shape: attack,
         initiative,
         own_immediate_winning_points_after_move: countLabel(ownImmediate),
