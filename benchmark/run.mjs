@@ -392,6 +392,8 @@ function engineClientTrace(result) {
       pairwiseThreatCoverageComplete: shape.pairwiseThreatCoverageComplete ?? null,
       rescueSweepElapsedMs: shape.rescueSweepElapsedMs ?? null,
       rescueSweepCandidates: shape.rescueSweepCandidates ?? [],
+      rescueSweepPasses: shape.rescueSweepPasses ?? null,
+      rescueSweepRetriedCandidates: shape.rescueSweepRetriedCandidates ?? [],
       payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens ?? null,
       localSearchElapsedMs: shape.localSearchElapsedMs ?? null,
       deepElapsedMs: shape.deepElapsedMs ?? null,
@@ -703,6 +705,8 @@ function emptyVolume() {
     rescueSweepVetted: 0,
     rescueSweepUnresolved: 0,
     rescueSweepExhausted: 0,
+    rescueSweepVerificationPasses: 0,
+    rescueSweepRetriedCandidates: 0,
     rescueSweepElapsed: [],
     workerTimeouts: 0,
     payloadOverTarget: 0,
@@ -774,6 +778,10 @@ function accumulate(volume, record, options) {
   }
   volume.rescueSweepCandidates += Array.isArray(shape.rescueSweepCandidates)
     ? shape.rescueSweepCandidates.length
+    : 0;
+  volume.rescueSweepVerificationPasses += Number(shape.rescueSweepPasses || 0);
+  volume.rescueSweepRetriedCandidates += Array.isArray(shape.rescueSweepRetriedCandidates)
+    ? shape.rescueSweepRetriedCandidates.length
     : 0;
   const rescueTrace = maxTrace.rescueSweep || {};
   volume.rescueSweepVetted += Array.isArray(rescueTrace.vetted) ? rescueTrace.vetted.length : 0;
@@ -884,6 +892,20 @@ function accumulate(volume, record, options) {
           kind: 'jev_max_unbounded_analysis',
           ply: record.ply,
           detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
+        });
+      }
+      if (Number(shape.rescueSweepPasses || 0) > 3) {
+        volume.violations.push({
+          kind: 'jev_max_rescue_pass_limit',
+          ply: record.ply,
+          detail: 'rescue verification passes=' + shape.rescueSweepPasses
+        });
+      }
+      if ((shape.rescueSweepRetriedCandidates || []).length > 2) {
+        volume.violations.push({
+          kind: 'jev_max_rescue_retry_limit',
+          ply: record.ply,
+          detail: 'rescue retried candidates=' + JSON.stringify(shape.rescueSweepRetriedCandidates)
         });
       }
       if ((shape.rescueSweepCandidates || []).length > 6) {
@@ -1111,6 +1133,8 @@ function summarize(games, arms, options) {
       rescueSweepVetted: volume.rescueSweepVetted,
       rescueSweepUnresolved: volume.rescueSweepUnresolved,
       rescueSweepExhausted: volume.rescueSweepExhausted,
+      rescueSweepVerificationPasses: volume.rescueSweepVerificationPasses,
+      rescueSweepRetriedCandidates: volume.rescueSweepRetriedCandidates,
       avgRescueSweepElapsedMs: volume.rescueSweepElapsed.length
         ? volume.rescueSweepElapsed.reduce((sum, value) => sum + value, 0) / volume.rescueSweepElapsed.length
         : 0,
@@ -1428,6 +1452,11 @@ function renderMarkdown(report) {
     lines.push('- 本地 / Deep / Threat 平均耗时：'
       + num(max.avgLocalElapsedMs) + ' / ' + num(max.avgDeepElapsedMs) + ' / ' + num(max.avgThreatElapsedMs) + ' ms');
     lines.push('- Threat coverage 补检平均耗时：' + num(max.avgThreatCoverageSupplementalElapsedMs) + ' ms（仅触发回合统计）');
+    lines.push('- Rescue Sweep：' + max.rescueSweepTurns + ' 回合 / ' + max.rescueSweepCandidates
+      + ' 候选；验证 pass=' + max.rescueSweepVerificationPasses
+      + '；独立重试候选=' + max.rescueSweepRetriedCandidates
+      + '；bounded exhausted=' + max.rescueSweepExhausted
+      + '；平均耗时=' + num(max.avgRescueSweepElapsedMs) + ' ms');
   }
 
   lines.push('');
