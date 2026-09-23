@@ -390,6 +390,8 @@ function engineClientTrace(result) {
       threatSupplementalCandidates: shape.threatSupplementalCandidates ?? [],
       threatCoverageRejectedIncomplete: shape.threatCoverageRejectedIncomplete ?? [],
       pairwiseThreatCoverageComplete: shape.pairwiseThreatCoverageComplete ?? null,
+      rescueSweepElapsedMs: shape.rescueSweepElapsedMs ?? null,
+      rescueSweepCandidates: shape.rescueSweepCandidates ?? [],
       payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens ?? null,
       localSearchElapsedMs: shape.localSearchElapsedMs ?? null,
       deepElapsedMs: shape.deepElapsedMs ?? null,
@@ -696,6 +698,12 @@ function emptyVolume() {
     threatCoverageSupplementalCandidates: 0,
     threatCoverageRejectedIncomplete: 0,
     threatCoverageSupplementalElapsed: [],
+    rescueSweepTurns: 0,
+    rescueSweepCandidates: 0,
+    rescueSweepVetted: 0,
+    rescueSweepUnresolved: 0,
+    rescueSweepExhausted: 0,
+    rescueSweepElapsed: [],
     workerTimeouts: 0,
     payloadOverTarget: 0,
     payloadOverHard: 0,
@@ -760,6 +768,17 @@ function accumulate(volume, record, options) {
   volume.threatCoverageRejectedIncomplete += Array.isArray(shape.threatCoverageRejectedIncomplete)
     ? shape.threatCoverageRejectedIncomplete.length
     : 0;
+  if (Number.isFinite(shape.rescueSweepElapsedMs)) {
+    volume.rescueSweepTurns++;
+    volume.rescueSweepElapsed.push(shape.rescueSweepElapsedMs);
+  }
+  volume.rescueSweepCandidates += Array.isArray(shape.rescueSweepCandidates)
+    ? shape.rescueSweepCandidates.length
+    : 0;
+  const rescueTrace = maxTrace.rescueSweep || {};
+  volume.rescueSweepVetted += Array.isArray(rescueTrace.vetted) ? rescueTrace.vetted.length : 0;
+  volume.rescueSweepUnresolved += Array.isArray(rescueTrace.unresolved) ? rescueTrace.unresolved.length : 0;
+  if (shape.decisionAuthority === 'bounded_rescue_exhausted') volume.rescueSweepExhausted++;
 
   if (record.engine === 'jev-max') {
     if (!record.isOverride) volume.finalLocal1Matches++;
@@ -853,7 +872,7 @@ function accumulate(volume, record, options) {
       }
     }
     if (record.engine === 'jev-max' && candidateCount > 1) {
-      if (!['jev_max_final', 'jev_max_pairwise_convergence'].includes(shape.decisionAuthority)) {
+      if (!['jev_max_final', 'jev_max_pairwise_convergence', 'jev_max_rescue', 'bounded_rescue_exhausted'].includes(shape.decisionAuthority)) {
         volume.violations.push({
           kind: 'jev_max_decision_authority',
           ply: record.ply,
@@ -865,6 +884,21 @@ function accumulate(volume, record, options) {
           kind: 'jev_max_unbounded_analysis',
           ply: record.ply,
           detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
+        });
+      }
+      if ((shape.rescueSweepCandidates || []).length > 6) {
+        volume.violations.push({
+          kind: 'jev_max_rescue_sweep_limit',
+          ply: record.ply,
+          detail: 'rescue candidates=' + JSON.stringify(shape.rescueSweepCandidates)
+        });
+      }
+      if (['jev_max_rescue', 'bounded_rescue_exhausted'].includes(shape.decisionAuthority)
+        && ((shape.pairwiseCount || 0) !== 0 || (shape.criticCount || 0) !== 0)) {
+        volume.violations.push({
+          kind: 'jev_max_rescue_semantic_waste',
+          ply: record.ply,
+          detail: 'rescue mode must skip pairwise/critic'
         });
       }
       if ((shape.threatSupplementalCandidates || []).length > 2) {
@@ -1071,6 +1105,14 @@ function summarize(games, arms, options) {
       threatCoverageRejectedIncomplete: volume.threatCoverageRejectedIncomplete,
       avgThreatCoverageSupplementalElapsedMs: volume.threatCoverageSupplementalElapsed.length
         ? volume.threatCoverageSupplementalElapsed.reduce((sum, value) => sum + value, 0) / volume.threatCoverageSupplementalElapsed.length
+        : 0,
+      rescueSweepTurns: volume.rescueSweepTurns,
+      rescueSweepCandidates: volume.rescueSweepCandidates,
+      rescueSweepVetted: volume.rescueSweepVetted,
+      rescueSweepUnresolved: volume.rescueSweepUnresolved,
+      rescueSweepExhausted: volume.rescueSweepExhausted,
+      avgRescueSweepElapsedMs: volume.rescueSweepElapsed.length
+        ? volume.rescueSweepElapsed.reduce((sum, value) => sum + value, 0) / volume.rescueSweepElapsed.length
         : 0,
       workerTimeouts: volume.workerTimeouts,
       payloadOverTarget: volume.payloadOverTarget,
