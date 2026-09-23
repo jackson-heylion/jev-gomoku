@@ -163,3 +163,17 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 - `I7` 不得进入 `wildcard_pool`。
 - Jev Max 最终必须从 `H5/H9` 的存活防点中选择。
 - 若强制重放错误线到 `... I7 H5`，白方面对 `H4/H9` 两个立即胜点时必须标记 `forced_loss_double_win`，并保持 0 次 Jev 请求。
+
+
+## Threat coverage closure regression
+
+新增 37 手实战败局中白第 34 手前的固定局面。历史版本的 `H14` 是候选 #7，没有进入初始最多 6 个候选的 Threat Worker，却被 Atomic / Final 晋级；随后黑 `J5` 形成 `F5/K5` 双胜点。
+
+回归要求：
+
+- `H14` 必须仍能进入异构 recall，防止简单删除难题。
+- 若本地战术预算耗尽，不能把未完成验证的候选标成 `SAFE`。
+- Atomic 若晋级 `H14`，必须触发 supplemental Threat coverage。
+- supplemental 必须证明 `H14 -> J5` 为 forced loss，并在 Pairwise 前移除 `H14`。
+- supplemental 最多验证两个剩余未覆盖主候选，仍不增加重型 Worker 并发数。
+- benchmark 记录补检触发回合、候选数、fail-closed 拒绝数与补检耗时。
