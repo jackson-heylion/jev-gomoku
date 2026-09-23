@@ -375,9 +375,23 @@ async function testGrandmasterRealGameThreatTrace() {
     }
   }
 
-  for (const survivingMove of ['F9', 'E9']) {
-    if (byMove.get(survivingMove)?.forced) {
-      throw new Error('Threat search incorrectly marked ' + survivingMove + ' as a proven forced loss');
+  if (byMove.get('F9')?.forced) {
+    throw new Error('Threat search incorrectly marked F9 as a proven forced loss');
+  }
+
+  const strengthenedE9 = byMove.get('E9');
+  if (strengthenedE9?.forced) {
+    if (strengthenedE9.reason !== 'residual_fork_rescue_exhausted') {
+      throw new Error('Strengthened E9 proof has unexpected reason: ' + strengthenedE9.reason);
+    }
+    if (strengthenedE9.forkCreator !== 'G5') {
+      throw new Error('Strengthened E9 proof must identify G5 fork creator, got ' + strengthenedE9.forkCreator);
+    }
+    const e9Rescues = new Set((strengthenedE9.rescueReplies || []).map(item => item.move));
+    for (const rescue of ['G5','F4','K9']) {
+      if (!e9Rescues.has(rescue)) {
+        throw new Error('Strengthened E9 proof is missing exhaustive rescue ' + rescue);
+      }
     }
   }
 }
@@ -1774,10 +1788,19 @@ async function testRealGameMove36CounterfactualThreatAudit() {
     'max',
     { maxThreatTurns: 8, timeBudgetMs: 1450, branch: 9 }
   );
-  console.log('move36 H5 depth8 audit:', JSON.stringify(h5Depth8?.analyses?.[0] || null));
+  const h5Deep = h5Depth8?.analyses?.[0] || null;
+  console.log('move36 H5 depth8 audit:', JSON.stringify(h5Deep));
   console.log('move36 counterfactual threat audit:', JSON.stringify(rows));
   if (!rows.H5 || !rows.L5) {
     throw new Error('Move-36 counterfactual audit did not return core candidates');
+  }
+  if (rows.H5.forced || h5Deep?.forced) {
+    throw new Error('Move-36 H5 must remain unproved even at 8 attacker turns; avoid over-proving the only resistance move');
+  }
+  for (const losingMove of ['L5','G7','G5','G10','H11','I10','D7']) {
+    if (!rows[losingMove]?.forced) {
+      throw new Error('Move-36 alternative ' + losingMove + ' should remain a proved loss');
+    }
   }
 }
 
