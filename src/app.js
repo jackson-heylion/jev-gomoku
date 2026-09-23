@@ -2115,6 +2115,18 @@
     return { ...base, openingAdaptive: false };
   }
 
+  function maxCandidateLimit() {
+    const cores = Number(globalThis.navigator?.hardwareConcurrency || 0);
+    return cores > 0 && cores <= 4 ? 6 : 8;
+  }
+
+  function addRecallSource(move, source) {
+    if (!move) return move;
+    if (!Array.isArray(move.recallSources)) move.recallSources = [];
+    if (!move.recallSources.includes(source)) move.recallSources.push(source);
+    return move;
+  }
+
   function buildAdvancedCandidates(mode) {
     const cfg = advancedEngineConfig(mode);
     const runtime = beginLocalSearchBudget(cfg);
@@ -2129,6 +2141,10 @@
       const opponentWins = immediateWins(opponent, cfg.radius);
       let forced = null;
       let roots;
+      let primaryRoots = [];
+      let hotspots = [];
+      let defensiveHotspots = [];
+
       if (ownWins.length) {
         forced = 'win';
         roots = ownWins;
@@ -2143,29 +2159,76 @@
           forced = 'block_fork';
           roots = opponentForks.moves.filter(move => isLegalMoveForColor(move.r, move.c, side));
         } else {
-          const primaryRoots = orderedMoves(side, cfg.root, cfg.radius);
-          const hotspots = localSearchExpired() ? [] : patternHotspots(side, 3, cfg.radius);
-          // Keep the original root width. Pattern hotspots replace low-priority
-          // roots instead of widening the tree, so candidate recall improves
-          // without spending more Alpha-Beta budget.
+          primaryRoots = orderedMoves(side, cfg.root, cfg.radius);
+          hotspots = localSearchExpired() ? [] : patternHotspots(side, mode === 'max' ? 5 : 3, cfg.radius);
+          defensiveHotspots = mode === 'max' && !localSearchExpired()
+            ? patternHotspots(opponent, 5, cfg.radius)
+                .filter(move => isLegalMoveForColor(move.r, move.c, side))
+            : [];
+          // Keep the proven Alpha-Beta root width bounded. Max improves recall by
+          // composing a semantic candidate universe, not by widening every search.
           roots = mergeRootCandidates(primaryRoots, hotspots, cfg.root);
         }
       }
 
-      let scored = scoreRootsWithinLocalBudget(roots, cfg, runtime);
+      const scored = scoreRootsWithinLocalBudget(roots, cfg, runtime);
       enterLocalTacticalPhase(runtime);
 
-      let selected = scored.slice(0, Math.min(cfg.semantic, scored.length));
+      let selected;
+      if (mode === 'max' && !forced) {
+        const limit = Math.min(maxCandidateLimit(), cfg.semantic);
+        const scoredByKey = new Map(scored.map(move => [move.key, move]));
+        const recall = new Map();
+        const add = (sourceMove, source) => {
+          if (!sourceMove || recall.size >= limit && !recall.has(sourceMove.key)) return;
+          let move = recall.get(sourceMove.key);
+          if (!move) {
+            const scoredMove = scoredByKey.get(sourceMove.key);
+            move = {
+              ...sourceMove,
+              ...(scoredMove || {}),
+              searchScore: Number.isFinite(scoredMove?.searchScore) ? scoredMove.searchScore : null,
+              recallSources: []
+            };
+            recall.set(move.key, move);
+          }
+          addRecallSource(move, source);
+        };
+
+        scored.slice(0, 2).forEach(move => add(move, 'LOCAL_ALPHA_BETA'));
+        hotspots.slice(0, 2).forEach(move => add(move, 'PATTERN_EXPERT'));
+        defensiveHotspots.slice(0, 2).forEach(move => add(move, 'DEFENSIVE_COUNTER_THREAT'));
+        scored.slice(2, 5).forEach(move => add(move, 'LOCAL_DEEP_SEED'));
+
+        const strategic = primaryRoots.find(move => !recall.has(move.key));
+        if (strategic) add(strategic, 'STRATEGIC_WILDCARD');
+
+        for (const move of scored) {
+          if (recall.size >= limit) break;
+          add(move, 'LOCAL_RECALL');
+        }
+        selected = [...recall.values()].slice(0, limit);
+      } else {
+        selected = scored.slice(0, Math.min(cfg.semantic, scored.length));
+        selected.forEach(move => addRecallSource(move, 'LOCAL_ALPHA_BETA'));
+      }
+
       selected.forEach((m, i) => {
         m.rank = i + 1;
         m.analysis = analyzeAdvancedCandidate(m, forced, cfg);
+        m.analysis.facts.candidate_sources = [...(m.recallSources || [])];
+        if (m.analysis.vcf) addRecallSource(m, 'VCF');
+        if (m.analysis.vct) addRecallSource(m, 'VCT');
+        m.analysis.facts.candidate_sources = [...(m.recallSources || [])];
       });
 
-      // Hard tactical filters override every probabilistic judgement. Even when
-      // deeper VCF/VCT work times out, immediate win/block facts remain exact.
+      // Max keeps ordinary finite-horizon disagreement visible to Jev. Only exact
+      // one-ply wins are collapsed here; proven opponent forcing losses are filtered
+      // later by Threat-space Search. Existing modes retain their proven filters.
       const immediate = selected.filter(m => m.analysis.winsNow);
-      if (immediate.length) selected = immediate;
-      else {
+      if (immediate.length) {
+        selected = immediate;
+      } else if (mode !== 'max') {
         const fullySafe = selected.filter(m => m.analysis.facts.tactical_safety === 'SAFE');
         if (fullySafe.length) selected = fullySafe;
         else {
@@ -2175,11 +2238,22 @@
         const proven = selected.filter(m => m.analysis.vcf);
         if (proven.length) selected = proven;
       }
+
       selected.forEach((m,i) => {
         m.rank = i + 1;
         m.analysis.facts.local_engine_grade = i === 0 ? 'TOP_CHOICE' : i === 1 ? 'STRONG' : i <= 3 ? 'SOLID' : 'SECONDARY';
+        m.analysis.facts.local_rank = i + 1;
+        m.analysis.facts.candidate_sources = [...(m.recallSources || [])];
       });
-      result = { mode, cfg, forced, candidates: selected };
+      result = {
+        mode,
+        cfg,
+        forced,
+        candidates: selected,
+        recall: mode === 'max'
+          ? selected.map(move => ({ move: move.key, sources: [...(move.recallSources || [])] }))
+          : null
+      };
     } finally {
       const localSearch = finishLocalSearchBudget(runtime);
       if (result) result.localSearch = localSearch;
