@@ -3550,12 +3550,13 @@
 
     // Rare tactical state: the initial Threat batch has already proved most of
     // the universe losing, and <=2 candidates survive only because their proof
-    // did not run/finish. Close that hard-evidence frontier before spending an
-    // Atomic request; semantic judgement must not decide whether proof exists.
+    // did not run/finish. Close that hard-evidence frontier (at most four
+    // survivors) before spending an Atomic request; semantic judgement must not
+    // decide whether proof exists.
     if (
       unresolved.length === 0
       || unresolved.length !== survivors.length
-      || unresolved.length > 2
+      || unresolved.length > 4
       || knownLost.length + unresolved.length < contextCandidates.length
     ) {
       return {
@@ -3570,7 +3571,7 @@
       unresolved,
       'max',
       'jev_max_pre_atomic_loss_frontier',
-      { timeBudgetMs: 1100, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+      { timeBudgetMs: 1450, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
     );
     const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
     attachThreatEvidence(contextCandidates, merged);
