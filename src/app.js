@@ -3658,6 +3658,7 @@
       let worker;
       try {
         worker = createHeavyWorker(slot);
+        worker.ref?.();
       } catch (error) {
         resetHeavyWorker(slot);
         job.resolve(job.onError(error));
@@ -3673,7 +3674,10 @@
         worker.onmessage = null;
         worker.onerror = null;
         if (reset) resetHeavyWorker(slot);
-        else slot.busy = false;
+        else {
+          slot.busy = false;
+          worker.unref?.();
+        }
         job.resolve(result);
         Promise.resolve().then(pumpHeavyWorkerQueue);
       };
