@@ -182,28 +182,25 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 - benchmark 记录补检触发回合、候选数、fail-closed 拒绝数、补检耗时，并把 supplemental >2 或 Pairwise coverage 不完整记为契约违规。
 
 
-## 49-ply residual-rescue regression
+## 49-ply bounded-rescue regression
 
-来自 49 手真实败局的两组新回归：
+来自 49 手真实败局的三组回归：
 
 ### White 36 H5：防止过度证明
 
 在黑 `J4` 后：
 
-- `L5 / G7 / G5 / G10 / H11 / I10 / D7` 都能在 bounded Threat-space 内证明 forced loss。
-- `H5` 在默认 6 attacker turns 以及提升到 8 attacker turns 时仍然必须保持 `NO_PROOF`。
-- 该回归用于防止 residual-rescue 增强为了“变强”而把唯一抵抗手误判成 hard loss。
+- `L5 / G7 / G5 / G10 / H11 / I10 / D7` 可在 bounded Threat-space 内证明 forced loss。
+- `H5` 在默认 6 attacker turns 以及提升到 8 attacker turns 时仍保持 `NO_PROOF`。
+- 该回归防止为了追求更多 hard proof 而把唯一抵抗手误判成败着。
 
-### White 42 H2：闭合反将后的救法
+### White 42 H2：保留证明边界
 
-在黑 `L6` 后，历史版本只看到 `H2 -> H3`，然后停在 `forced_defense_without_proven_continuation`。新 proof 必须进一步确认：
+在黑 `L6` 后，`H2` 会迫使黑 `H3`，但 bounded Threat-space 不能完整证明后续所有救法都输，因此：
 
-- `H2` 为 forced loss。
-- forcing line 以黑 `H3` 开始。
-- 残余 fork creator 为 `M7`。
-- fork winning points 包含 `I3 / N8`。
-- 所有完整 rescue 分支 `M7 / I3 / N8` 都继续有 forced-loss proof。
-- proof reason 为 `residual_fork_rescue_exhausted`。
+- `H2` 不得被伪造为 forced loss。
+- 若搜索完成，reason 保持 `forced_defense_without_proven_continuation`。
+- timeout 仍是 UNKNOWN，不等价于 SAFE，也不等价于 LOSS。
 
 ### White 44：all-main-loss rescue state
 
@@ -211,7 +208,8 @@ Benchmark 不会输出或保存 `JEV_API_KEY`。
 
 - 进入 `jev_max_rescue` 或 `bounded_rescue_exhausted`。
 - Pairwise = 0，Critic = 0。
-- Jev logical requests 必须少于历史 3 次。
+- Jev logical requests 少于历史 3 次。
 - Rescue Sweep 最多检查 6 个额外候选，仍保持重型 Worker 并发 ≤2。
+- 1～2 个 rescue 候选使用独立 Threat 时间片；较大 rescue pool 批量后最多重试 2 个 unresolved。
 
-Benchmark 额外统计 rescue sweep 触发回合、候选数、vetted / unresolved 数、bounded-exhausted 次数和耗时，并把 rescue >6 或 rescue 状态仍执行 Pairwise/Critic 记为契约违规。
+Benchmark 统计 rescue sweep 触发回合、候选数、vetted / unresolved 数、bounded-exhausted 次数和耗时，并把 rescue >6 或 rescue 状态仍执行 Pairwise/Critic 记为契约违规。
