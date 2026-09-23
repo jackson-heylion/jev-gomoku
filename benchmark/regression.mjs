@@ -1539,6 +1539,121 @@ async function testDoubleImmediateWinShortCircuitsJev() {
   }
 }
 
+/**
+ * 37-ply real-game regression: before White 34, H14 was candidate #7 and skipped
+ * by the initial six-candidate Threat batch. Atomic/Final promoted the missing-
+ * evidence move over the actually analysed defensive F5/J5 candidates, then
+ * Black J5 created the F5/K5 double winning-point finish.
+ *
+ * Jev Max must close Threat coverage whenever Atomic promotes an unvetted
+ * candidate into Top 4. H14 must be proved losing and removed before Pairwise.
+ */
+async function testLateGameAtomicPromotionThreatCoverageClosure() {
+  let requestCount = 0;
+  const captured = [];
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      captured.push(payload);
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Threat-coverage mock question has no choices: ' + id);
+
+        let choice;
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'H14' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : ['F5','J5'].includes(move) && keys.includes('GOOD')
+              ? 'GOOD'
+              : keys.includes('NEUTRAL') ? 'NEUTRAL' : keys[0];
+        } else if (id.startsWith('duel_')) {
+          choice = keys.includes('F5') ? 'F5' : keys.includes('J5') ? 'J5' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id === 'best_move') {
+          choice = keys.includes('F5') ? 'F5' : keys.includes('J5') ? 'J5' : keys[0];
+        } else {
+          choice = keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-threat-coverage',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
+    'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12','E14','E13','G14','F13'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  const h14Candidate = context.candidates.find(move => move.key === 'H14');
+  if (!h14Candidate) {
+    throw new Error('Historical H14 must remain in heterogeneous recall so coverage closure can test it');
+  }
+  if (
+    h14Candidate.analysis?.facts?.tactical_verification === 'BUDGET_EXHAUSTED'
+    && h14Candidate.analysis?.facts?.tactical_safety === 'SAFE'
+  ) {
+    throw new Error('Budget-exhausted tactical analysis must never be labelled SAFE');
+  }
+
+  const explicitThreat = await engine.threatAnalyze(['H14','F5','J5'], 'max');
+  const h14Proof = explicitThreat?.analyses?.find(item => item.move === 'H14');
+  if (!h14Proof?.forced || h14Proof.line?.[0] !== 'J5') {
+    throw new Error('Historical H14 must be proved losing through Black J5');
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (result.finalChoice === 'H14') {
+    throw new Error('Unvetted H14 survived Threat coverage closure into Final');
+  }
+
+  const coverage = result.decisionTrace?.threatCoverage;
+  if (!coverage?.supplementalTriggered || !(coverage.supplementalCandidates || []).includes('H14')) {
+    throw new Error('Atomic-promoted H14 did not trigger supplemental Threat validation');
+  }
+  const h14Merged = result.decisionTrace?.preJevThreatSearch?.analyses?.find(item => item.move === 'H14');
+  if (!h14Merged?.forced) {
+    throw new Error('Supplemental Threat proof for H14 was not merged into final evidence');
+  }
+
+  const pairwisePayload = captured[1];
+  if (pairwisePayload?.state?.candidate_facts?.H14) {
+    throw new Error('Threat-proved H14 reached Pairwise candidate_facts');
+  }
+  for (const question of Object.values(pairwisePayload?.questions || {})) {
+    if (Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'H14')) {
+      throw new Error('Threat-proved H14 reached a Pairwise/Critic choice question');
+    }
+  }
+
+  if (!['F5','J5'].includes(result.finalChoice)) {
+    throw new Error('Regression mock should retain the direct defensive F5/J5 family, got ' + result.finalChoice);
+  }
+  if (requestCount < 2 || requestCount > 3) {
+    throw new Error('Threat coverage closure changed the Jev request budget: ' + requestCount);
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1555,6 +1670,7 @@ function testCoordinateHelpers() {
   }
 }
 
+await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
 await testOldGameEarlyForcingExtensionWarning();
