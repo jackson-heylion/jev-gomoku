@@ -684,6 +684,10 @@ function emptyVolume() {
     finalDeep1Matches: 0,
     vcfChosen: 0,
     threatFilterHits: 0,
+    counterThreatWarnings: 0,
+    counterThreatHighCritical: 0,
+    counterThreatForcedDefenseResidual: 0,
+    counterThreatAdvisoryTimeouts: 0,
     workerTimeouts: 0,
     payloadOverTarget: 0,
     payloadOverHard: 0,
@@ -759,6 +763,25 @@ function accumulate(volume, record, options) {
     if (wildcard?.chosen) volume.wildcardChosen++;
     if (record.facts?.vcf_status === 'FORCED_SEQUENCE_FOUND') volume.vcfChosen++;
     volume.threatFilterHits += Number(shape.threatFilterCount || 0);
+
+    for (const evidence of maxTrace.localEvidence || []) {
+      const counter = evidence?.threatSearch?.counterThreat;
+      if (!counter) continue;
+      if (counter.timedOut) volume.counterThreatAdvisoryTimeouts++;
+      if (counter.risk && !['NONE', 'UNKNOWN', 'PROVEN_FORCED_LOSS'].includes(counter.risk)) {
+        volume.counterThreatWarnings++;
+      }
+      if (['HIGH', 'CRITICAL'].includes(counter.risk)) {
+        volume.counterThreatHighCritical++;
+      }
+      if (
+        counter.forcedDefenseMove
+        && Array.isArray(counter.networkMoves)
+        && counter.networkMoves.length
+      ) {
+        volume.counterThreatForcedDefenseResidual++;
+      }
+    }
 
     for (const estimate of shape.payloadEstimatedInputTokens || []) {
       if (estimate > 5000) volume.payloadOverTarget++;
@@ -1007,6 +1030,10 @@ function summarize(games, arms, options) {
       finalDeep1Rate: volume.decisions ? volume.finalDeep1Matches / volume.decisions : null,
       vcfChosen: volume.vcfChosen,
       threatFilterHits: volume.threatFilterHits,
+      counterThreatWarnings: volume.counterThreatWarnings,
+      counterThreatHighCritical: volume.counterThreatHighCritical,
+      counterThreatForcedDefenseResidual: volume.counterThreatForcedDefenseResidual,
+      counterThreatAdvisoryTimeouts: volume.counterThreatAdvisoryTimeouts,
       workerTimeouts: volume.workerTimeouts,
       payloadOverTarget: volume.payloadOverTarget,
       payloadOverHard: volume.payloadOverHard,
@@ -1301,8 +1328,8 @@ function renderMarkdown(report) {
     lines.push('');
     lines.push('## Jev Max 专项指标');
     lines.push('');
-    lines.push('| Atomic/Pairwise 一致率 | 与 Local #1 一致 | 与 Deep #1 一致 | wildcard 请求/接受/最终选择 | VCF 选择 | Threat filter 命中 | Worker timeout | Payload >5k / >7k |');
-    lines.push('|---:|---:|---:|---:|---:|---:|---:|---:|');
+    lines.push('| Atomic/Pairwise 一致率 | 与 Local #1 一致 | 与 Deep #1 一致 | wildcard 请求/接受/最终选择 | VCF 选择 | Threat filter 命中 | Counter-threat 告警(H/C) | Forced-defense residual | Advisory timeout | Worker timeout | Payload >5k / >7k |');
+    lines.push('|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
     lines.push(
       '| ' + (max.atomicPairwiseConsistency == null ? 'n/a' : pct(max.atomicPairwiseConsistency)) +
       ' | ' + max.finalLocal1Matches + '/' + max.decisions +
@@ -1310,6 +1337,9 @@ function renderMarkdown(report) {
       ' | ' + max.wildcardRequested + '/' + max.wildcardAccepted + '/' + max.wildcardChosen +
       ' | ' + max.vcfChosen +
       ' | ' + max.threatFilterHits +
+      ' | ' + max.counterThreatWarnings + ' (' + max.counterThreatHighCritical + ')' +
+      ' | ' + max.counterThreatForcedDefenseResidual +
+      ' | ' + max.counterThreatAdvisoryTimeouts +
       ' | ' + max.workerTimeouts +
       ' | ' + max.payloadOverTarget + ' / ' + max.payloadOverHard + ' |'
     );
