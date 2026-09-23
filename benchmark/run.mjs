@@ -17,7 +17,7 @@
  *   2. When Jev overrides Local's #1, is the override actually better according
  *      to a deeper deterministic search?
  *   3. Does the shipped cost/policy contract hold (legacy Jev Final <=1 request,
- *      Jev Max <=3 requests, 0 calls for deterministic single-candidate proof,
+ *      Jev Max <=2 requests with speculative fan-out, 0 calls for deterministic single-candidate proof,
  *      bounded candidates / workers / payload, and no fake depth=0 scores)?
  *   4. Is the Renju rule set consistent between the benchmark game engine and
  *      production?
@@ -851,7 +851,7 @@ function accumulate(volume, record, options) {
   const arm = ARMS[record.engine];
 
   if (arm?.expectsJev) {
-    const maxRequests = record.engine === 'jev-max' ? 3 : 1;
+    const maxRequests = record.engine === 'jev-max' ? 2 : 1;
     if (candidateCount > 1 && httpRequests > maxRequests) {
       volume.violations.push({
         kind: 'jev_calls_per_turn',
@@ -880,7 +880,7 @@ function accumulate(volume, record, options) {
       }
     }
     if (record.engine === 'jev-max' && candidateCount > 1) {
-      if (!['jev_max_final', 'jev_max_pairwise_convergence', 'jev_max_rescue', 'bounded_rescue_exhausted'].includes(shape.decisionAuthority)) {
+      if (!['jev_max_final', 'jev_max_fanout_convergence', 'jev_max_resolution_fanout', 'jev_max_rescue', 'bounded_rescue_exhausted', 'post_fanout_threat_single'].includes(shape.decisionAuthority)) {
         volume.violations.push({
           kind: 'jev_max_decision_authority',
           ply: record.ply,
@@ -1500,7 +1500,7 @@ function renderMarkdown(report) {
   lines.push('');
   const violations = arms.flatMap(arm => report.summary.arms[arm].violations.map(violation => ({ arm, ...violation })));
   if (!violations.length) {
-    lines.push('- 未发现违规：每白棋回合 ≤ 1 次 Jev、唯一候选 0 次 Jev、开局前 8 手浅搜、前 10 手跳过额外 Deep Worker。');
+    lines.push('- 未发现违规：Jev Final 每回合 ≤1 次请求；Jev Max 使用 speculative fan-out 且 ≤2 次请求；唯一候选 0 次 Jev；Worker 并发 ≤2。');
   } else {
     for (const violation of violations.slice(0, 20)) {
       lines.push('- ' + ARM_LABELS[violation.arm] + ' #' + violation.ply + ' `' + violation.kind + '` — ' + violation.detail);
