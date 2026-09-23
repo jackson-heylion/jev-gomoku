@@ -4109,6 +4109,70 @@
     };
   }
 
+  async function verifyMaxRescueThreatPool(pool, threatAnalysis) {
+    let mergedThreat = threatAnalysis;
+    const passes = [];
+    if (!pool.length) {
+      return { mergedThreat, passes, elapsedMs: 0, retried: [] };
+    }
+
+    const mergePass = result => {
+      if (!result) return;
+      passes.push(result);
+      mergedThreat = mergeThreatAnalysis(mergedThreat, result);
+      attachThreatEvidence(pool, mergedThreat);
+    };
+
+    // Rescue is a rare emergency path. With only one or two candidates, give
+    // each candidate an independent budget so a complex proof cannot starve its
+    // sibling. This remains sequential and never increases Worker concurrency.
+    if (pool.length <= 2) {
+      for (const move of pool) {
+        const result = await runThreatWorkerAnalysis(
+          [move],
+          'max',
+          'jev_max_rescue_individual',
+          { timeBudgetMs: 1100, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+        );
+        mergePass(result);
+      }
+    } else {
+      const batch = await runThreatWorkerAnalysis(
+        pool,
+        'max',
+        'jev_max_rescue_sweep',
+        { timeBudgetMs: 1450, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+      );
+      mergePass(batch);
+
+      // Retry at most two unresolved roots independently. The batch remains the
+      // fast path; retries only spend extra wall time when proof coverage would
+      // otherwise be ambiguous.
+      const unresolved = pool
+        .filter(move => !hasCompletedThreatEvidence(mergedThreat, move.key))
+        .slice(0, 2);
+      for (const move of unresolved) {
+        const retry = await runThreatWorkerAnalysis(
+          [move],
+          'max',
+          'jev_max_rescue_retry',
+          { timeBudgetMs: 900, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+        );
+        mergePass(retry);
+      }
+    }
+
+    const elapsedMs = passes.reduce((sum, result) => sum + (Number(result?.elapsedMs) || 0), 0);
+    return {
+      mergedThreat,
+      passes,
+      elapsedMs,
+      retried: passes
+        .filter(result => result?.trigger === 'jev_max_rescue_retry' || result?.trigger === 'jev_max_rescue_individual')
+        .flatMap(result => (result?.analyses || []).map(row => row.move))
+    };
+  }
+
   async function runMaxRescueSweep(context, provenMain, deepAnalysis, threatAnalysis, priorAtomic = null) {
     const blocked = new Set([
       ...provenThreatLossKeys(threatAnalysis),
@@ -4146,17 +4210,12 @@
       }
     }
 
-    let rescueThreat = null;
     let mergedThreat = threatAnalysis;
+    let rescueVerification = { mergedThreat, passes: [], elapsedMs: 0, retried: [] };
     if (pool.length) {
       updateApiState('busy', 'Jev Max：主候选均已证败，执行 bounded rescue sweep…');
-      rescueThreat = await runThreatWorkerAnalysis(
-        pool,
-        'max',
-        'jev_max_rescue_sweep',
-        { timeBudgetMs: 1450, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
-      );
-      mergedThreat = mergeThreatAnalysis(threatAnalysis, rescueThreat);
+      rescueVerification = await verifyMaxRescueThreatPool(pool, threatAnalysis);
+      mergedThreat = rescueVerification.mergedThreat;
       attachThreatEvidence(pool, mergedThreat);
     }
 
@@ -4206,7 +4265,15 @@
             vetted: vetted.map(move => move.key),
             unresolved: unresolved.map(move => move.key),
             rejectedByProof: pool.filter(maxHardProvenLoss).map(move => move.key),
-            elapsedMs: rescueThreat?.elapsedMs ?? null,
+            elapsedMs: rescueVerification.elapsedMs,
+            verificationPasses: rescueVerification.passes.map(result => ({
+              trigger: result?.trigger || null,
+              status: result?.status || null,
+              timedOut: Boolean(result?.timedOut),
+              elapsedMs: result?.elapsedMs ?? null,
+              candidates: (result?.analyses || []).map(row => row.move)
+            })),
+            retried: rescueVerification.retried,
             selectedResistance: selected.key
           },
           requestShape: {
@@ -4224,7 +4291,9 @@
             localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
             deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
             threatElapsedMs: mergedThreat?.elapsedMs ?? null,
-            rescueSweepElapsedMs: rescueThreat?.elapsedMs ?? null,
+            rescueSweepElapsedMs: rescueVerification.elapsedMs,
+            rescueSweepPasses: rescueVerification.passes.length,
+            rescueSweepRetriedCandidates: rescueVerification.retried,
             rescueSweepCandidates: pool.map(move => move.key)
           }
         },
@@ -4292,7 +4361,15 @@
           vetted: vetted.map(move => move.key),
           unresolved: unresolved.map(move => move.key),
           rejectedByProof: pool.filter(maxHardProvenLoss).map(move => move.key),
-          elapsedMs: rescueThreat?.elapsedMs ?? null,
+          elapsedMs: rescueVerification.elapsedMs,
+            verificationPasses: rescueVerification.passes.map(result => ({
+              trigger: result?.trigger || null,
+              status: result?.status || null,
+              timedOut: Boolean(result?.timedOut),
+              elapsedMs: result?.elapsedMs ?? null,
+              candidates: (result?.analyses || []).map(row => row.move)
+            })),
+            retried: rescueVerification.retried,
           chosen: finalChoice
         },
         finalDecision: compactAnswer(answer),
@@ -4316,7 +4393,9 @@
           localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
           threatElapsedMs: mergedThreat?.elapsedMs ?? null,
-          rescueSweepElapsedMs: rescueThreat?.elapsedMs ?? null,
+          rescueSweepElapsedMs: rescueVerification.elapsedMs,
+            rescueSweepPasses: rescueVerification.passes.length,
+            rescueSweepRetriedCandidates: rescueVerification.retried,
           rescueSweepCandidates: pool.map(move => move.key)
         },
         localEvidence: finalCandidates.map(move => ({
