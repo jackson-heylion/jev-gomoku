@@ -268,7 +268,7 @@ function injectBenchmarkHook(source) {
     // --- offline oracle: deeper deterministic comparison, never used in game
     '    arbitrate(aKey, bKey, options) {',
     '      const opts = options || {};',
-    '      const preset = ENGINE_PRESETS[opts.mode === \'strong\' ? \'strong\' : \'expert\'];',
+    "      const preset = ENGINE_PRESETS[opts.mode === 'grandmaster' ? 'grandmaster' : 'expert'];",
     '      const cfg = {',
     '        ...preset,',
     '        depth: Number.isFinite(opts.depth) ? opts.depth : preset.depth + 2,',
@@ -400,6 +400,7 @@ export async function loadProductionEngine({ request, appPath, deepWorker = 'thr
   if (!engine
     || typeof engine.local !== 'function'
     || typeof engine.jevFinal !== 'function'
+    || typeof engine.jevMax !== 'function'
     || typeof engine.judge !== 'function') {
     throw new Error('Benchmark hook was not initialized from src/app.js');
   }
