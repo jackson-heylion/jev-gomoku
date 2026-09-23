@@ -2378,8 +2378,16 @@
       for (let j = i + 1; j < candidates.length; j++) {
         const a = candidates[i].key, b = candidates[j].key;
         const id = n++;
-        questions[`duel_${id}_ab`] = { type: 'choice', instructions: instruction, criteria: { [a]: facts[a], [b]: facts[b] } };
-        questions[`duel_${id}_ba`] = { type: 'choice', instructions: instruction, criteria: { [b]: facts[b], [a]: facts[a] } };
+        questions[`duel_${id}_ab`] = {
+          type: 'choice',
+          instructions: instruction,
+          criteria: { [a]: `See candidate_facts.${a}`, [b]: `See candidate_facts.${b}` }
+        };
+        questions[`duel_${id}_ba`] = {
+          type: 'choice',
+          instructions: instruction,
+          criteria: { [b]: `See candidate_facts.${b}`, [a]: `See candidate_facts.${a}` }
+        };
         pairs.push({ id, a, b });
       }
     }
@@ -2394,7 +2402,7 @@
           rules: renjuRuleDescription(),
           last_move: moves.length ? moves[moves.length - 1].coord : null,
           board_rows: boardRows(),
-          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias. Candidate facts contain no Local rank.',
+          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias. Question options only reference candidate IDs; shared candidate_facts are sent once and contain no Local rank.',
           candidate_facts: facts
         },
         model: settings.model || 'jev-latest',
