@@ -4531,6 +4531,37 @@
     };
   }
 
+  function buildMaxResolutionPayload(context, candidates, atomicAnswers, extraCandidate = null) {
+    const tournament = buildPairwisePayload(candidates);
+    const resolutionCandidates = [
+      ...candidates,
+      ...(extraCandidate && !candidates.some(move => move.key === extraCandidate.key) ? [extraCandidate] : [])
+    ];
+    tournament.payload.state.task = 'Jev Max difficult-position resolution fan-out after Atomic changed the likely finalist pool or wildcard validation introduced a new finalist.';
+    tournament.payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
+    tournament.payload.state.critic_policy = MAX_CRITIC_POLICY;
+    tournament.payload.state.candidate_facts = Object.fromEntries(
+      resolutionCandidates.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: false })])
+    );
+    tournament.payload.state.atomic_results = Object.fromEntries(
+      candidates.map(move => [move.key, atomicAnswers?.[`judge_${move.key}`] || null])
+    );
+    addCriticQuestions(tournament.payload.questions, candidates);
+    tournament.payload.questions.best_move = {
+      type: 'choice',
+      instructions: 'Choose the strongest legal resolution candidate. Use full-board geometry, candidate_facts and prior Atomic results. Pairwise/Critic questions in this request are independent cross-checks; legality and hard proofs remain authoritative.',
+      criteria: Object.fromEntries(resolutionCandidates.map(move => [
+        move.key,
+        `See candidate_facts.${move.key}`
+      ]))
+    };
+    return {
+      payload: tournament.payload,
+      pairs: tournament.pairs,
+      candidates: resolutionCandidates
+    };
+  }
+
   function atomicTraceFor(candidates, answers) {
     return candidates.map(move => {
       const answer = answers?.[`judge_${move.key}`] || null;
