@@ -168,6 +168,9 @@
       persistUnlockedEasterEggs();
     }
     updateEasterProgress();
+    if (gameOver && gameResult && resultSummary) {
+      resultSummary.textContent = buildGameSummary(gameResult.winner);
+    }
     if (options.toast !== false) toast(`彩蛋 · ${message}`, options.duration || 3600);
     return true;
   }
