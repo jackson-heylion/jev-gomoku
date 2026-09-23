@@ -3564,9 +3564,13 @@
     // Initial Threat Search intentionally checks at most six candidates. If
     // Atomic promotes #7/#8 into Top 4, validate all remaining unvetted main
     // candidates in one bounded supplemental batch (normally at most two).
-    const unvetted = candidates
-      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key))
-      .slice(0, 2);
+    const missingTop = provisionalTop4
+      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+    const missingAll = candidates
+      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+    const unvetted = [...new Map(
+      [...missingTop, ...missingAll].map(move => [move.key, move])
+    ).values()].slice(0, 2);
     if (!unvetted.length) {
       return {
         candidates,
@@ -3586,7 +3590,11 @@
     const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
     attachThreatEvidence(candidates, merged);
 
-    const rejectedIncomplete = unvetted
+    // Once coverage closure is triggered, missing evidence is never allowed to
+    // become a comparative advantage. Candidates still lacking a completed
+    // Threat result are fail-closed before Pairwise, even if the 2-candidate
+    // supplemental budget could not reach all of them.
+    const rejectedIncomplete = candidates
       .filter(move => !hasCompletedThreatEvidence(merged, move.key))
       .map(move => move.key);
     const rejectedSet = new Set(rejectedIncomplete);
@@ -4118,6 +4126,13 @@
         || (a.localRank || 999) - (b.localRank || 999))
       .slice(0, Math.min(4, candidates.length));
 
+    const pairwiseThreatCoverageComplete = atomicTop4.every(move =>
+      hasCompletedThreatEvidence(threatAnalysis, move.key)
+    );
+    if (!pairwiseThreatCoverageComplete) {
+      throw new Error('Jev Max Threat coverage closure invariant failed before Pairwise');
+    }
+
     const tournament = buildPairwisePayload(atomicTop4);
     tournament.payload.state.task = 'Jev Max stage 2: order-balanced pairwise tournament plus adversarial refutation analysis.';
     tournament.payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
@@ -4306,6 +4321,7 @@
           threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
           threatSupplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
           threatCoverageRejectedIncomplete: coverage.rejectedIncomplete,
+          pairwiseThreatCoverageComplete,
           threatFilterCount: context.candidates.length - candidates.length
         },
         localEvidence: finalCandidates.map(move => ({
