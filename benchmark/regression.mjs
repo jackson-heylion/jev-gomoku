@@ -872,6 +872,200 @@ async function testArbitrationOracle() {
   }
 }
 
+/**
+ * Deep search with no completed iterative depth is ranking-only evidence.
+ * Sentinel mate scores are structured instead of leaking huge numeric values.
+ */
+async function testDeepEvidenceSemantics() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Deep evidence semantics regression must not call Jev');
+    }
+  });
+
+  const depth0 = engine.normalizeDeepRow(
+    { move: 'H8', score: 0, fallbackRank: 1 },
+    { status: 'no_completed_depth', depthReached: 0, rankingOnly: true }
+  );
+  if (depth0?.status !== 'no_completed_depth' || depth0?.ranking_only !== true) {
+    throw new Error('depth=0 must be marked no_completed_depth + ranking_only');
+  }
+  if ('score' in depth0) {
+    throw new Error('depth=0 fallback score must not be exposed as a numeric evaluation');
+  }
+
+  const sentinel = engine.normalizeDeepRow(
+    {
+      move: 'H8',
+      score: 1e15,
+      forcedResult: {
+        forced: true,
+        result: 'win',
+        proofType: 'DEEP_SEARCH',
+        mateOrForcingDistance: 3
+      },
+      principalVariation: ['H8', 'H9', 'I8']
+    },
+    { status: 'completed', depthReached: 5, rankingOnly: false }
+  );
+  if (sentinel?.forced_result?.result !== 'win') {
+    throw new Error('Mate sentinel must become a structured forced_result');
+  }
+  if ('score' in sentinel) {
+    throw new Error('Mate sentinel must not be exposed as a normal deep score');
+  }
+}
+
+/**
+ * Jev Max must keep Atomic independent from Local ranking and keep a 4-candidate
+ * pairwise tournament bounded to 12 order-balanced choice questions.
+ */
+async function testJevMaxPayloadBounds() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Payload-bound regression must not call Jev');
+    }
+  });
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const atomicPayload = engine.maxAtomicPayload('max');
+  const atomicFacts = Object.values(atomicPayload?.state?.candidate_facts || {});
+  if (!atomicFacts.length || atomicFacts.length > 8) {
+    throw new Error('Jev Max Atomic candidate universe must contain 1..8 candidates');
+  }
+  for (const facts of atomicFacts) {
+    if ('local_rank' in facts || 'local_engine_grade' in facts) {
+      throw new Error('Atomic payload leaked Local rank/grade anchoring evidence');
+    }
+  }
+
+  const pairwise = engine.maxPairwisePayload('max');
+  const duelIds = Object.keys(pairwise?.payload?.questions || {}).filter(id => id.startsWith('duel_'));
+  if (pairwise.pairs.length === 6 && duelIds.length !== 12) {
+    throw new Error('Top-4 pairwise tournament must contain 6 pairs x 2 option orders');
+  }
+  if (duelIds.length > 12) throw new Error('Jev Max pairwise question count exceeded 12');
+  for (const id of duelIds) {
+    const values = Object.values(pairwise.payload.questions[id].criteria || {});
+    if (values.some(value => typeof value !== 'string' || !value.startsWith('See candidate_facts.'))) {
+      throw new Error('Pairwise questions must reference shared candidate facts instead of duplicating them');
+    }
+  }
+}
+
+/**
+ * End-to-end Jev Max regression: Atomic can request OTHER, the bounded wildcard
+ * proposal is validated locally, Pairwise/Critic stay batched, and the third
+ * request receives real prior-stage results before making the final choice.
+ */
+async function testJevMaxPipelineAndWildcard() {
+  let requestCount = 0;
+  let finalTarget = null;
+  const captured = [];
+
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      captured.push(payload);
+      const answers = {};
+
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Jev Max mock question has no criteria: ' + id);
+        let choice;
+
+        if (id === 'recall_check') {
+          choice = 'OTHER';
+        } else if (id.startsWith('judge_')) {
+          choice = keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('duel_')) {
+          // Pick the first displayed option; reversed duplicate cancels the
+          // order bias and deliberately prevents high-confidence early exit.
+          choice = keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id === 'wildcard_pick') {
+          choice = keys[0];
+        } else if (id === 'best_move') {
+          const candidateEvidence = payload?.state?.candidates || {};
+          finalTarget = keys.find(key =>
+            Array.isArray(candidateEvidence[key]?.candidate_sources)
+            && candidateEvidence[key].candidate_sources.includes('JEV_WILDCARD')
+          ) || keys[Math.min(1, keys.length - 1)];
+          choice = finalTarget;
+        } else {
+          choice = keys[0];
+        }
+
+        answers[id] = oneHotChoice(choice, keys);
+      }
+
+      return {
+        model: 'mock-jev-max',
+        answers,
+        usage: { input_tokens: 100, output_tokens: 10 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  const position = positionFromSequence(['G7']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+
+  console.log('jev-max pipeline regression:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    localChoice: result.localChoice,
+    requests: requestCount,
+    requestShape: result.decisionTrace?.requestShape,
+    wildcard: result.decisionTrace?.wildcard
+  }));
+
+  if (result.mode !== 'max') throw new Error('Jev Max result mode not preserved');
+  if (requestCount !== 3) throw new Error('Expected Atomic + Pairwise/Critic + Final = 3 Jev requests, got ' + requestCount);
+  if (result.decisionTrace?.requestShape?.maxWorkers !== 2) throw new Error('Jev Max must declare at most two heavy workers');
+  if ((result.decisionTrace?.requestShape?.candidateCount || 0) > 8) throw new Error('Jev Max candidate universe exceeded 8');
+  if ((result.decisionTrace?.requestShape?.pairwiseCount || 0) > 12) throw new Error('Jev Max pairwise budget exceeded 12 questions');
+  if ((result.decisionTrace?.requestShape?.criticCount || 0) > 4) throw new Error('Jev Max critic budget exceeded Top 4');
+  if ((result.decisionTrace?.requestShape?.payloadEstimatedInputTokens || []).some(value => value > 7000)) {
+    throw new Error('Jev Max estimated request payload exceeded the 7000-token hard target');
+  }
+
+  const first = captured[0];
+  for (const facts of Object.values(first?.state?.candidate_facts || {})) {
+    if ('local_rank' in facts || 'local_engine_grade' in facts) {
+      throw new Error('Jev Max Atomic stage leaked Local rank/grade');
+    }
+  }
+
+  const second = captured[1];
+  const duelIds = Object.keys(second?.questions || {}).filter(id => id.startsWith('duel_'));
+  if (duelIds.length > 12) throw new Error('Pairwise stage exceeded 12 duel questions');
+  if (!Object.keys(second?.questions || {}).some(id => id.startsWith('critic_'))) {
+    throw new Error('Pairwise request must batch adversarial critic questions');
+  }
+  if (!second?.questions?.wildcard_pick) throw new Error('OTHER must trigger a bounded wildcard proposal question');
+  if ((second?.state?.wildcard_pool || []).length > 16) throw new Error('Wildcard pool exceeded 16');
+
+  const wildcard = result.decisionTrace?.wildcard;
+  if (!wildcard?.requested || !wildcard?.accepted || !wildcard?.enteredFinalists) {
+    throw new Error('Validated wildcard did not enter final candidates');
+  }
+  if (!finalTarget || result.finalChoice !== finalTarget || wildcard.chosen !== true) {
+    throw new Error('Final judge did not retain authority to choose the validated wildcard');
+  }
+  if (result.finalChoice === result.localChoice) {
+    throw new Error('Regression should demonstrate Jev Max can override Local #1');
+  }
+
+  const finalPayload = captured[2];
+  const finalEvidence = finalPayload?.state?.candidates?.[result.finalChoice];
+  if (!finalEvidence?.critic_summary && !Array.isArray(finalEvidence?.candidate_sources)) {
+    throw new Error('Final judge did not receive structured prior-stage evidence');
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -888,6 +1082,9 @@ function testCoordinateHelpers() {
   }
 }
 
+await testDeepEvidenceSemantics();
+await testJevMaxPayloadBounds();
+await testJevMaxPipelineAndWildcard();
 await testCoordinateHelpers();
 await testSingleCandidateShortCircuit();
 await testJevFinalDecisionAuthority();
