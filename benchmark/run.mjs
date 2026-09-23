@@ -16,9 +16,9 @@
  *      final move score better than letting Local decide alone?
  *   2. When Jev overrides Local's #1, is the override actually better according
  *      to a deeper deterministic search?
- *   3. Does the shipped cost/policy contract hold (<=1 Jev call per white turn,
- *      0 calls when Local already collapsed to a single candidate, shallow
- *      opening profile, no extra Deep Worker in the opening)?
+ *   3. Does the shipped cost/policy contract hold (legacy Jev Final <=1 request,
+ *      Jev Max <=3 requests, 0 calls for deterministic single-candidate proof,
+ *      bounded candidates / workers / payload, and no fake depth=0 scores)?
  *   4. Is the Renju rule set consistent between the benchmark game engine and
  *      production?
  *
@@ -993,6 +993,32 @@ function summarize(games, arms, options) {
       p50DecisionMs: percentile(volume.latencies, 0.5),
       p95DecisionMs: percentile(volume.latencies, 0.95),
       deepSearch: volume.deepSearch,
+      wildcardRequested: volume.wildcardRequested,
+      wildcardAccepted: volume.wildcardAccepted,
+      wildcardChosen: volume.wildcardChosen,
+      atomicPairwiseCompared: volume.atomicPairwiseCompared,
+      atomicPairwiseAgreements: volume.atomicPairwiseAgreements,
+      atomicPairwiseConsistency: volume.atomicPairwiseCompared
+        ? volume.atomicPairwiseAgreements / volume.atomicPairwiseCompared
+        : null,
+      finalLocal1Matches: volume.finalLocal1Matches,
+      finalDeep1Matches: volume.finalDeep1Matches,
+      finalLocal1Rate: volume.decisions ? volume.finalLocal1Matches / volume.decisions : null,
+      finalDeep1Rate: volume.decisions ? volume.finalDeep1Matches / volume.decisions : null,
+      vcfChosen: volume.vcfChosen,
+      threatFilterHits: volume.threatFilterHits,
+      workerTimeouts: volume.workerTimeouts,
+      payloadOverTarget: volume.payloadOverTarget,
+      payloadOverHard: volume.payloadOverHard,
+      avgLocalElapsedMs: volume.localElapsed.length
+        ? volume.localElapsed.reduce((sum, value) => sum + value, 0) / volume.localElapsed.length
+        : 0,
+      avgDeepElapsedMs: volume.deepElapsed.length
+        ? volume.deepElapsed.reduce((sum, value) => sum + value, 0) / volume.deepElapsed.length
+        : 0,
+      avgThreatElapsedMs: volume.threatElapsed.length
+        ? volume.threatElapsed.reduce((sum, value) => sum + value, 0) / volume.threatElapsed.length
+        : 0,
       violations: volume.violations
     };
   }
@@ -1270,6 +1296,29 @@ function renderMarkdown(report) {
     + '，并保留 production 的 VCF/VCT 战术分析）再比较战术安全等级与分数。它只用于测量，不参与对局。');
 
   lines.push('');
+  if (report.summary.arms['jev-max']) {
+    const max = report.summary.arms['jev-max'];
+    lines.push('');
+    lines.push('## Jev Max 专项指标');
+    lines.push('');
+    lines.push('| Atomic/Pairwise 一致率 | 与 Local #1 一致 | 与 Deep #1 一致 | wildcard 请求/接受/最终选择 | VCF 选择 | Threat filter 命中 | Worker timeout | Payload >5k / >7k |');
+    lines.push('|---:|---:|---:|---:|---:|---:|---:|---:|');
+    lines.push(
+      '| ' + (max.atomicPairwiseConsistency == null ? 'n/a' : pct(max.atomicPairwiseConsistency)) +
+      ' | ' + max.finalLocal1Matches + '/' + max.decisions +
+      ' | ' + max.finalDeep1Matches + '/' + max.decisions +
+      ' | ' + max.wildcardRequested + '/' + max.wildcardAccepted + '/' + max.wildcardChosen +
+      ' | ' + max.vcfChosen +
+      ' | ' + max.threatFilterHits +
+      ' | ' + max.workerTimeouts +
+      ' | ' + max.payloadOverTarget + ' / ' + max.payloadOverHard + ' |'
+    );
+    lines.push('');
+    lines.push('- 本地 / Deep / Threat 平均耗时：'
+      + num(max.avgLocalElapsedMs) + ' / ' + num(max.avgDeepElapsedMs) + ' / ' + num(max.avgThreatElapsedMs) + ' ms');
+  }
+
+  lines.push('');
   lines.push('## 成本与调用契约');
   lines.push('');
   lines.push('| Arm | Jev 调用 | 每手调用 | 0 调用回合 | 唯一候选回合 | input/output token | 上游尝试 |');
@@ -1290,13 +1339,14 @@ function renderMarkdown(report) {
   lines.push('');
   lines.push('## 深搜与性能保护');
   lines.push('');
-  lines.push('| Arm | completed | timeout | error | unavailable | skipped(opening) |');
-  lines.push('|---|---:|---:|---:|---:|---:|');
+  lines.push('| Arm | completed | no_completed_depth | timeout | error | unavailable | skipped(opening) |');
+  lines.push('|---|---:|---:|---:|---:|---:|---:|');
   for (const arm of arms) {
     const deep = report.summary.arms[arm].deepSearch;
     lines.push(
       '| ' + ARM_LABELS[arm] +
       ' | ' + deep.completed +
+      ' | ' + (deep.noCompletedDepth || 0) +
       ' | ' + deep.timeout +
       ' | ' + deep.error +
       ' | ' + deep.unavailable +
