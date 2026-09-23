@@ -3020,7 +3020,7 @@
     for (const m of context.candidates) {
       questions[`judge_${m.key}`] = {
         type: 'choice',
-        instructions: `Judge candidate ${m.key} for ${colorNameEn(aiColor())} by independently inspecting the board and candidate_facts.${m.key}. Candidate facts are deterministic hints but may be horizon-limited. If direct board tactics conflict with a heuristic fact, prefer the board evidence.`,
+        instructions: `Judge ${m.key} using state.atomic_policy and candidate_facts.${m.key}.`,
         criteria: {
           EXCELLENT: 'The supplied facts indicate a strategically preferred move with strong initiative and tactical safety.',
           GOOD: 'The move is sound and useful, but not clearly dominant.',
@@ -3041,6 +3041,7 @@
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         board_rows: boardRows(),
         instruction: 'Independently inspect the board geometry as well as the supplied candidate facts. The facts are horizon-limited hints, not a ranking and not infallible. Priority: immediate win > mandatory defense > forced tactical sequences > safety > initiative > connectivity.',
+        atomic_policy: 'Judge each candidate independently from board geometry and candidate_facts. Deterministic facts may be horizon-limited; concrete board tactics and legality are authoritative.',
         candidate_facts: candidateFactsMap(context.candidates)
       },
       model: settings.model || 'jev-latest',
@@ -3067,19 +3068,19 @@
     const pairs = [];
     let n = 0;
     const facts = candidateFactsMap(candidates);
-    const instruction = `Choose the stronger move for ${colorNameEn(aiColor())} by independently checking the board and the supplied semantic facts. The facts may miss deeper horizon tactics. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. Obey the configured BLACK forbidden-move rules. No Local ranking is provided.`;
+    const pairwisePolicy = `Choose the stronger move for ${colorNameEn(aiColor())}. Independently check the full board and shared candidate facts. Priority: immediate win > mandatory defense > forced tactical sequences > safety > forcing initiative > connectivity. Obey configured BLACK forbidden-move rules. No Local ranking is authoritative.`;
     for (let i = 0; i < candidates.length; i++) {
       for (let j = i + 1; j < candidates.length; j++) {
         const a = candidates[i].key, b = candidates[j].key;
         const id = n++;
         questions[`duel_${id}_ab`] = {
           type: 'choice',
-          instructions: instruction,
+          instructions: `Compare ${a} vs ${b}; apply state.pairwise_policy.`,
           criteria: { [a]: `See candidate_facts.${a}`, [b]: `See candidate_facts.${b}` }
         };
         questions[`duel_${id}_ba`] = {
           type: 'choice',
-          instructions: instruction,
+          instructions: `Compare ${b} vs ${a}; apply state.pairwise_policy.`,
           criteria: { [b]: `See candidate_facts.${b}`, [a]: `See candidate_facts.${a}` }
         };
         pairs.push({ id, a, b });
@@ -3096,7 +3097,8 @@
           rules: renjuRuleDescription(),
           last_move: moves.length ? moves[moves.length - 1].coord : null,
           board_rows: boardRows(),
-          note: 'Each pair is asked twice with reversed option order to reduce presentation-order bias. Question options only reference candidate IDs; shared candidate_facts are sent once and contain no Local rank.',
+          pairwise_policy: pairwisePolicy,
+          note: 'Pairs are asked twice with reversed option order to reduce presentation-order bias. Shared candidate facts are sent once.',
           candidate_facts: facts
         },
         model: settings.model || 'jev-latest',
@@ -4404,7 +4406,6 @@
   function maxSemanticEvidence(move, { includeRanks = false } = {}) {
     const facts = move.analysis?.facts || {};
     return compactEvidence({
-      move: move.key,
       candidate_sources: Array.isArray(move.recallSources) ? move.recallSources : facts.candidate_sources,
       ...(includeRanks ? {
         local_rank: Number.isFinite(move.localRank) ? move.localRank : (Number.isFinite(move.rank) ? move.rank : null),
@@ -4436,12 +4437,6 @@
             : null
         }) : null
       }) : null,
-      principal_variation: Array.isArray(move.deepEvidence?.principal_variation)
-        ? move.deepEvidence.principal_variation
-        : null,
-      opponent_best_replies: Array.isArray(move.deepEvidence?.opponent_best_replies)
-        ? move.deepEvidence.opponent_best_replies
-        : null,
       atomic_judgement: move.atomicJudgement || null,
       pairwise_score: Number.isFinite(move.pairScore) ? Number(move.pairScore.toFixed(4)) : null,
       critic_summary: move.criticSummary || null
@@ -4480,11 +4475,13 @@
     });
   }
 
+  const MAX_CRITIC_POLICY = 'Assume the candidate is wrong and search for the strongest opponent refutation: immediate tactic, forcing sequence, multi-axis counterattack, residual threat network after a forced defense, premature spending of a forcing resource, or loss of initiative. If no concrete refutation is convincing, choose SURVIVES_BEST_REPLY.';
+
   function addCriticQuestions(questions, candidates) {
     for (const move of candidates) {
       questions[`critic_${move.key}`] = {
         type: 'choice',
-        instructions: `Assume candidate ${move.key} is wrong. Inspect the full board, candidate_facts.${move.key}, and atomic_results.${move.key}. Find the strongest opponent refutation: immediate tactical reply, forcing sequence, multi-axis counterattack, or a forced defensive reply that still leaves the opponent with a residual threat network. Do not treat "I create a threat and force one reply" as automatically safe: inspect the position after that forced reply and whether the opponent still has multiple forcing extensions. Also check premature spending of a forcing resource or loss of initiative. If none is convincing, choose SURVIVES_BEST_REPLY.`,
+        instructions: `Refute ${move.key} using state.critic_policy and candidate_facts.${move.key}; otherwise choose SURVIVES_BEST_REPLY.`,
         criteria: {
           SURVIVES_BEST_REPLY: 'No concrete refutation found; candidate remains robust against best play.',
           TACTICAL_REFUTATION: 'Opponent has a concrete tactical or forcing refutation.',
