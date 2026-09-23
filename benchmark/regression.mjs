@@ -179,8 +179,8 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (shallow.cfg.openingAdaptive !== true || shallow.cfg.depth !== 3) {
     throw new Error('Expert must keep the shallow opening profile while moves.length < 4');
   }
-  if (shallow.localSearch?.budgetMs !== 2200) {
-    throw new Error('Expert local search budget must be 2200ms');
+  if (shallow.localSearch?.budgetMs !== 4400) {
+    throw new Error('Expert local search budget must be 4400ms');
   }
 
   const opening4 = positionFromSequence(['H8', 'H9', 'G8', 'G9']);
@@ -202,8 +202,8 @@ async function testLocalTimeBudgetAndOpeningThreshold() {
   if (full.cfg.openingAdaptive !== false || full.cfg.depth !== 5) {
     throw new Error('Expert must restore full depth at moves.length >= 4');
   }
-  if (full.localSearch?.budgetMs !== 2200) {
-    throw new Error('Full Expert profile lost the 2200ms local search budget');
+  if (full.localSearch?.budgetMs !== 4400) {
+    throw new Error('Full Expert profile lost the 4400ms local search budget');
   }
   if (!Number.isFinite(full.localSearch?.elapsedMs) || full.localSearch.elapsedMs < 0) {
     throw new Error('Local search trace must report elapsedMs');
@@ -1707,7 +1707,7 @@ async function testRealGameMove42ProofBoundary() {
   const threat = await engine.threatAnalyze(
     ['H2'],
     'max',
-    { timeBudgetMs: 2900, maxThreatTurns: 6, branch: 9 }
+    { timeBudgetMs: 1450, maxThreatTurns: 6, branch: 9 }
   );
   const row = threat?.analyses?.find(item => item.move === 'H2');
   if (!row) {
@@ -1754,7 +1754,7 @@ async function testRealGameMove36CounterfactualThreatAudit() {
   const h5Depth8 = await engine.threatAnalyze(
     ['H5'],
     'max',
-    { maxThreatTurns: 8, timeBudgetMs: 2900, branch: 9 }
+    { maxThreatTurns: 8, timeBudgetMs: 1450, branch: 9 }
   );
   const h5Deep = h5Depth8?.analyses?.[0] || null;
   console.log('move36 H5 depth8 audit:', JSON.stringify(h5Deep));
@@ -1860,7 +1860,7 @@ async function testRealGameMove44M7WorkerAudit() {
   const threat = await engine.threatAnalyze(
     ['M7'],
     'max',
-    { timeBudgetMs: 2200, maxThreatTurns: 6, branch: 9 }
+    { timeBudgetMs: 1100, maxThreatTurns: 6, branch: 9 }
   );
   const row = threat?.analyses?.find(item => item.move === 'M7');
   if (!row?.forced || row.timedOut) {
