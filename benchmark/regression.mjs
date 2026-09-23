@@ -1863,6 +1863,56 @@ async function testRealGameMove44AllMainLossTriggersRescueSweep() {
   }
 }
 
+/**
+ * Replay the actual position before White 44 and exercise the production
+ * Jev-Max rescue path. The normal eight candidates are hard-proved losing in
+ * the supplied log; this test checks whether bounded extra recall can discover
+ * a vetted rescue or correctly stop semantic voting when none exists.
+ */
+async function testRealGameMove44ProductionRescueAudit() {
+  let requests = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Move-44 rescue mock has no choices: ' + id);
+        const choice = keys[0];
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-rescue-audit',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6','H2','H3'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  console.log('move44 production rescue audit:', JSON.stringify({
+    finalChoice: result.finalChoice,
+    stageNote: result.stageNote,
+    requests,
+    rescue: result.decisionTrace?.rescueSweep || null,
+    shape: result.decisionTrace?.requestShape || null
+  }));
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1879,6 +1929,7 @@ function testCoordinateHelpers() {
   }
 }
 
+await testRealGameMove44ProductionRescueAudit();
 await testRealGameMove36CounterfactualThreatAudit();
 await testRealGameMove44AllMainLossTriggersRescueSweep();
 await testRealGameMove42ResidualRescueProof();
