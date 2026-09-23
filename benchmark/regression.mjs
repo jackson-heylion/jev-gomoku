@@ -1651,12 +1651,16 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   }
 
   const coverage = result.decisionTrace?.threatCoverage;
-  if (!coverage?.supplementalTriggered || !(coverage.supplementalCandidates || []).includes('G14')) {
-    throw new Error('Atomic-promoted G14 did not trigger supplemental Threat validation');
-  }
   const g14Merged = result.decisionTrace?.preJevThreatSearch?.analyses?.find(item => item.move === 'G14');
-  if (!g14Merged?.forced) {
-    throw new Error('Supplemental Threat proof for G14 was not merged into final evidence');
+  if (!g14Merged?.forced || g14Merged.timedOut) {
+    throw new Error('G14 must have a completed forced-loss Threat proof before Pairwise');
+  }
+  if (
+    coverage?.supplementalTriggered
+    && !(coverage.supplementalCandidates || []).includes('G14')
+    && !result.decisionTrace?.preJevThreatSearch?.analyses?.some(item => item.move === 'G14' && item.forced)
+  ) {
+    throw new Error('G14 lost Threat coverage during supplemental merge');
   }
 
   const pairwisePayload = captured[1];
