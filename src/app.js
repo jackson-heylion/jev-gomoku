@@ -3747,8 +3747,15 @@
       );
     }
 
-    const atomicPayload = buildMaxAtomicPayload(context, candidates);
-    const atomicTokens = estimatePayloadTokens(atomicPayload);
+    let atomicPayload = buildMaxAtomicPayload(context, candidates);
+    let atomicTokens = estimatePayloadTokens(atomicPayload);
+    if (Number.isFinite(atomicTokens) && atomicTokens > 7000 && candidates.length > 6) {
+      // Payload is a browser/network safety boundary too. Prefer a bounded 6-candidate
+      // universe over sending an oversized 8-candidate request.
+      candidates = candidates.slice(0, 6);
+      atomicPayload = buildMaxAtomicPayload(context, candidates);
+      atomicTokens = estimatePayloadTokens(atomicPayload);
+    }
     updateApiState('busy', 'Jev Max：Atomic 独立评估候选…');
     const atomicData = await callJev(atomicPayload);
     const atomic = atomicTraceFor(candidates, atomicData?.answers || {});
