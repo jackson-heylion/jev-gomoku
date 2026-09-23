@@ -1072,9 +1072,43 @@ async function testJevMaxPipelineAndWildcard() {
  * so Jev Max can actually override instead of losing the alternative upstream.
  */
 async function testRecentGameLocalDeepDisagreementRecall() {
+  let requestCount = 0;
   const engine = await loadProductionEngine({
-    request: async () => {
-      throw new Error('Recent-game recall regression must not call Jev');
+    request: async ({ payload }) => {
+      requestCount++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        let choice;
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'I6' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : move === 'D5' && keys.includes('GOOD')
+              ? 'GOOD'
+              : keys.includes('NEUTRAL') ? 'NEUTRAL' : keys[0];
+        } else if (id.startsWith('duel_')) {
+          choice = keys.includes('I6') ? 'I6' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          const move = id.slice('critic_'.length);
+          choice = move === 'I6' && keys.includes('SURVIVES_BEST_REPLY')
+            ? 'SURVIVES_BEST_REPLY'
+            : keys.includes('LOSES_INITIATIVE') ? 'LOSES_INITIATIVE' : keys[0];
+        } else if (id === 'best_move') {
+          choice = keys.includes('I6') ? 'I6' : keys[0];
+        } else {
+          choice = keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-real-override',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
     }
   });
   const sequence = [
@@ -1086,20 +1120,31 @@ async function testRecentGameLocalDeepDisagreementRecall() {
   const context = engine.candidates('max');
   const keys = new Set(context.candidates.map(move => move.key));
   if (!keys.has('I6')) {
-    throw new Error('Jev Max candidate recall lost the real-game Deep/Jev alternative I6');
+    throw new Error('Jev Max candidate recall lost the real-game Jev alternative I6');
   }
   if (!keys.has('D5')) {
     throw new Error('Jev Max candidate recall lost the real-game Local alternative D5');
   }
 
   const deep = await engine.deepAnalyze(['D5','I6','F9','E10'], 'max');
-  if (deep.status === 'completed' && Number(deep.depthReached || 0) > 0) {
-    const ranking = deep.scores.map(item => item.move);
-    if (ranking[0] !== 'I6') {
-      throw new Error('Real-game deep-search regression no longer prefers I6 over D5: ' + ranking.join(','));
-    }
-  } else if (deep.status !== 'no_completed_depth' && deep.status !== 'timeout') {
-    throw new Error('Unexpected real-game deep-search status: ' + deep.status);
+  const deepKeys = new Set((deep.scores || []).map(item => item.move));
+  if (!deepKeys.has('D5') || !deepKeys.has('I6')) {
+    throw new Error('Real-game deep evidence must retain both D5 and I6 for comparison');
+  }
+  if (Number(deep.depthReached || 0) === 0 && deep.status !== 'no_completed_depth' && deep.status !== 'timeout') {
+    throw new Error('Real-game deep disagreement returned invalid depth=0 semantics: ' + deep.status);
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (!result.candidates.some(candidate => candidate.key === 'I6')) {
+    throw new Error('I6 disappeared before Jev Max final selection');
+  }
+  if (result.finalChoice !== 'I6') {
+    throw new Error('Jev Max could not exercise final authority for the real-game I6 alternative: ' + result.finalChoice);
+  }
+  if (requestCount < 2 || requestCount > 3) {
+    throw new Error('Real-game Jev Max override must stay within the 2–3 request budget, got ' + requestCount);
   }
 }
 
