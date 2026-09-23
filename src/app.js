@@ -3477,6 +3477,31 @@
     }
   }
 
+  function selectMaxThreatCandidates(candidates, limit = 6) {
+    const selected = [];
+    const seen = new Set();
+    const add = move => {
+      if (!move || selected.length >= limit || seen.has(move.key)) return;
+      selected.push(move);
+      seen.add(move.key);
+    };
+
+    // Preserve strong root coverage, then spend remaining slots on candidates
+    // whose local tactical verification is incomplete. Missing evidence should
+    // increase verification priority rather than make a candidate look safer.
+    candidates.slice(0, Math.min(4, candidates.length)).forEach(add);
+    candidates
+      .filter(move => move.analysis?.facts?.tactical_safety === 'UNVERIFIED_BUDGET')
+      .forEach(add);
+    candidates
+      .filter(move => (move.recallSources || []).some(source =>
+        ['DEFENSIVE_FORK_BLOCK', 'COUNTER_THREAT_BLOCK', 'DEFENSIVE_COUNTER_THREAT'].includes(source)
+      ))
+      .forEach(add);
+    candidates.forEach(add);
+    return selected;
+  }
+
   function hardFilterMaxCandidates(candidates, threatAnalysis) {
     attachThreatEvidence(candidates, threatAnalysis);
     let filtered = candidates;
@@ -3776,6 +3801,8 @@
       attack_shape: facts.attack_shape || null,
       initiative: facts.initiative || null,
       tactical_safety: facts.tactical_safety || null,
+      local_tactical_verification: facts.tactical_verification || null,
+      threat_verification: facts.threat_verification || (move.threatSearch ? (move.threatSearch.timedOut ? 'TIMEOUT' : 'COMPLETED') : 'NOT_RUN'),
       vcf_status: facts.vcf_status || null,
       vct_status: facts.vct_status || null,
       threat_search: move.threatSearch ? compactEvidence({
@@ -4044,7 +4071,7 @@
     }
 
     const deepCandidates = candidates.slice(0, Math.min(5, candidates.length));
-    const threatCandidates = candidates.slice(0, Math.min(6, candidates.length));
+    const threatCandidates = selectMaxThreatCandidates(candidates, 6);
     updateApiState('busy', 'Jev Max：Deep 与 Threat Worker 并行准备证据…');
     const [deepAnalysis, initialThreatAnalysis] = await Promise.all([
       runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel'),
