@@ -2528,18 +2528,20 @@
     return Number.isFinite(score) && Math.abs(score) >= MATE_SCORE * .9;
   }
 
-  function structuredForcedResult(score, proofType = 'SEARCH') {
+  function structuredForcedResult(score, proofType = 'SEARCH_SENTINEL', proven = false) {
     if (!isSentinelSearchScore(score)) return null;
     return {
       forced: true,
       result: score > 0 ? 'win' : 'loss',
-      proof_type: proofType
+      proof_type: proofType,
+      proven: Boolean(proven),
+      advisory: !proven
     };
   }
 
   function localScoreEvidence(score) {
     if (!Number.isFinite(score)) return {};
-    const forced = structuredForcedResult(score, 'LOCAL_ALPHA_BETA');
+    const forced = structuredForcedResult(score, 'LOCAL_ALPHA_BETA_SENTINEL', false);
     return forced
       ? { local_forced_result: forced }
       : { local_alpha_beta_score: Number(score.toFixed(2)) };
@@ -2562,10 +2564,12 @@
       ? {
           forced: true,
           result: row.forcedResult.result,
-          proof_type: row.forcedResult.proofType || 'DEEP_SEARCH',
-          mate_or_forcing_distance: row.forcedResult.mateOrForcingDistance ?? null
+          proof_type: row.forcedResult.proofType || 'DEEP_SEARCH_SENTINEL',
+          mate_or_forcing_distance: row.forcedResult.mateOrForcingDistance ?? null,
+          proven: false,
+          advisory: true
         }
-      : structuredForcedResult(row.score, 'DEEP_SEARCH');
+      : structuredForcedResult(row.score, 'DEEP_SEARCH_SENTINEL', false);
 
     const replies = Array.isArray(row.opponentBestReplies)
       ? row.opponentBestReplies.slice(0, 2).map(reply => compactEvidence({
@@ -2579,7 +2583,7 @@
                 proof_type: reply.forcedResult.proofType || 'DEEP_SEARCH',
                 mate_or_forcing_distance: reply.forcedResult.mateOrForcingDistance ?? null
               })
-            : structuredForcedResult(reply.score, 'DEEP_SEARCH_REPLY'),
+            : structuredForcedResult(reply.score, 'DEEP_SEARCH_REPLY_SENTINEL', false),
           tactical_facts: reply.tacticalFacts || null
         }))
       : [];
@@ -3436,7 +3440,7 @@
         facts: {
           candidate_sources: ['JEV_WILDCARD'],
           forced_role: winsNow ? 'WIN_NOW' : 'NORMAL',
-          tactical_safety: 'SAFE',
+          tactical_safety: 'ONE_PLY_SAFE_UNVERIFIED',
           attack_shape: winsNow ? 'IMMEDIATE_WIN' : ownWins.length ? 'FORCING_REPLY_SET' : ownPattern.className,
           initiative: winsNow || ownWins.length ? 'FORCING' : ownPattern.openThreeDirections ? 'PRESSURE' : 'BALANCED',
           own_immediate_winning_points_after_move: countLabel(ownWins.length),
@@ -3533,7 +3537,7 @@
     for (const move of candidates) {
       questions[`critic_${move.key}`] = {
         type: 'choice',
-        instructions: `Assume candidate ${move.key} is wrong. Inspect the full board and max_candidate_evidence.${move.key}. Find the strongest opponent refutation: immediate tactical reply, forcing sequence, multi-axis counterattack, premature spending of a forcing resource, or loss of initiative. If none is convincing, choose SURVIVES_BEST_REPLY.`,
+        instructions: `Assume candidate ${move.key} is wrong. Inspect the full board, candidate_facts.${move.key}, and atomic_results.${move.key}. Find the strongest opponent refutation: immediate tactical reply, forcing sequence, multi-axis counterattack, premature spending of a forcing resource, or loss of initiative. If none is convincing, choose SURVIVES_BEST_REPLY.`,
         criteria: {
           SURVIVES_BEST_REPLY: 'No concrete refutation found; candidate remains robust against best play.',
           TACTICAL_REFUTATION: 'Opponent has a concrete tactical or forcing refutation.',
@@ -3693,7 +3697,10 @@
       usage: null,
       client: null,
       decisionTrace: {
-        candidateSources: context.recall || null,
+        candidateSources: candidates.map(move => ({
+          move: move.key,
+          sources: [...(move.recallSources || [])]
+        })),
         preJevDeepSearch: deepAnalysis || null,
         preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
         requestShape: {
@@ -3769,8 +3776,8 @@
     const tournament = buildPairwisePayload(atomicTop4);
     tournament.payload.state.task = 'Jev Max stage 2: order-balanced pairwise tournament plus adversarial refutation analysis.';
     tournament.payload.state.gomoku_doctrine = gomokuDecisionDoctrine();
-    tournament.payload.state.max_candidate_evidence = Object.fromEntries(
-      atomicTop4.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: false })])
+    tournament.payload.state.atomic_results = Object.fromEntries(
+      atomicTop4.map(move => [move.key, move.atomicJudgement || null])
     );
     addCriticQuestions(tournament.payload.questions, atomicTop4);
 
@@ -3882,7 +3889,7 @@
       usage,
       client,
       decisionTrace: {
-        candidateSources: context.recall || candidates.map(move => ({
+        candidateSources: candidates.map(move => ({
           move: move.key,
           sources: [...(move.recallSources || [])]
         })),
@@ -3910,7 +3917,11 @@
             move: item.move,
             score: Number.isFinite(item.score) && !isSentinelSearchScore(item.score) ? item.score : null,
             fallbackRank: item.fallbackRank ?? null,
-            forcedResult: item.forcedResult || structuredForcedResult(item.score, 'DEEP_SEARCH'),
+            forcedResult: item.forcedResult ? {
+              ...item.forcedResult,
+              proven: false,
+              advisory: true
+            } : structuredForcedResult(item.score, 'DEEP_SEARCH_SENTINEL', false),
             principalVariation: Array.isArray(item.principalVariation) ? item.principalVariation.slice(0, 8) : [],
             opponentBestReplies: Array.isArray(item.opponentBestReplies) ? item.opponentBestReplies.slice(0, 2) : []
           }))
@@ -3942,7 +3953,7 @@
           sources: [...(move.recallSources || [])],
           localRank: move.localRank ?? null,
           localSearchScore: Number.isFinite(move.searchScore) && !isSentinelSearchScore(move.searchScore) ? move.searchScore : null,
-          localForcedResult: structuredForcedResult(move.searchScore, 'LOCAL_ALPHA_BETA'),
+          localForcedResult: structuredForcedResult(move.searchScore, 'LOCAL_ALPHA_BETA_SENTINEL', false),
           deepSearchRank: move.deepSearchRank ?? null,
           deepSearchScore: Number.isFinite(move.deepSearchScore) ? move.deepSearchScore : null,
           deepEvidence: move.deepEvidence || null,
