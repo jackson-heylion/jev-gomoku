@@ -4575,25 +4575,32 @@
     return payload;
   }
 
-  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = []) {
+  function buildMaxSpeculativePayload(context, candidates, speculativePool = candidates, wildcardPool = []) {
     const payload = buildMaxAtomicPayload(context, candidates);
-    const tournament = buildPairwisePayload(speculativePool);
+    const forwardCriteria = Object.fromEntries(candidates.map(move => [
+      move.key,
+      `See candidate_facts.${move.key}`
+    ]));
+    const reverseCriteria = Object.fromEntries([...candidates].reverse().map(move => [
+      move.key,
+      `See candidate_facts.${move.key}`
+    ]));
 
-    payload.state.task = 'Jev Max speculative fan-out: atomic evaluation plus precomputed pairwise/critic evidence for the likely finalist pool.';
-    payload.state.fanout_policy = 'Atomic answers determine the actual Top 4. Pairwise/Critic answers are speculative and are only consumed when their candidate is still eligible after deterministic Threat coverage. Ignore all hard-proved losing or illegal candidates.';
-    payload.state.speculative_pool = speculativePool.map(move => move.key);
-    payload.state.pairwise_policy = tournament.payload.state.pairwise_policy;
+    payload.state.task = 'Jev Max compact fan-out: independent Atomic evaluation, adversarial Critic, and two order-balanced global best ballots over the complete main candidate set.';
+    payload.state.fanout_policy = 'Atomic and Critic inspect every main candidate. global_best and global_best_reverse ask the same final-comparison question with reversed option order; their probability agreement is the one-request convergence signal. Deterministic legality and hard proof always dominate semantic judgement.';
+    payload.state.speculative_pool = candidates.map(move => move.key);
     payload.state.critic_policy = MAX_CRITIC_POLICY;
-    Object.assign(payload.questions, tournament.payload.questions);
-    addCriticQuestions(payload.questions, speculativePool);
+    addCriticQuestions(payload.questions, candidates);
 
     payload.questions.global_best = {
       type: 'choice',
       instructions: 'Independently choose the strongest supplied main candidate from the full board and candidate_facts. This is a consensus signal, not permission to override deterministic proof.',
-      criteria: Object.fromEntries(candidates.map(move => [
-        move.key,
-        `See candidate_facts.${move.key}`
-      ]))
+      criteria: forwardCriteria
+    };
+    payload.questions.global_best_reverse = {
+      type: 'choice',
+      instructions: 'Independently choose the strongest supplied main candidate from the full board and candidate_facts. The option order is intentionally reversed; judge board strength, not presentation order.',
+      criteria: reverseCriteria
     };
 
     if (wildcardPool.length) {
@@ -4610,8 +4617,8 @@
 
     return {
       payload,
-      pairs: tournament.pairs,
-      speculativePool: speculativePool.map(move => move.key)
+      pairs: [],
+      speculativePool: candidates.map(move => move.key)
     };
   }
 
@@ -4630,7 +4637,9 @@
     tournament.payload.state.atomic_results = Object.fromEntries(
       candidates.map(move => [move.key, atomicAnswers?.[`judge_${move.key}`] || null])
     );
-    addCriticQuestions(tournament.payload.questions, candidates);
+    tournament.payload.state.critic_results = Object.fromEntries(
+      candidates.map(move => [move.key, atomicAnswers?.[`critic_${move.key}`] || null])
+    );
     tournament.payload.questions.best_move = {
       type: 'choice',
       instructions: 'Choose the strongest legal resolution candidate. Use full-board geometry, candidate_facts and prior Atomic results. Pairwise/Critic questions in this request are independent cross-checks; legality and hard proofs remain authoritative.',
@@ -4741,6 +4750,83 @@
       || (b.atomicScore || 0) - (a.atomicScore || 0)
       || (a.localRank || a.rank || 999) - (b.localRank || b.rank || 999)
     );
+  }
+
+  function maxGlobalConsensus(candidates, answers) {
+    const forward = answers?.global_best || null;
+    const reverse = answers?.global_best_reverse || null;
+    const forwardChoice = String(forward?.choice || '').toUpperCase();
+    const reverseChoice = String(reverse?.choice || '').toUpperCase();
+    const keys = candidates.map(move => move.key);
+    const probabilities = {};
+    for (const key of keys) {
+      probabilities[key] = (probabilityFor(forward, key) + probabilityFor(reverse, key)) / 2;
+    }
+    const ranked = [...keys].sort((a, b) => Number(probabilities[b] || 0) - Number(probabilities[a] || 0));
+    const first = ranked[0] || null;
+    const second = ranked[1] || null;
+    return {
+      choice: forwardChoice && forwardChoice === reverseChoice ? forwardChoice : null,
+      agreed: Boolean(forwardChoice && forwardChoice === reverseChoice),
+      forward: compactAnswer(forward),
+      reverse: compactAnswer(reverse),
+      probabilities,
+      margin: first ? Number(probabilities[first] || 0) - Number(probabilities[second] || 0) : 0,
+      topProbability: first ? Number(probabilities[first] || 0) : 0,
+      ranked
+    };
+  }
+
+  function criticHardRefutationProbability(move) {
+    const probabilities = move?.criticSummary?.probabilities || {};
+    return Math.max(
+      Number(probabilities.TACTICAL_REFUTATION || 0),
+      Number(probabilities.MULTI_AXIS_COUNTERATTACK || 0),
+      Number(probabilities.RESIDUAL_COUNTER_THREAT || 0)
+    );
+  }
+
+  function highConfidenceCompactConvergence(atomicTop4, consensus, recallChoice) {
+    if (recallChoice !== 'MAIN_SET' || !consensus?.agreed || !consensus.choice || atomicTop4.length < 2) {
+      return false;
+    }
+    const chosen = atomicTop4.find(move => move.key === consensus.choice);
+    if (!chosen || chosen.threatSearch?.timedOut || !chosen.threatSearch) return false;
+
+    const atomicRanked = [...atomicTop4].sort((a, b) =>
+      Number(b.atomicScore || 0) - Number(a.atomicScore || 0)
+      || Number(a.localRank || 999) - Number(b.localRank || 999)
+    );
+    const atomicTop = atomicRanked[0];
+    const atomicSecond = atomicRanked[1];
+    const topScore = Number(atomicTop?.atomicScore || 0);
+    const secondScore = Number(atomicSecond?.atomicScore || 0);
+    const chosenScore = Number(chosen.atomicScore || 0);
+    const chosenGapFromTop = topScore - chosenScore;
+    const atomicLead = topScore - secondScore;
+    const chosenProbability = Number(consensus.probabilities?.[chosen.key] || 0);
+
+    // Real Jev data shows Atomic's absolute scale varies substantially by
+    // position. Convergence therefore uses relative Atomic rank plus two
+    // reversed-order global ballots. Critic is a veto for a strong concrete
+    // refutation, not an absolute survival threshold.
+    return chosenGapFromTop <= .04
+      && chosenProbability >= .34
+      && Number(consensus.margin || 0) >= .12
+      && (atomicLead >= .04 || Number(consensus.margin || 0) >= .20)
+      && criticHardRefutationProbability(chosen) < .55
+      && chosen.threatSearch?.forced !== true
+      && chosen.analysis?.facts?.tactical_safety !== 'LOSING';
+  }
+
+  function compactConsensusAnswer(consensus) {
+    const choice = consensus?.choice;
+    if (!choice) return null;
+    return {
+      choice,
+      confidence: Number(consensus.probabilities?.[choice] || 0),
+      probabilities: { ...(consensus.probabilities || {}) }
+    };
   }
 
   function highConfidenceMaxConvergence(ranked, globalBest = null) {
