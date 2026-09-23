@@ -1197,6 +1197,8 @@
         const factText = [
           f.forced_role && `role=${f.forced_role}`,
           f.tactical_safety && `safety=${f.tactical_safety}`,
+          f.tactical_verification && `localVerify=${f.tactical_verification}`,
+          f.threat_verification && `threatVerify=${f.threat_verification}`,
           f.attack_shape && `attack=${f.attack_shape}`,
           f.initiative && `initiative=${f.initiative}`,
           f.vcf_status && `VCF=${f.vcf_status}`,
@@ -1246,6 +1248,14 @@
           : '';
         lines.push(`    ${item.move}: ${item.choice || '—'}${probs ? ` [${probs}]` : ''}`);
       });
+    }
+
+    if (d.trace?.threatCoverage?.supplementalTriggered) {
+      const tc = d.trace.threatCoverage;
+      lines.push(`  Threat coverage 补检：${(tc.supplementalCandidates || []).join(' / ') || '—'}；elapsed=${tc.elapsedMs ?? '—'}ms`);
+      if (Array.isArray(tc.rejectedIncomplete) && tc.rejectedIncomplete.length) {
+        lines.push(`    未完成校验而 fail-closed：${tc.rejectedIncomplete.join(' / ')}`);
+      }
     }
 
     if (d.trace?.wildcard) {
@@ -2375,7 +2385,7 @@
       counter_threat: 'A move is not automatically safe just because it creates one forcing threat. If the opponent has a forced defensive reply, inspect the board after that reply: residual forcing extensions, fork creators, and multi-axis junctions may leave the original attack intact.',
       geometry: 'Inspect horizontal, vertical, and both diagonals equally. Multi-axis intersections and moves that reduce the opponent reply set are strategically important.',
       opening: 'In the early game, value connected central influence, multiple two-to-three extension routes, and denying the opponent equivalent extension routes over isolated stones.',
-      caution: 'pattern_* fields are fast heuristic shape evidence, not mathematical proof. threat-space FOUND and proven VCF remain higher authority.'
+      caution: 'pattern_* fields are fast heuristic shape evidence, not mathematical proof. Missing or timed-out tactical evidence is UNKNOWN, never SAFE. Before comparing finalists, require equivalent Threat-space coverage; threat-space FOUND and proven VCF remain higher authority.'
     };
   }
 
@@ -3283,6 +3293,7 @@
       const evidence = byMove.get(move.key) || null;
       move.threatSearch = evidence;
       if (!evidence || !move.analysis?.facts) continue;
+      move.analysis.facts.threat_verification = evidence.timedOut ? 'TIMEOUT' : 'COMPLETED';
       move.analysis.facts.opponent_forcing_proof = evidence.forced
         ? 'FOUND'
         : evidence.timedOut ? 'TIMEOUT' : 'NOT_FOUND';
@@ -3300,9 +3311,14 @@
         move.analysis.facts.tactical_safety = 'LOSING';
       } else if (
         ['CRITICAL', 'HIGH'].includes(counterThreat?.risk)
-        && move.analysis.facts.tactical_safety === 'SAFE'
+        && !['LOSING', 'UNSAFE'].includes(move.analysis.facts.tactical_safety)
       ) {
         move.analysis.facts.tactical_safety = 'TACTICALLY_RISKY';
+      } else if (
+        move.analysis.facts.tactical_safety === 'UNVERIFIED_BUDGET'
+        && !evidence.timedOut
+      ) {
+        move.analysis.facts.tactical_safety = 'THREAT_VETTED_NO_FORCED_LOSS';
       }
     }
     return byMove;
