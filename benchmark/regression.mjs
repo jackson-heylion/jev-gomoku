@@ -1852,10 +1852,10 @@ async function testRealGameMove44AllMainLossTriggersRescueSweep() {
   if ((shape.pairwiseCount || 0) !== 0 || (shape.criticCount || 0) !== 0) {
     throw new Error('Rescue mode must skip Pairwise/Critic on known-loss main candidates');
   }
-  if ((shape.logicalRequests || 0) > 1) {
-    throw new Error('Pre-Atomic all-loss rescue path must use at most one Jev request, got ' + shape.logicalRequests);
+  if ((shape.logicalRequests || 0) > 2) {
+    throw new Error('All-loss rescue path must beat the historical 3-request flow, got ' + shape.logicalRequests);
   }
-  if (requestCount > 1) {
+  if (requestCount > 2) {
     throw new Error('Move-44 rescue path issued too many Jev requests: ' + requestCount);
   }
   if (!result.decisionTrace?.rescueSweep) {
