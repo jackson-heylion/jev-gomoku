@@ -322,3 +322,18 @@ Jev Max 仍保留 6～8 个异构候选，但初始 Threat Worker 只分析最�
 Threat Worker 还会在每个候选根节点执行一次**直接双胜点 proof**：若对手某一合法落子能立即制造两个合法成五点，就直接作为确定性 forced-loss 证据，不依赖 Pattern 分类或通用 branch 排序。该全量扫描只在根节点执行，递归深层仍保持原有有界 forcing search。
 
 这样 Final Judge 不再比较“风险证据完整的候选”和“因为没分析而看起来干净的候选”，同时不会把能制造强制反击、迫使对手先防守的 counter-threat 手误杀。
+
+
+### Jev Max Bounded Rescue Sweep
+
+正常回合继续使用 Threat coverage closure。但如果当前主候选已经全部 hard-proved losing，Jev Max 不再让 Atomic / Pairwise / Critic / Final 在一组确定败着之间反复投票：
+
+1. 优先重新检查此前因 Threat timeout / coverage fail-closed 被排除的主候选。
+2. 再从 bounded wildcard universe 中加入少量通过 legality + immediate-loss + fork-loss guard 的额外点。
+3. Rescue 最多保留 6 个候选；常规情况下先做 bounded Threat 验证。若只剩 1～2 个复杂候选，则逐个给独立时间片，避免共享预算造成 survivor bias；候选较多时批量验证后最多对 2 个 unresolved 单独补跑。
+4. 有 completed `NO_PROOF` rescue 时优先保留；没有则保留 timeout / unresolved 候选，因为 UNKNOWN 比已知 forced loss 更值得尝试。
+5. rescue 候选存在时最多增加 1 次 Jev 最终选择；若 bounded rescue 全部被证明为败，则停止 Jev 语义投票，按 proof 深度选择最长抵抗线。
+
+另外，在接近“全主候选已败”的 rare path，最多 4 个仅因 Threat 未完成而存活的候选可以在 Atomic 前补一次本地 proof，以减少无意义的语义请求。正常回合预算和最多 2 个重型 Worker 的约束不变。
+
+`THREAT_VETTED_NO_FORCED_LOSS` 语义已改为更保守的 `THREAT_SEARCH_NO_PROOF`：搜索没证明输不等于已经证明安全。

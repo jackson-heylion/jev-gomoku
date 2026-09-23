@@ -1250,6 +1250,17 @@
       });
     }
 
+    if (d.trace?.rescueSweep) {
+      const r = d.trace.rescueSweep;
+      lines.push(`  Rescue Sweep：mode=${r.mode || '—'}；pool=${(r.pool || []).join(' / ') || '—'}；vetted=${(r.vetted || []).join(' / ') || '—'}；unresolved=${(r.unresolved || []).join(' / ') || '—'}；elapsed=${r.elapsedMs ?? '—'}ms`);
+      if (Array.isArray(r.rejectedByProof) && r.rejectedByProof.length) {
+        lines.push(`    Rescue proof 排除：${r.rejectedByProof.join(' / ')}`);
+      }
+      if (r.selectedResistance) {
+        lines.push(`    Bounded rescue exhausted；最长抵抗：${r.selectedResistance}`);
+      }
+    }
+
     if (d.trace?.threatCoverage?.supplementalTriggered) {
       const tc = d.trace.threatCoverage;
       lines.push(`  Threat coverage 补检：${(tc.supplementalCandidates || []).join(' / ') || '—'}；elapsed=${tc.elapsedMs ?? '—'}ms`);
@@ -3318,7 +3329,7 @@
         move.analysis.facts.tactical_safety === 'UNVERIFIED_BUDGET'
         && !evidence.timedOut
       ) {
-        move.analysis.facts.tactical_safety = 'THREAT_VETTED_NO_FORCED_LOSS';
+        move.analysis.facts.tactical_safety = 'THREAT_SEARCH_NO_PROOF';
       }
     }
     return byMove;
@@ -3353,6 +3364,7 @@
         timedOut: Boolean(item.timedOut),
         attackerTurns: item.attackerTurns ?? null,
         line: Array.isArray(item.line) ? item.line.slice(0, 16) : [],
+        reason: item.reason || null,
         counterThreat: item.counterThreat ? {
           risk: item.counterThreat.risk || 'NONE',
           reason: item.counterThreat.reason || null,
@@ -3516,6 +3528,47 @@
     if (safeFromThreatProof.length) filtered = safeFromThreatProof;
 
     return filtered.slice(0, maxCandidateLimit());
+  }
+
+  async function closePreAtomicLossFrontier(contextCandidates, survivors, threatAnalysis) {
+    const unresolved = (survivors || []).filter(move =>
+      !hasCompletedThreatEvidence(threatAnalysis, move.key)
+    );
+    const knownLost = (contextCandidates || []).filter(maxHardProvenLoss);
+
+    // Rare tactical state: the initial Threat batch has already proved most of
+    // the universe losing, and <=2 candidates survive only because their proof
+    // did not run/finish. Close that hard-evidence frontier (at most four
+    // survivors) before spending an Atomic request; semantic judgement must not
+    // decide whether proof exists.
+    if (
+      unresolved.length === 0
+      || unresolved.length !== survivors.length
+      || unresolved.length > 4
+      || knownLost.length + unresolved.length < contextCandidates.length
+    ) {
+      return {
+        candidates: survivors,
+        threatAnalysis,
+        supplemental: null
+      };
+    }
+
+    updateApiState('busy', 'Jev Max：主候选接近全败，Atomic 前补齐 Threat 生存证据…');
+    const supplemental = await runThreatWorkerAnalysis(
+      unresolved,
+      'max',
+      'jev_max_pre_atomic_loss_frontier',
+      { timeBudgetMs: 1450, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+    );
+    const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
+    attachThreatEvidence(contextCandidates, merged);
+    const filtered = hardFilterMaxCandidates(survivors, merged);
+    return {
+      candidates: filtered,
+      threatAnalysis: merged,
+      supplemental
+    };
   }
 
   function mergeThreatAnalysis(primary, supplemental) {
@@ -3978,6 +4031,374 @@
     };
   }
 
+  function maxHardProvenLoss(move) {
+    return Boolean(
+      move?.threatSearch?.forced === true
+      || move?.analysis?.facts?.tactical_safety === 'LOSING'
+    );
+  }
+
+  function allMaxCandidatesHardLost(candidates) {
+    return Boolean(candidates?.length) && candidates.every(maxHardProvenLoss);
+  }
+
+  function maxResistanceRank(candidates) {
+    return [...(candidates || [])].sort((a, b) => {
+      const aTurns = Number(a?.threatSearch?.attackerTurns);
+      const bTurns = Number(b?.threatSearch?.attackerTurns);
+      const aDepth = Number.isFinite(aTurns) ? aTurns : -1;
+      const bDepth = Number.isFinite(bTurns) ? bTurns : -1;
+      return bDepth - aDepth
+        || Number(b?.searchScore || -Infinity) - Number(a?.searchScore || -Infinity)
+        || Number(a?.localRank || a?.rank || 999) - Number(b?.localRank || b?.rank || 999);
+    });
+  }
+
+  function buildMaxRescuePayload(candidates, context, deepAnalysis, threatAnalysis, rescueMode) {
+    return {
+      state: {
+        task: 'Jev Max emergency rescue selection after the normal main candidate set was hard-proved losing.',
+        rescue_mode: rescueMode,
+        side: colorNameEn(aiColor()),
+        board_size: '15x15',
+        coordinate_system: 'Columns A-O left to right; rows 1-15 top to bottom.',
+        board_legend: boardLegendForAi(),
+        board_rows: boardRows(),
+        last_move: moves.length ? moves[moves.length - 1].coord : null,
+        rules: renjuRuleDescription(),
+        gomoku_doctrine: gomokuDecisionDoctrine(),
+        deterministic_engine_role: 'Every normal main candidate has a hard forced-loss proof. These rescue candidates are the bounded alternatives not yet hard-proved losing. Never prefer a known forced-loss move over an unresolved or completed non-forced rescue.',
+        priority: 'LEGALITY / proven forced result > survival from forced loss > opponent best-response robustness > forcing tempo > deep/local evidence',
+        deep_search_status: compactEvidence({
+          status: deepAnalysis?.status || 'unavailable',
+          depth_reached: deepAnalysis?.depthReached ?? null,
+          timed_out: Boolean(deepAnalysis?.timedOut)
+        }),
+        threat_search_status: compactEvidence({
+          status: threatAnalysis?.status || 'unavailable',
+          timed_out: Boolean(threatAnalysis?.timedOut),
+          max_attacker_turns: threatAnalysis?.maxThreatTurns ?? null
+        }),
+        candidates: Object.fromEntries(
+          candidates.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: true })])
+        )
+      },
+      model: settings.model || 'jev-latest',
+      questions: {
+        best_move: {
+          type: 'choice',
+          instructions: 'Choose the strongest rescue move. Every listed move passed deterministic local guards and is not currently hard-proved losing. Prefer completed Threat NO_PROOF over timeout/unresolved evidence, but inspect the board and forcing tempo directly.',
+          criteria: Object.fromEntries(candidates.map(move => [
+            move.key,
+            `See state.candidates.${move.key}`
+          ]))
+        }
+      }
+    };
+  }
+
+  async function verifyMaxRescueThreatPool(pool, threatAnalysis) {
+    let mergedThreat = threatAnalysis;
+    const passes = [];
+    if (!pool.length) {
+      return { mergedThreat, passes, elapsedMs: 0, retried: [] };
+    }
+
+    const mergePass = result => {
+      if (!result) return;
+      passes.push(result);
+      mergedThreat = mergeThreatAnalysis(mergedThreat, result);
+      attachThreatEvidence(pool, mergedThreat);
+    };
+
+    // Rescue is a rare emergency path. With only one or two candidates, give
+    // each candidate an independent budget so a complex proof cannot starve its
+    // sibling. This remains sequential and never increases Worker concurrency.
+    if (pool.length <= 2) {
+      for (const move of pool) {
+        const result = await runThreatWorkerAnalysis(
+          [move],
+          'max',
+          'jev_max_rescue_individual',
+          { timeBudgetMs: 1100, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+        );
+        mergePass(result);
+      }
+    } else {
+      const batch = await runThreatWorkerAnalysis(
+        pool,
+        'max',
+        'jev_max_rescue_sweep',
+        { timeBudgetMs: 1450, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+      );
+      mergePass(batch);
+
+      // Retry at most two unresolved roots independently. The batch remains the
+      // fast path; retries only spend extra wall time when proof coverage would
+      // otherwise be ambiguous.
+      const unresolved = pool
+        .filter(move => !hasCompletedThreatEvidence(mergedThreat, move.key))
+        .slice(0, 2);
+      for (const move of unresolved) {
+        const retry = await runThreatWorkerAnalysis(
+          [move],
+          'max',
+          'jev_max_rescue_retry',
+          { timeBudgetMs: 900, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 9 }
+        );
+        mergePass(retry);
+      }
+    }
+
+    const elapsedMs = passes.reduce((sum, result) => sum + (Number(result?.elapsedMs) || 0), 0);
+    return {
+      mergedThreat,
+      passes,
+      elapsedMs,
+      retried: passes
+        .filter(result => result?.trigger === 'jev_max_rescue_retry' || result?.trigger === 'jev_max_rescue_individual')
+        .flatMap(result => (result?.analyses || []).map(row => row.move))
+    };
+  }
+
+  async function runMaxRescueSweep(context, provenMain, deepAnalysis, threatAnalysis, priorAtomic = null) {
+    const blocked = new Set([
+      ...provenThreatLossKeys(threatAnalysis),
+      ...context.candidates.filter(maxHardProvenLoss).map(move => move.key)
+    ]);
+    const pool = [];
+    const seen = new Set();
+    const add = (move, source) => {
+      if (!move || seen.has(move.key) || blocked.has(move.key)) return;
+      const checked = validateWildcardCandidate(move);
+      if (!checked) return;
+      const candidate = context.candidates.find(item => item.key === move.key) || checked;
+      addRecallSource(candidate, source);
+      if (!candidate.analysis?.facts?.threat_verification) {
+        candidate.analysis.facts.threat_verification = 'RESCUE_PENDING';
+      }
+      pool.push(candidate);
+      seen.add(candidate.key);
+    };
+
+    // First rescue candidates that normal coverage rejected only because their
+    // Threat proof did not finish. A timeout is more valuable than a known loss.
+    for (const move of context.candidates) {
+      if (!maxHardProvenLoss(move) && !hasCompletedThreatEvidence(threatAnalysis, move.key)) {
+        add(move, 'RESCUE_UNRESOLVED_MAIN');
+      }
+      if (pool.length >= 6) break;
+    }
+
+    if (pool.length < 6) {
+      const extras = extraWildcardPool(context.candidates, 12, blocked);
+      for (const move of extras) {
+        add(move, 'RESCUE_EXTRA');
+        if (pool.length >= 6) break;
+      }
+    }
+
+    let mergedThreat = threatAnalysis;
+    let rescueVerification = { mergedThreat, passes: [], elapsedMs: 0, retried: [] };
+    if (pool.length) {
+      updateApiState('busy', 'Jev Max：主候选均已证败，执行 bounded rescue sweep…');
+      rescueVerification = await verifyMaxRescueThreatPool(pool, threatAnalysis);
+      mergedThreat = rescueVerification.mergedThreat;
+      attachThreatEvidence(pool, mergedThreat);
+    }
+
+    const vetted = pool.filter(move => {
+      const row = threatEvidenceForMove(mergedThreat, move.key);
+      return Boolean(row && !row.timedOut && row.forced !== true);
+    });
+    const unresolved = pool.filter(move => {
+      const row = threatEvidenceForMove(mergedThreat, move.key);
+      return !row || row.timedOut;
+    });
+    const rescueCandidates = (vetted.length ? vetted : unresolved).slice(0, 4);
+    const rescueMode = vetted.length
+      ? 'VETTED_RESCUE'
+      : unresolved.length
+        ? 'UNRESOLVED_RESCUE'
+        : 'BOUNDED_RESCUE_EXHAUSTED';
+
+    if (!rescueCandidates.length) {
+      const resistance = maxResistanceRank(provenMain);
+      const selected = resistance[0] || provenMain[0];
+      const usage = priorAtomic?.data?.usage || null;
+      const client = priorAtomic?.data ? aggregateJevClient(priorAtomic.data) : null;
+      const logicalRequests = priorAtomic?.data ? 1 : 0;
+      return {
+        answer: {
+          choice: selected.key,
+          confidence: 1,
+          probabilities: { [selected.key]: 1 }
+        },
+        finalChoice: selected.key,
+        localChoice: context.candidates[0]?.key || selected.key,
+        jevSuggested: null,
+        mode: 'max',
+        forced: context.forced,
+        candidates: [selected, ...resistance.filter(move => move.key !== selected.key)].slice(0, maxCandidateLimit()),
+        model: priorAtomic?.data?.model || 'jev-max-bounded-rescue',
+        usage,
+        client,
+        decisionTrace: {
+          atomic: priorAtomic?.trace || null,
+          preJevDeepSearch: deepAnalysis || null,
+          preJevThreatSearch: threatEvidenceSnapshot(mergedThreat),
+          rescueSweep: {
+            mode: rescueMode,
+            pool: pool.map(move => move.key),
+            vetted: vetted.map(move => move.key),
+            unresolved: unresolved.map(move => move.key),
+            rejectedByProof: pool.filter(maxHardProvenLoss).map(move => move.key),
+            elapsedMs: rescueVerification.elapsedMs,
+            verificationPasses: rescueVerification.passes.map(result => ({
+              trigger: result?.trigger || null,
+              status: result?.status || null,
+              timedOut: Boolean(result?.timedOut),
+              elapsedMs: result?.elapsedMs ?? null,
+              candidates: (result?.analyses || []).map(row => row.move)
+            })),
+            retried: rescueVerification.retried,
+            selectedResistance: selected.key
+          },
+          requestShape: {
+            decisionAuthority: 'bounded_rescue_exhausted',
+            candidateCount: provenMain.length,
+            atomicCount: priorAtomic?.count || 0,
+            pairwiseCount: 0,
+            criticCount: 0,
+            finalistCount: 0,
+            logicalRequests,
+            httpRequests: client?.attempts || 0,
+            maxWorkers: 2,
+            payloadEstimatedInputTokens: Number.isFinite(priorAtomic?.tokens) ? [priorAtomic.tokens] : [],
+            localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
+            localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
+            deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
+            threatElapsedMs: mergedThreat?.elapsedMs ?? null,
+            rescueSweepElapsedMs: rescueVerification.elapsedMs,
+            rescueSweepPasses: rescueVerification.passes.length,
+            rescueSweepRetriedCandidates: rescueVerification.retried,
+            rescueSweepCandidates: pool.map(move => move.key)
+          }
+        },
+        stageNote: `Jev Max：主候选全部硬证败，bounded rescue 也未找到未证败候选；停止 Jev 败着投票，选择最长抵抗 ${selected.key}`
+      };
+    }
+
+    const payload = buildMaxRescuePayload(
+      rescueCandidates,
+      context,
+      deepAnalysis,
+      mergedThreat,
+      rescueMode
+    );
+    const rescueTokens = estimatePayloadTokens(payload);
+    updateApiState('busy', 'Jev Max：从 rescue 候选中进行最终选择…');
+    const rescueData = await callJev(payload);
+    const raw = rescueData?.answers?.best_move;
+    const rescueKeys = new Set(rescueCandidates.map(move => move.key));
+    let finalChoice = String(raw?.choice || '').toUpperCase();
+    if (!rescueKeys.has(finalChoice)) {
+      finalChoice = rescueCandidates[0].key;
+    }
+    const selected = rescueCandidates.find(move => move.key === finalChoice) || rescueCandidates[0];
+    const probabilities = raw?.probabilities && typeof raw.probabilities === 'object'
+      ? Object.fromEntries(Object.entries(raw.probabilities)
+          .filter(([key]) => rescueKeys.has(String(key).toUpperCase()))
+          .map(([key, value]) => [String(key).toUpperCase(), Number(value)]))
+      : { [finalChoice]: 1 };
+    const answer = {
+      ...(raw || {}),
+      choice: finalChoice,
+      confidence: Number.isFinite(raw?.confidence)
+        ? raw.confidence
+        : Number.isFinite(Number(probabilities[finalChoice])) ? Number(probabilities[finalChoice]) : null,
+      probabilities
+    };
+    const usage = sumUsage(priorAtomic?.data?.usage, rescueData?.usage);
+    const client = aggregateJevClient(priorAtomic?.data, rescueData);
+    const logicalRequests = (priorAtomic?.data ? 1 : 0) + 1;
+    const finalCandidates = [
+      selected,
+      ...rescueCandidates.filter(move => move.key !== selected.key),
+      ...provenMain.filter(move => move.key !== selected.key)
+    ].slice(0, maxCandidateLimit());
+
+    return {
+      answer,
+      finalChoice,
+      localChoice: context.candidates[0]?.key || finalChoice,
+      jevSuggested: finalChoice,
+      mode: 'max',
+      forced: context.forced,
+      candidates: finalCandidates,
+      model: rescueData?.model || priorAtomic?.data?.model || settings.model,
+      usage,
+      client,
+      decisionTrace: {
+        atomic: priorAtomic?.trace || null,
+        preJevDeepSearch: deepAnalysis || null,
+        preJevThreatSearch: threatEvidenceSnapshot(mergedThreat),
+        rescueSweep: {
+          mode: rescueMode,
+          pool: pool.map(move => move.key),
+          vetted: vetted.map(move => move.key),
+          unresolved: unresolved.map(move => move.key),
+          rejectedByProof: pool.filter(maxHardProvenLoss).map(move => move.key),
+          elapsedMs: rescueVerification.elapsedMs,
+            verificationPasses: rescueVerification.passes.map(result => ({
+              trigger: result?.trigger || null,
+              status: result?.status || null,
+              timedOut: Boolean(result?.timedOut),
+              elapsedMs: result?.elapsedMs ?? null,
+              candidates: (result?.analyses || []).map(row => row.move)
+            })),
+            retried: rescueVerification.retried,
+          chosen: finalChoice
+        },
+        finalDecision: compactAnswer(answer),
+        requestShape: {
+          decisionAuthority: 'jev_max_rescue',
+          candidateCount: provenMain.length,
+          atomicCount: priorAtomic?.count || 0,
+          pairwiseCount: 0,
+          criticCount: 0,
+          finalistCount: rescueCandidates.length,
+          logicalRequests,
+          httpRequests: client?.attempts || 0,
+          maxWorkers: 2,
+          payloadEstimatedInputTokens: [
+            priorAtomic?.tokens,
+            rescueTokens
+          ].filter(Number.isFinite),
+          payloadTokenBudgetTarget: 5000,
+          payloadTokenBudgetHard: 7000,
+          localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
+          localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
+          deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
+          threatElapsedMs: mergedThreat?.elapsedMs ?? null,
+          rescueSweepElapsedMs: rescueVerification.elapsedMs,
+            rescueSweepPasses: rescueVerification.passes.length,
+            rescueSweepRetriedCandidates: rescueVerification.retried,
+          rescueSweepCandidates: pool.map(move => move.key)
+        },
+        localEvidence: finalCandidates.map(move => ({
+          move: move.key,
+          sources: [...(move.recallSources || [])],
+          localRank: move.localRank ?? null,
+          localSearchScore: Number.isFinite(move.searchScore) && !isSentinelSearchScore(move.searchScore) ? move.searchScore : null,
+          threatSearch: move.threatSearch || null,
+          facts: move.analysis?.facts || null
+        }))
+      },
+      stageNote: `Jev Max：主候选全部硬证败 → bounded rescue sweep → ${rescueMode}，${logicalRequests} 次 Jev 请求后选择 ${finalChoice}`
+    };
+  }
+
   function buildMaxFinalPayload(candidates, context, deepAnalysis, threatAnalysis) {
     const candidateEvidence = Object.fromEntries(
       candidates.map(move => [move.key, maxSemanticEvidence(move, { includeRanks: true })])
@@ -4090,6 +4511,26 @@
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
 
+    const preAtomicFrontier = await closePreAtomicLossFrontier(
+      context.candidates,
+      candidates,
+      threatAnalysis
+    );
+    candidates = preAtomicFrontier.candidates;
+    threatAnalysis = preAtomicFrontier.threatAnalysis;
+
+    // If every normal main candidate is already hard-proved losing, do not
+    // spend Atomic/Pairwise/Final requests ranking known losses. Search a
+    // bounded rescue universe first; this rare tactical path is sequential.
+    if (allMaxCandidatesHardLost(candidates)) {
+      const rescue = await runMaxRescueSweep(context, candidates, deepAnalysis, threatAnalysis);
+      if (rescue?.decisionTrace?.requestShape) {
+        rescue.decisionTrace.requestShape.preAtomicFrontierElapsedMs = preAtomicFrontier.supplemental?.elapsedMs ?? null;
+        rescue.decisionTrace.requestShape.preAtomicFrontierCandidates = preAtomicFrontier.supplemental?.analyses?.map(row => row.move) || [];
+      }
+      return rescue;
+    }
+
     // A proven VCF set or Threat-space filter may collapse to one exact choice.
     if (candidates.length === 1) {
       return deterministicMaxResult(
@@ -4118,6 +4559,7 @@
         || (a.localRank || 999) - (b.localRank || 999))
       .slice(0, Math.min(4, candidates.length));
 
+    const preCoverageCandidates = [...candidates];
     const coverage = await closeMaxThreatCoverage(candidates, atomicTop4, threatAnalysis);
     candidates = coverage.candidates;
     threatAnalysis = coverage.threatAnalysis;
@@ -4125,6 +4567,22 @@
       .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
         || (a.localRank || 999) - (b.localRank || 999))
       .slice(0, Math.min(4, candidates.length));
+
+    if (!candidates.length || allMaxCandidatesHardLost(candidates)) {
+      const rescueBaseline = candidates.length ? candidates : preCoverageCandidates;
+      return runMaxRescueSweep(
+        context,
+        rescueBaseline,
+        deepAnalysis,
+        threatAnalysis,
+        {
+          data: atomicData,
+          trace: atomic,
+          count: atomicCandidateCount,
+          tokens: atomicTokens
+        }
+      );
+    }
 
     const pairwiseThreatCoverageComplete = atomicTop4.every(move =>
       hasCompletedThreatEvidence(threatAnalysis, move.key)

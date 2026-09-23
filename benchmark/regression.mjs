@@ -1677,6 +1677,254 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   }
 }
 
+/**
+ * Diagnostic / future regression seed from the 49-ply real game.
+ * Position before White 42 after Black L6. Analyze the candidate family one by
+ * one so Threat timeout on one root cannot hide whether alternatives are
+ * actually provable losses.
+ */
+async function testRealGameMove42ProofBoundary() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Move-42 residual rescue proof must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const threat = await engine.threatAnalyze(
+    ['H2'],
+    'max',
+    { timeBudgetMs: 1450, maxThreatTurns: 6, branch: 9 }
+  );
+  const row = threat?.analyses?.find(item => item.move === 'H2');
+  if (!row) {
+    throw new Error('Historical move-42 H2 analysis is missing');
+  }
+  if (row.forced) {
+    throw new Error('Bounded engine must not over-prove H2 without a closed continuation');
+  }
+  if (!row.timedOut && row.reason !== 'forced_defense_without_proven_continuation') {
+    throw new Error('H2 completed NO_PROOF must expose the forced-defense boundary, got ' + row.reason);
+  }
+}
+
+/**
+ * Counterfactual audit before White 36 after Black J4 in the 49-ply game.
+ * The real game selected H5 after an initial Threat timeout and wildcard retry.
+ */
+async function testRealGameMove36CounterfactualThreatAudit() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Move-36 counterfactual audit must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4'
+  ];
+  const position = positionFromSequence(sequence);
+  const moves = ['H5','L5','G7','G5','G10','H11','I10','D7'];
+  const rows = {};
+  for (const key of moves) {
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+    const threat = await engine.threatAnalyze([key], 'max');
+    rows[key] = threat?.analyses?.find(item => item.move === key) || null;
+  }
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const h5Depth8 = await engine.threatAnalyze(
+    ['H5'],
+    'max',
+    { maxThreatTurns: 8, timeBudgetMs: 1450, branch: 9 }
+  );
+  const h5Deep = h5Depth8?.analyses?.[0] || null;
+  console.log('move36 H5 depth8 audit:', JSON.stringify(h5Deep));
+  console.log('move36 counterfactual threat audit:', JSON.stringify(rows));
+  if (!rows.H5 || !rows.L5) {
+    throw new Error('Move-36 counterfactual audit did not return core candidates');
+  }
+  if (rows.H5.forced || h5Deep?.forced) {
+    throw new Error('Move-36 H5 must remain unproved even at 8 attacker turns; avoid over-proving the only resistance move');
+  }
+  for (const losingMove of ['L5','G7','G5','G10','H11','I10','D7']) {
+    if (!rows[losingMove]?.forced) {
+      throw new Error('Move-36 alternative ' + losingMove + ' should remain a proved loss');
+    }
+  }
+}
+
+/**
+ * Position before White 44 after Black H3 in the supplied 49-ply game.
+ * The normal main set is hard-proved losing. Jev Max must not spend three
+ * semantic requests ranking losing moves; it must enter bounded rescue mode.
+ */
+async function testRealGameMove44AllMainLossTriggersRescueSweep() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Move-44 rescue mock has no choices: ' + id);
+        const choice = keys[0];
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-rescue',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6','H2','H3'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const result = await engine.jevMax();
+  const shape = result.decisionTrace?.requestShape || {};
+  if (!['jev_max_rescue','bounded_rescue_exhausted'].includes(shape.decisionAuthority)) {
+    throw new Error('Move-44 all-loss position did not enter rescue mode: ' + shape.decisionAuthority);
+  }
+  if ((shape.pairwiseCount || 0) !== 0 || (shape.criticCount || 0) !== 0) {
+    throw new Error('Rescue mode must skip Pairwise/Critic on known-loss main candidates');
+  }
+  if ((shape.logicalRequests || 0) > 2) {
+    throw new Error('All-loss rescue path must beat the historical 3-request flow, got ' + shape.logicalRequests);
+  }
+  if (requestCount > 2) {
+    throw new Error('Move-44 rescue path issued too many Jev requests: ' + requestCount);
+  }
+  if (!result.decisionTrace?.rescueSweep) {
+    throw new Error('Move-44 result must record rescueSweep diagnostics');
+  }
+}
+
+/**
+ * Replay the actual position before White 44 and exercise the production
+ * Jev-Max rescue path. The normal eight candidates are hard-proved losing in
+ * the supplied log; this test checks whether bounded extra recall can discover
+ * a vetted rescue or correctly stop semantic voting when none exists.
+ */
+async function testRealGameMove44M7WorkerAudit() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Move-44 M7 worker audit must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6','H2','H3'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const threat = await engine.threatAnalyze(
+    ['M7'],
+    'max',
+    { timeBudgetMs: 1100, maxThreatTurns: 6, branch: 9 }
+  );
+  const row = threat?.analyses?.find(item => item.move === 'M7');
+  if (!row?.forced || row.timedOut) {
+    throw new Error('Move-44 M7 must complete as a proven forced loss');
+  }
+  if (!Array.isArray(row.line) || !row.line.length) {
+    throw new Error('Move-44 M7 proof must expose a concrete forcing line');
+  }
+}
+
+async function testRealGameMove44ProductionRescueAudit() {
+  let requests = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Move-44 rescue mock has no choices: ' + id);
+        const choice = keys[0];
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-rescue-audit',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6','H2','H3'
+  ];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  const rescue = result.decisionTrace?.rescueSweep || null;
+  const shape = result.decisionTrace?.requestShape || {};
+  if (shape.decisionAuthority !== 'bounded_rescue_exhausted') {
+    throw new Error('Move-44 production replay must exhaust bounded rescue, got ' + shape.decisionAuthority);
+  }
+  if (requests !== 0 || (shape.logicalRequests || 0) !== 0) {
+    throw new Error('Move-44 exhausted rescue must spend 0 Jev requests, got ' + requests);
+  }
+  if (rescue?.mode !== 'BOUNDED_RESCUE_EXHAUSTED') {
+    throw new Error('Move-44 rescue mode should be BOUNDED_RESCUE_EXHAUSTED');
+  }
+  if ((rescue?.unresolved || []).length) {
+    throw new Error('Move-44 rescue must not leave unresolved candidates: ' + rescue.unresolved.join(','));
+  }
+  if ((shape.pairwiseCount || 0) !== 0 || (shape.criticCount || 0) !== 0) {
+    throw new Error('Move-44 exhausted rescue must skip Pairwise/Critic');
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1693,6 +1941,11 @@ function testCoordinateHelpers() {
   }
 }
 
+await testRealGameMove44M7WorkerAudit();
+await testRealGameMove44ProductionRescueAudit();
+await testRealGameMove36CounterfactualThreatAudit();
+await testRealGameMove44AllMainLossTriggersRescueSweep();
+await testRealGameMove42ProofBoundary();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
