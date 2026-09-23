@@ -2423,7 +2423,6 @@
 
   function directDoubleOpenThreeCreators(color, radius = 2, maxCount = Infinity) {
     const movesFound = [];
-    const defender = otherColor(color);
     for (const move of nearbyMoves(radius)) {
       if (!isLegalMoveForColor(move.r, move.c, color)) continue;
       board[move.r][move.c] = color;
@@ -2431,10 +2430,9 @@
       try {
         if (isWin(move.r, move.c, color)) continue;
         const profile = threatPatternProfilePlaced(move.r, move.c, color);
-        // A true double-open-three creator must open at least two independent
-        // axes and must not simply hand the defender an immediate win.
+        // Recall only: keep this main-thread scan cheap. Counter-forcing
+        // resources are verified later by the Threat Worker before filtering.
         if (profile.openThreeDirections < 2) continue;
-        if (immediateWins(defender, radius).length) continue;
         row = {
           ...move,
           openThreeDirections: profile.openThreeDirections,
