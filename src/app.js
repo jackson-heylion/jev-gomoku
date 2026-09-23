@@ -3477,6 +3477,89 @@
     return filtered.slice(0, maxCandidateLimit());
   }
 
+  function mergeThreatAnalysis(primary, supplemental) {
+    if (!primary) return supplemental || null;
+    if (!supplemental) return primary;
+    const byMove = new Map();
+    for (const row of primary.analyses || []) byMove.set(row.move, row);
+    for (const row of supplemental.analyses || []) byMove.set(row.move, row);
+    return {
+      ...primary,
+      status: primary.status === 'completed' && supplemental.status === 'completed'
+        ? 'completed'
+        : primary.status || supplemental.status || 'unavailable',
+      timedOut: Boolean(primary.timedOut || supplemental.timedOut),
+      elapsedMs: (Number(primary.elapsedMs) || 0) + (Number(supplemental.elapsedMs) || 0),
+      budgetMs: (Number(primary.budgetMs) || 0) + (Number(supplemental.budgetMs) || 0),
+      nodes: (Number(primary.nodes) || 0) + (Number(supplemental.nodes) || 0),
+      analyses: [...byMove.values()],
+      supplemental: {
+        trigger: supplemental.trigger || null,
+        status: supplemental.status || null,
+        timedOut: Boolean(supplemental.timedOut),
+        elapsedMs: supplemental.elapsedMs ?? null,
+        budgetMs: supplemental.budgetMs ?? null,
+        candidates: (supplemental.analyses || []).map(row => row.move)
+      }
+    };
+  }
+
+  function hasCompletedThreatEvidence(threatAnalysis, key) {
+    const row = threatEvidenceForMove(threatAnalysis, key);
+    return Boolean(row && !row.timedOut);
+  }
+
+  async function closeMaxThreatCoverage(candidates, provisionalTop4, threatAnalysis) {
+    const promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+    if (!promotedNeedsProof) {
+      return {
+        candidates,
+        threatAnalysis,
+        supplemental: null,
+        rejectedIncomplete: []
+      };
+    }
+
+    // Initial Threat Search intentionally checks at most six candidates. If
+    // Atomic promotes #7/#8 into Top 4, validate all remaining unvetted main
+    // candidates in one bounded supplemental batch (normally at most two).
+    const unvetted = candidates
+      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key))
+      .slice(0, 2);
+    if (!unvetted.length) {
+      return {
+        candidates,
+        threatAnalysis,
+        supplemental: null,
+        rejectedIncomplete: []
+      };
+    }
+
+    updateApiState('busy', 'Jev Max：校验 Atomic 晋级候选的 Threat 安全性…');
+    const supplemental = await runThreatWorkerAnalysis(
+      unvetted,
+      'max',
+      'jev_max_atomic_promotion_validation',
+      { timeBudgetMs: 850, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 8 }
+    );
+    const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
+    attachThreatEvidence(candidates, merged);
+
+    const rejectedIncomplete = unvetted
+      .filter(move => !hasCompletedThreatEvidence(merged, move.key))
+      .map(move => move.key);
+    const rejectedSet = new Set(rejectedIncomplete);
+    const covered = candidates.filter(move => !rejectedSet.has(move.key));
+    const filtered = hardFilterMaxCandidates(covered, merged);
+
+    return {
+      candidates: filtered,
+      threatAnalysis: merged,
+      supplemental,
+      rejectedIncomplete
+    };
+  }
+
   function threatEvidenceForMove(threatAnalysis, key) {
     return (threatAnalysis?.analyses || []).find(item => item.move === key) || null;
   }
@@ -3947,10 +4030,11 @@
     const deepCandidates = candidates.slice(0, Math.min(5, candidates.length));
     const threatCandidates = candidates.slice(0, Math.min(6, candidates.length));
     updateApiState('busy', 'Jev Max：Deep 与 Threat Worker 并行准备证据…');
-    const [deepAnalysis, threatAnalysis] = await Promise.all([
+    const [deepAnalysis, initialThreatAnalysis] = await Promise.all([
       runDeepWorkerVerification(deepCandidates, 'max', 'jev_max_parallel'),
       runThreatWorkerAnalysis(threatCandidates, 'max', 'jev_max_parallel')
     ]);
+    let threatAnalysis = initialThreatAnalysis;
 
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
@@ -3975,9 +4059,18 @@
     updateApiState('busy', 'Jev Max：Atomic 独立评估候选…');
     const atomicData = await callJev(atomicPayload);
     const atomic = atomicTraceFor(candidates, atomicData?.answers || {});
+    const atomicCandidateCount = candidates.length;
     const recallChoice = String(atomicData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
 
-    const atomicTop4 = [...candidates]
+    let atomicTop4 = [...candidates]
+      .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
+        || (a.localRank || 999) - (b.localRank || 999))
+      .slice(0, Math.min(4, candidates.length));
+
+    const coverage = await closeMaxThreatCoverage(candidates, atomicTop4, threatAnalysis);
+    candidates = coverage.candidates;
+    threatAnalysis = coverage.threatAnalysis;
+    atomicTop4 = [...candidates]
       .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
         || (a.localRank || 999) - (b.localRank || 999))
       .slice(0, Math.min(4, candidates.length));
@@ -4142,11 +4235,17 @@
           }))
         } : null,
         preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
+        threatCoverage: {
+          supplementalTriggered: Boolean(coverage.supplemental),
+          supplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
+          rejectedIncomplete: coverage.rejectedIncomplete,
+          elapsedMs: coverage.supplemental?.elapsedMs ?? null
+        },
         finalDecision: finalData ? compactAnswer(answer) : null,
         requestShape: {
           decisionAuthority: finalData ? 'jev_max_final' : 'jev_max_pairwise_convergence',
           candidateCount: candidates.length,
-          atomicCount: candidates.length,
+          atomicCount: atomicCandidateCount,
           pairwiseCount: tournament.pairs.length * 2,
           criticCount: atomicTop4.length,
           finalistCount: finalists.length,
@@ -4161,6 +4260,9 @@
           localSearchTimedOut: Boolean(context.localSearch?.timedOut),
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
           threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
+          threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
+          threatSupplementalCandidates: coverage.supplemental?.analyses?.map(row => row.move) || [],
+          threatCoverageRejectedIncomplete: coverage.rejectedIncomplete,
           threatFilterCount: context.candidates.length - candidates.length
         },
         localEvidence: finalCandidates.map(move => ({
