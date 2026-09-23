@@ -4159,50 +4159,78 @@
     return Boolean(row && !row.timedOut);
   }
 
-  async function closeMaxThreatCoverage(candidates, provisionalTop4, threatAnalysis) {
-    const promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+  async function closeMaxThreatCoverage(candidates, provisionalTop4, threatAnalysis, speculativeThreatPromise = null) {
+    let merged = threatAnalysis;
+    let speculative = null;
+    let promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(merged, move.key));
     if (!promotedNeedsProof) {
       return {
         candidates,
-        threatAnalysis,
+        threatAnalysis: merged,
+        speculative: null,
         supplemental: null,
         rejectedIncomplete: []
       };
     }
 
-    // Initial Threat Search intentionally checks at most six candidates. If
-    // Atomic promotes #7/#8 into Top 4, validate all remaining unvetted main
-    // candidates in one bounded supplemental batch (normally at most two).
+    // Tail validation is queued as soon as the initial Deep/Threat pair starts.
+    // With the two-slot persistent pool it begins the moment either primary
+    // worker becomes idle, so Atomic usually does not create a new wait bubble.
+    if (speculativeThreatPromise) {
+      try {
+        speculative = await speculativeThreatPromise;
+      } catch (_) {
+        speculative = null;
+      }
+      if (speculative) {
+        merged = mergeThreatAnalysis(merged, speculative);
+        attachThreatEvidence(candidates, merged);
+        const filtered = hardFilterMaxCandidates(candidates, merged);
+        provisionalTop4 = provisionalTop4.filter(move =>
+          filtered.some(item => item.key === move.key)
+        );
+        promotedNeedsProof = provisionalTop4.some(move => !hasCompletedThreatEvidence(merged, move.key));
+        if (!promotedNeedsProof) {
+          return {
+            candidates: filtered,
+            threatAnalysis: merged,
+            speculative,
+            supplemental: null,
+            rejectedIncomplete: []
+          };
+        }
+        candidates = filtered;
+      }
+    }
+
     const missingTop = provisionalTop4
-      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+      .filter(move => !hasCompletedThreatEvidence(merged, move.key));
     const missingAll = candidates
-      .filter(move => !hasCompletedThreatEvidence(threatAnalysis, move.key));
+      .filter(move => !hasCompletedThreatEvidence(merged, move.key));
     const unvetted = [...new Map(
       [...missingTop, ...missingAll].map(move => [move.key, move])
     ).values()].slice(0, 2);
+
     if (!unvetted.length) {
       return {
         candidates,
-        threatAnalysis,
+        threatAnalysis: merged,
+        speculative,
         supplemental: null,
         rejectedIncomplete: []
       };
     }
 
-    updateApiState('busy', 'Jev Max：校验 Atomic 晋级候选的 Threat 安全性…');
+    updateApiState('busy', 'Jev Max：补齐晋级候选的 Threat 安全性…');
     const supplemental = await runThreatWorkerAnalysis(
       unvetted,
       'max',
       'jev_max_atomic_promotion_validation',
       { timeBudgetMs: 850, maxThreatTurns: moves.length < 10 ? 4 : 6, branch: 8 }
     );
-    const merged = mergeThreatAnalysis(threatAnalysis, supplemental);
+    merged = mergeThreatAnalysis(merged, supplemental);
     attachThreatEvidence(candidates, merged);
 
-    // Once coverage closure is triggered, missing evidence is never allowed to
-    // become a comparative advantage. Candidates still lacking a completed
-    // Threat result are fail-closed before Pairwise, even if the 2-candidate
-    // supplemental budget could not reach all of them.
     const rejectedIncomplete = candidates
       .filter(move => !hasCompletedThreatEvidence(merged, move.key))
       .map(move => move.key);
@@ -4213,6 +4241,7 @@
     return {
       candidates: filtered,
       threatAnalysis: merged,
+      speculative,
       supplemental,
       rejectedIncomplete
     };
