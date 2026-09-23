@@ -389,6 +389,7 @@ function engineClientTrace(result) {
       threatSupplementalElapsedMs: shape.threatSupplementalElapsedMs ?? null,
       threatSupplementalCandidates: shape.threatSupplementalCandidates ?? [],
       threatCoverageRejectedIncomplete: shape.threatCoverageRejectedIncomplete ?? [],
+      pairwiseThreatCoverageComplete: shape.pairwiseThreatCoverageComplete ?? null,
       payloadEstimatedInputTokens: shape.payloadEstimatedInputTokens ?? null,
       localSearchElapsedMs: shape.localSearchElapsedMs ?? null,
       deepElapsedMs: shape.deepElapsedMs ?? null,
@@ -864,6 +865,20 @@ function accumulate(volume, record, options) {
           kind: 'jev_max_unbounded_analysis',
           ply: record.ply,
           detail: 'atomic=' + shape.atomicCount + ' pairwise=' + shape.pairwiseCount + ' critic=' + shape.criticCount
+        });
+      }
+      if ((shape.threatSupplementalCandidates || []).length > 2) {
+        volume.violations.push({
+          kind: 'jev_max_threat_supplemental_limit',
+          ply: record.ply,
+          detail: 'supplemental candidates=' + JSON.stringify(shape.threatSupplementalCandidates)
+        });
+      }
+      if (shape.pairwiseThreatCoverageComplete === false) {
+        volume.violations.push({
+          kind: 'jev_max_pairwise_threat_coverage',
+          ply: record.ply,
+          detail: 'Pairwise received a candidate without completed Threat evidence'
         });
       }
       if ((shape.maxWorkers || 0) > 2) {
