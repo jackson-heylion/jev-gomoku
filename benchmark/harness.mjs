@@ -198,6 +198,7 @@ function injectBenchmarkHook(source) {
     "    normalizeDeepRow(row, analysis) { return deepRowForJev(row, analysis); },",
     "    maxAtomicPayload(mode) { const context = buildAdvancedCandidates(mode || 'max'); return buildMaxAtomicPayload(context, context.candidates); },",
     "    maxPairwisePayload(mode) { const context = buildAdvancedCandidates(mode || 'max'); const candidates = context.candidates.slice(0, 4); return buildPairwisePayload(candidates); },",
+    "    maxSpeculativePayload(mode) { const context = buildAdvancedCandidates(mode || 'max'); const candidates = context.candidates; const pool = candidates.slice(0, Math.min(6, candidates.length)); return buildMaxSpeculativePayload(context, candidates, pool, extraWildcardPool(candidates, 12, new Set())).payload; },",
     "    deepAnalyze(keys, mode) {",
     "      const candidates = (keys || []).map(key => { const point = parseCoord(key); return point ? { ...point, key } : null; }).filter(Boolean);",
     "      return runDeepWorkerVerification(candidates, mode || 'grandmaster', 'regression_position');",
