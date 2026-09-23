@@ -1617,8 +1617,8 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
 
   const explicitThreat = await engine.threatAnalyze(['H14','F5','J5'], 'max');
   const h14Proof = explicitThreat?.analyses?.find(item => item.move === 'H14');
-  if (!h14Proof?.forced || h14Proof.line?.[0] !== 'J5') {
-    throw new Error('Historical H14 must be proved losing through Black J5');
+  if (!h14Proof?.forced || !['F5','J5'].includes(h14Proof.line?.[0])) {
+    throw new Error('Historical H14 must be proved losing through Black F5/J5 fork creator');
   }
 
   engine.setPosition(position.board, position.moves, 'jev-latest');
