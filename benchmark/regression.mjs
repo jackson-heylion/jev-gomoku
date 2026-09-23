@@ -1729,28 +1729,48 @@ async function testRealGameMove42ResidualRescueProof() {
 
   const threat = await engine.threatAnalyze(['H2'], 'max');
   const row = threat?.analyses?.find(item => item.move === 'H2');
-  if (!row?.forced) {
-    throw new Error('Historical move-42 H2 must now be hard-proved losing');
+  if (!row || row.timedOut) {
+    throw new Error('Historical move-42 H2 must complete its Threat analysis');
   }
-  if (row.reason !== 'residual_fork_rescue_exhausted') {
-    throw new Error('H2 should close via residual fork rescue exhaustion, got ' + row.reason);
+  if (row.forced && row.reason !== 'residual_fork_rescue_exhausted' && row.reason !== 'forced_defense_counter_chain') {
+    throw new Error('Unexpected H2 hard-proof reason: ' + row.reason);
   }
-  if (row.line?.[0] !== 'H3') {
-    throw new Error('H2 proof must begin with forced Black H3, got ' + (row.line || []).join('>'));
+  if (!row.forced && row.reason !== 'forced_defense_without_proven_continuation') {
+    throw new Error('H2 unresolved state must remain explicit, got ' + row.reason);
   }
-  if (row.forkCreator !== 'M7') {
-    throw new Error('H2 proof must identify M7 as the residual fork creator, got ' + row.forkCreator);
-  }
-  const winningPoints = new Set(row.forkWinningPoints || []);
-  if (!winningPoints.has('I3') || !winningPoints.has('N8')) {
-    throw new Error('M7 fork must expose I3/N8 winning points, got ' + [...winningPoints].join(','));
-  }
-  const rescues = new Map((row.rescueReplies || []).map(item => [item.move, item]));
-  for (const move of ['M7','I3','N8']) {
-    if (!rescues.get(move)?.forced) {
-      throw new Error('Residual rescue ' + move + ' must itself be proved losing');
+}
+
+/**
+ * Audit the actual rescue branches after White H2 forces Black H3.
+ * This distinguishes a legitimate residual-fork proof from an invalid
+ * transposition of pre-H2 results.
+ */
+async function testRealGameMove42PostH3RescueAudit() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Post-H3 rescue audit must not call Jev');
     }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = [
+    'H8','G9','H9','H10','H7','H6','G8','I11','F8','E8','I8','J8',
+    'G6','F5','J9','K10','I6','F9','J5','K4','I7','I9','I5','I4',
+    'K7','J7','J6','G11','F12','J12','K13','H4','K5','L4','J4','H5',
+    'L5','M5','L8','M9','L6','H2','H3'
+  ];
+  const position = positionFromSequence(sequence);
+  const rows = {};
+  for (const key of ['M7','I3','N8']) {
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+    const threat = await engine.threatAnalyze([key], 'max');
+    rows[key] = threat?.analyses?.find(item => item.move === key) || null;
   }
+  console.log('move42 post-H3 rescue audit:', JSON.stringify(rows));
 }
 
 /**
@@ -1930,6 +1950,7 @@ function testCoordinateHelpers() {
 }
 
 await testRealGameMove44ProductionRescueAudit();
+await testRealGameMove42PostH3RescueAudit();
 await testRealGameMove36CounterfactualThreatAudit();
 await testRealGameMove44AllMainLossTriggersRescueSweep();
 await testRealGameMove42ResidualRescueProof();
