@@ -401,7 +401,7 @@ export async function loadProductionEngine({ request, appPath, deepWorker = 'thr
   const context = vm.createContext(sandbox);
   vm.runInContext(transformed, context, {
     filename: resolvedAppPath,
-    timeout: 5000
+    timeout: 10000
   });
 
   const engine = context.__JEV_GOMOKU_BENCH__;
