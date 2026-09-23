@@ -1565,7 +1565,7 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
           choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
         } else if (id.startsWith('judge_')) {
           const move = id.slice('judge_'.length);
-          choice = move === 'H14' && keys.includes('EXCELLENT')
+          choice = move === 'D11' && keys.includes('EXCELLENT')
             ? 'EXCELLENT'
             : ['F5','J5'].includes(move) && keys.includes('GOOD')
               ? 'GOOD'
@@ -1596,53 +1596,56 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
     fourFour: false,
     threeThree: false
   });
+  // Position before White 28 D11 in the supplied 37-ply loss. Black already
+  // owns G5-H5-I5, so F5/J5 are the direct defensive family. D11 was candidate
+  // #8 and skipped the initial six-candidate Threat batch.
   const sequence = [
     'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
-    'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12','E14','E13','G14','F13'
+    'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9'
   ];
   const position = positionFromSequence(sequence);
   engine.setPosition(position.board, position.moves, 'jev-latest');
 
   const context = engine.candidates('max');
-  const h14Candidate = context.candidates.find(move => move.key === 'H14');
-  if (!h14Candidate) {
-    throw new Error('Historical H14 must remain in heterogeneous recall so coverage closure can test it');
+  const d11Candidate = context.candidates.find(move => move.key === 'D11');
+  if (!d11Candidate) {
+    throw new Error('Historical D11 must remain in heterogeneous recall so coverage closure can test it');
   }
   if (
-    h14Candidate.analysis?.facts?.tactical_verification === 'BUDGET_EXHAUSTED'
-    && h14Candidate.analysis?.facts?.tactical_safety === 'SAFE'
+    d11Candidate.analysis?.facts?.tactical_verification === 'BUDGET_EXHAUSTED'
+    && d11Candidate.analysis?.facts?.tactical_safety === 'SAFE'
   ) {
     throw new Error('Budget-exhausted tactical analysis must never be labelled SAFE');
   }
 
-  const explicitThreat = await engine.threatAnalyze(['H14','F5','J5'], 'max');
-  const h14Proof = explicitThreat?.analyses?.find(item => item.move === 'H14');
-  if (!h14Proof?.forced || !['F5','J5'].includes(h14Proof.line?.[0])) {
-    throw new Error('Historical H14 must be proved losing through Black F5/J5 fork creator');
+  const explicitThreat = await engine.threatAnalyze(['D11','F5','J5'], 'max');
+  const d11Proof = explicitThreat?.analyses?.find(item => item.move === 'D11');
+  if (!d11Proof?.forced || !['F5','J5'].includes(d11Proof.line?.[0])) {
+    throw new Error('Historical D11 must be proved losing through Black F5/J5 fork creator');
   }
 
   engine.setPosition(position.board, position.moves, 'jev-latest');
   const result = await engine.jevMax();
-  if (result.finalChoice === 'H14') {
-    throw new Error('Unvetted H14 survived Threat coverage closure into Final');
+  if (result.finalChoice === 'D11') {
+    throw new Error('Unvetted D11 survived Threat coverage closure into Final');
   }
 
   const coverage = result.decisionTrace?.threatCoverage;
-  if (!coverage?.supplementalTriggered || !(coverage.supplementalCandidates || []).includes('H14')) {
-    throw new Error('Atomic-promoted H14 did not trigger supplemental Threat validation');
+  if (!coverage?.supplementalTriggered || !(coverage.supplementalCandidates || []).includes('D11')) {
+    throw new Error('Atomic-promoted D11 did not trigger supplemental Threat validation');
   }
-  const h14Merged = result.decisionTrace?.preJevThreatSearch?.analyses?.find(item => item.move === 'H14');
-  if (!h14Merged?.forced) {
-    throw new Error('Supplemental Threat proof for H14 was not merged into final evidence');
+  const d11Merged = result.decisionTrace?.preJevThreatSearch?.analyses?.find(item => item.move === 'D11');
+  if (!d11Merged?.forced) {
+    throw new Error('Supplemental Threat proof for D11 was not merged into final evidence');
   }
 
   const pairwisePayload = captured[1];
-  if (pairwisePayload?.state?.candidate_facts?.H14) {
-    throw new Error('Threat-proved H14 reached Pairwise candidate_facts');
+  if (pairwisePayload?.state?.candidate_facts?.D11) {
+    throw new Error('Threat-proved D11 reached Pairwise candidate_facts');
   }
   for (const question of Object.values(pairwisePayload?.questions || {})) {
-    if (Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'H14')) {
-      throw new Error('Threat-proved H14 reached a Pairwise/Critic choice question');
+    if (Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'D11')) {
+      throw new Error('Threat-proved D11 reached a Pairwise/Critic choice question');
     }
   }
 
