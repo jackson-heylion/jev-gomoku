@@ -9,6 +9,8 @@ const ENTRY = path.join(HERE, 'deep-worker-thread.mjs');
  * Minimal browser-compatible Worker facade backed by node:worker_threads.
  * Only the surface used by `src/app.js` is implemented:
  * `constructor(url, options)`, `onmessage`, `onerror`, `postMessage`, `terminate`.
+ * The optional `ref/unref` methods mirror Node worker_threads so the production
+ * persistent pool can keep a worker alive only while a benchmark task is active.
  */
 export function createBrowserWorkerClass() {
   return class BrowserWorker {
@@ -43,6 +45,14 @@ export function createBrowserWorkerClass() {
     postMessage(message) {
       if (this._terminated) return;
       this._thread.postMessage(message);
+    }
+
+    ref() {
+      if (!this._terminated) this._thread.ref();
+    }
+
+    unref() {
+      if (!this._terminated) this._thread.unref();
     }
 
     terminate() {
