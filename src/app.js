@@ -3661,7 +3661,7 @@
       } catch (error) {
         resetHeavyWorker(slot);
         job.resolve(job.onError(error));
-        queueMicrotask(pumpHeavyWorkerQueue);
+        Promise.resolve().then(pumpHeavyWorkerQueue);
         continue;
       }
 
@@ -3675,7 +3675,7 @@
         if (reset) resetHeavyWorker(slot);
         else slot.busy = false;
         job.resolve(result);
-        queueMicrotask(pumpHeavyWorkerQueue);
+        Promise.resolve().then(pumpHeavyWorkerQueue);
       };
 
       const timer = setTimeout(() => {
