@@ -837,7 +837,7 @@ function runSearch(message) {
   if (!candidates.length) throw new Error('No legal deep-search candidates');
 
   const started = performance.now();
-  const budgetMs = Math.max(250, Math.min(5000, Number(message.timeBudgetMs) || 1800));
+  const budgetMs = Math.max(250, Math.min(10000, Number(message.timeBudgetMs) || 3600));
   deadline = started + budgetMs;
 
   const maxDepth = Math.max(3, Math.min(8, Number(message.maxDepth) || 7));
@@ -1258,7 +1258,7 @@ function runThreatSearch(message) {
   if (!candidates.length) throw new Error('No legal threat-search candidates');
 
   const started = performance.now();
-  const budgetMs = Math.max(250, Math.min(4000, Number(message.timeBudgetMs) || 1200));
+  const budgetMs = Math.max(250, Math.min(8000, Number(message.timeBudgetMs) || 2400));
   const maxThreatTurns = Math.max(2, Math.min(8, Number(message.maxThreatTurns) || 6));
   const branch = Math.max(4, Math.min(10, Number(message.branch) || 8));
   const radius = 2;
