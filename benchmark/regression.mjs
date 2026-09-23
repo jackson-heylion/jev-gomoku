@@ -1926,6 +1926,114 @@ async function testRealGameMove44ProductionRescueAudit() {
   }
 }
 
+/**
+ * A consecutive diagonal three can become a double-ended open four in one move.
+ * Local/Threat deterministic evidence must veto unrelated Jev overrides.
+ *
+ * Black: D4-E5-F6, White to move. If White ignores both C3 and G7, Black can
+ * play either endpoint and create two legal immediate winning points.
+ */
+async function testDiagonalOpenThreeDirectDoubleWinVeto() {
+  const captured = [];
+  let requests = 0;
+  const defensive = new Set(['C3', 'G7']);
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      captured.push(payload);
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Diagonal-three mock question has no choices: ' + id);
+
+        let choice;
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = defensive.has(move) && keys.includes('GOOD')
+            ? 'GOOD'
+            : keys.includes('EXCELLENT') ? 'EXCELLENT' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'best_move') {
+          const unrelated = keys.find(key => !defensive.has(key));
+          choice = unrelated || keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else {
+          choice = keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-diagonal-veto',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence(['D4','A15','E5','A14','F6']);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  for (const key of defensive) {
+    const move = context.candidates.find(item => item.key === key);
+    if (!move) throw new Error('Direct open-four defense ' + key + ' missing from Jev Max recall');
+    if (!(move.recallSources || []).includes('DIRECT_OPEN_FOUR_BLOCK')) {
+      throw new Error('Direct open-four defense ' + key + ' missing DIRECT_OPEN_FOUR_BLOCK source');
+    }
+  }
+
+  const unrelated = context.candidates.filter(item => !defensive.has(item.key));
+  if (!unrelated.length) {
+    throw new Error('Regression needs at least one unrelated candidate for Jev override pressure');
+  }
+  for (const move of unrelated) {
+    if (move.analysis?.facts?.tactical_safety !== 'LOSING') {
+      throw new Error('Ignoring diagonal open-three must be hard LOSING: ' + move.key
+        + ' safety=' + move.analysis?.facts?.tactical_safety);
+    }
+    if (move.analysis?.facts?.opponent_direct_double_win_creators_after_move === 'NONE') {
+      throw new Error('Missing direct double-win evidence for unsafe candidate ' + move.key);
+    }
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (!defensive.has(result.finalChoice)) {
+    throw new Error('Jev overrode direct open-four defense with ' + result.finalChoice);
+  }
+
+  for (const payload of captured) {
+    const candidateFacts = payload?.state?.candidate_facts || {};
+    for (const key of Object.keys(candidateFacts)) {
+      if (!defensive.has(key)) {
+        throw new Error('Hard-losing diagonal-three ignore move reached Jev candidate_facts: ' + key);
+      }
+    }
+    for (const [id, question] of Object.entries(payload?.questions || {})) {
+      if (id.startsWith('duel_') || id === 'best_move') {
+        for (const key of Object.keys(question?.criteria || {})) {
+          if (!defensive.has(key)) {
+            throw new Error('Hard-losing diagonal-three ignore move reached Jev choice: ' + key);
+          }
+        }
+      }
+    }
+  }
+
+  if (requests > 3) {
+    throw new Error('Diagonal-three veto changed Jev Max request cap: ' + requests);
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1947,6 +2055,7 @@ await testRealGameMove44ProductionRescueAudit();
 await testRealGameMove36CounterfactualThreatAudit();
 await testRealGameMove44AllMainLossTriggersRescueSweep();
 await testRealGameMove42ProofBoundary();
+await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
