@@ -1799,7 +1799,98 @@
     }
   };
   const MATE_SCORE = 1e14;
+  const LOCAL_TT_MAX_ENTRIES = 50000;
+  const LOCAL_TT_KEEP_GENERATIONS = 4;
+  const localTranspositionTable = new Map();
+  let localTtGeneration = 0;
+  let localHashA = 0;
+  let localHashB = 0;
   let activeLocalSearch = null;
+
+  function localMix32(value) {
+    let x = value >>> 0;
+    x ^= x >>> 16;
+    x = Math.imul(x, 0x7feb352d);
+    x ^= x >>> 15;
+    x = Math.imul(x, 0x846ca68b);
+    x ^= x >>> 16;
+    return x >>> 0;
+  }
+
+  function localHashStone(r, c, color, salt) {
+    return localMix32((((r * SIZE + c + 1) * 3 + color) ^ salt) >>> 0);
+  }
+
+  function toggleLocalHash(r, c, color) {
+    localHashA = (localHashA ^ localHashStone(r, c, color, 0x9e3779b9)) >>> 0;
+    localHashB = (localHashB ^ localHashStone(r, c, color, 0x85ebca6b)) >>> 0;
+  }
+
+  function initializeLocalHash() {
+    localHashA = 0;
+    localHashB = 0;
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        const color = board[r][c];
+        if (color !== EMPTY) toggleLocalHash(r, c, color);
+      }
+    }
+  }
+
+  function localSearchPlay(move, color) {
+    board[move.r][move.c] = color;
+    toggleLocalHash(move.r, move.c, color);
+  }
+
+  function localSearchUndo(move, color) {
+    toggleLocalHash(move.r, move.c, color);
+    board[move.r][move.c] = EMPTY;
+  }
+
+  function localRuleSignature() {
+    const rules = activeRuleConfig();
+    return `${rules.overline ? 1 : 0}${rules.fourFour ? 1 : 0}${rules.threeThree ? 1 : 0}`;
+  }
+
+  function localTtKey(toMove, cfg) {
+    return `${aiColor()}:${toMove}:${localRuleSignature()}:${cfg.branch}:${cfg.radius}:${localHashA}:${localHashB}`;
+  }
+
+  function pruneLocalTranspositionTable() {
+    if (localTranspositionTable.size <= LOCAL_TT_MAX_ENTRIES) return;
+    const minGeneration = Math.max(0, localTtGeneration - LOCAL_TT_KEEP_GENERATIONS);
+    for (const [key, entry] of localTranspositionTable) {
+      if ((entry?.generation ?? 0) < minGeneration) localTranspositionTable.delete(key);
+      if (localTranspositionTable.size <= LOCAL_TT_MAX_ENTRIES) return;
+    }
+    if (localTranspositionTable.size <= LOCAL_TT_MAX_ENTRIES) return;
+    const ranked = [...localTranspositionTable.entries()].sort((a, b) =>
+      (a[1]?.depth || 0) - (b[1]?.depth || 0)
+      || (a[1]?.generation || 0) - (b[1]?.generation || 0)
+    );
+    const removeCount = localTranspositionTable.size - LOCAL_TT_MAX_ENTRIES;
+    for (let i = 0; i < removeCount; i++) localTranspositionTable.delete(ranked[i][0]);
+  }
+
+  function localTtPut(key, entry) {
+    const previous = localTranspositionTable.get(key);
+    if (!previous || entry.depth >= previous.depth || entry.flag === 'EXACT') {
+      localTranspositionTable.set(key, {
+        ...entry,
+        generation: localTtGeneration
+      });
+    } else {
+      previous.generation = localTtGeneration;
+    }
+    if (localTranspositionTable.size > LOCAL_TT_MAX_ENTRIES + 1024) pruneLocalTranspositionTable();
+  }
+
+  function prioritizeLocalMove(candidates, key) {
+    if (!key) return candidates;
+    const index = candidates.findIndex(move => move.key === key);
+    if (index <= 0) return candidates;
+    return [candidates[index], ...candidates.slice(0, index), ...candidates.slice(index + 1)];
+  }
 
   function beginLocalSearchBudget(cfg) {
     const startedAt = performance.now();
@@ -2161,68 +2252,109 @@
       .slice(0, limit);
   }
 
+  // VCF/VCT keep their compact deterministic memo key. Alpha-Beta below uses
+  // the incremental Zobrist TT instead, so it no longer serializes 225 cells
+  // at every search node.
   function boardCacheKey(toMove, depth) {
     let key = `${toMove}:${depth}:`;
     for (let r = 0; r < SIZE; r++) key += board[r].join('');
     return key;
   }
 
-  function alphaBeta(depth, alpha, beta, toMove, cfg, cache) {
+  function alphaBeta(depth, alpha, beta, toMove, cfg) {
     if (depth <= 0 || localSearchExpired()) return evaluateStatic();
-    const key = boardCacheKey(toMove, depth);
-    if (cache.has(key)) return cache.get(key);
+
+    const key = localTtKey(toMove, cfg);
+    const alphaStart = alpha;
+    const betaStart = beta;
+    const cached = localTranspositionTable.get(key);
+    if (cached) {
+      cached.generation = localTtGeneration;
+      if (cached.depth >= depth) {
+        if (cached.flag === 'EXACT') return cached.value;
+        if (cached.flag === 'LOWER') alpha = Math.max(alpha, cached.value);
+        else if (cached.flag === 'UPPER') beta = Math.min(beta, cached.value);
+        if (alpha >= beta) return cached.value;
+      }
+    }
 
     const immediate = immediateWins(toMove, cfg.radius);
     if (immediate.length) {
       const score = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
-      cache.set(key, score);
+      localTtPut(key, {
+        depth,
+        value: score,
+        flag: 'EXACT',
+        bestMove: immediate[0]?.key || null
+      });
       return score;
     }
 
     const limit = Math.max(4, cfg.branch - Math.max(0, cfg.depth - depth - 1));
-    const candidates = orderedMoves(toMove, limit, cfg.radius);
+    const candidates = prioritizeLocalMove(
+      orderedMoves(toMove, limit, cfg.radius),
+      cached?.bestMove || null
+    );
     if (!candidates.length) return evaluateStatic();
 
-    let value = toMove === aiColor() ? -Infinity : Infinity;
+    const maximizing = toMove === aiColor();
+    let value = maximizing ? -Infinity : Infinity;
+    let bestMove = candidates[0]?.key || null;
     let explored = 0;
+
     for (const m of candidates) {
       if (localSearchExpired()) break;
       explored++;
-      board[m.r][m.c] = toMove;
+      localSearchPlay(m, toMove);
       let child;
       if (isWin(m.r, m.c, toMove)) {
-        child = toMove === aiColor() ? MATE_SCORE + depth : -MATE_SCORE - depth;
+        child = maximizing ? MATE_SCORE + depth : -MATE_SCORE - depth;
       } else {
-        child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), cfg, cache);
+        child = alphaBeta(depth - 1, alpha, beta, otherColor(toMove), cfg);
       }
-      board[m.r][m.c] = EMPTY;
+      localSearchUndo(m, toMove);
 
-      if (toMove === aiColor()) {
-        if (child > value) value = child;
+      if (maximizing) {
+        if (child > value) {
+          value = child;
+          bestMove = m.key;
+        }
         if (value > alpha) alpha = value;
       } else {
-        if (child < value) value = child;
+        if (child < value) {
+          value = child;
+          bestMove = m.key;
+        }
         if (value < beta) beta = value;
       }
       if (beta <= alpha) break;
     }
+
     if (!explored) return evaluateStatic();
-    cache.set(key, value);
+
+    let flag = 'EXACT';
+    if (value <= alphaStart) flag = 'UPPER';
+    else if (value >= betaStart) flag = 'LOWER';
+    localTtPut(key, { depth, value, flag, bestMove });
     return value;
   }
 
-  function scoreRootMove(move, cfg, cache) {
+  function scoreRootMove(move, cfg) {
     const side = aiColor();
     const opponent = otherColor(side);
-    board[move.r][move.c] = side;
+    // scoreRootMove is also used by benchmark/synchronous fallback paths, so
+    // initialize from the actual board at the root instead of assuming a caller
+    // has already seeded the incremental hash.
+    initializeLocalHash();
+    localSearchPlay(move, side);
     let score;
     if (isWin(move.r, move.c, side)) {
       score = MATE_SCORE * 10;
     } else {
-      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, opponent, cfg, cache);
+      score = alphaBeta(cfg.depth - 1, -Infinity, Infinity, opponent, cfg);
       score += evaluateStatic() * .035;
     }
-    board[move.r][move.c] = EMPTY;
+    localSearchUndo(move, side);
     return score;
   }
 
@@ -2580,10 +2712,14 @@
 
   function scoreRootsWithinLocalBudget(roots, cfg, runtime) {
     const side = aiColor();
+    localTtGeneration++;
+    pruneLocalTranspositionTable();
+
     let completed = roots.map(move => ({
       ...move,
       searchScore: quickMoveScore(move, side)
     }));
+    let rootOrder = [...completed];
     let depthReached = 0;
 
     const startDepth = Math.min(cfg.depth, 3);
@@ -2594,10 +2730,13 @@
       }
 
       const depthCfg = { ...cfg, depth };
-      const cache = new Map();
       const iteration = [];
       let complete = true;
-      for (const move of roots) {
+
+      // Preserve the previous completed iteration's PV/root ordering. Combined
+      // with TT best-move ordering this improves cutoffs without reducing any
+      // depth, branch width, or tactical candidate coverage.
+      for (const move of rootOrder) {
         if (localSearchExpired()) {
           complete = false;
           runtime.rootTimedOut = true;
@@ -2605,16 +2744,21 @@
         }
         iteration.push({
           ...move,
-          searchScore: scoreRootMove(move, depthCfg, cache)
+          searchScore: scoreRootMove(move, depthCfg)
         });
       }
+
       if (!complete) break;
+      iteration.sort((a, b) => b.searchScore - a.searchScore);
       completed = iteration;
+      rootOrder = iteration;
       depthReached = depth;
       runtime.depthReached = depth;
     }
 
     if (!depthReached && cfg.depth < 3) runtime.depthReached = cfg.depth;
+    runtime.transpositionEntries = localTranspositionTable.size;
+    runtime.transpositionGeneration = localTtGeneration;
     return completed.sort((a, b) => b.searchScore - a.searchScore);
   }
 
