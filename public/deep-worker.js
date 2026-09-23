@@ -1038,12 +1038,10 @@ function directForkCreator(color, radius = 2) {
     let result = null;
     try {
       if (isWin(move.r, move.c, color)) continue;
-      const profile = threatPatternProfilePlaced(move.r, move.c, color);
-      if (profile.winningPoints < 2) continue;
 
-      // Pattern geometry is only a prefilter. The proof uses the same legal
-      // immediate-win generator as the rest of the engine so BLACK forbidden
-      // moves / exact-five semantics remain authoritative.
+      // This is a proof path, so do not gate it on pattern heuristics. Enumerate
+      // legal immediate wins directly; BLACK exact-five / forbidden-move rules
+      // are therefore authoritative even when shape classification is imperfect.
       const legalWins = immediateWins(color, radius);
       if (legalWins.length < 2) continue;
       if (immediateWins(opponent, radius).length) continue;
