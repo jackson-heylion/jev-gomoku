@@ -2661,7 +2661,7 @@
           reason: threat.counterThreat.reason || null,
           forced_defense_move: threat.counterThreat.forcedDefenseMove || null,
           network_moves: Array.isArray(threat.counterThreat.networkMoves)
-            ? threat.counterThreat.networkMoves.slice(0, 6)
+            ? threat.counterThreat.networkMoves.slice(0, 4)
             : null
         }) : null,
         candidate_sources: Array.isArray(move.recallSources) && move.recallSources.length ? move.recallSources : null,
@@ -3555,7 +3555,7 @@
           reason: move.threatSearch.counterThreat.reason || null,
           forced_defense_move: move.threatSearch.counterThreat.forcedDefenseMove || null,
           network_moves: Array.isArray(move.threatSearch.counterThreat.networkMoves)
-            ? move.threatSearch.counterThreat.networkMoves.slice(0, 6)
+            ? move.threatSearch.counterThreat.networkMoves.slice(0, 4)
             : null
         }) : null
       }) : null,
