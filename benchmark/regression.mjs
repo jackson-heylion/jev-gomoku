@@ -1406,6 +1406,139 @@ async function testOldGameK8ForcedLossProof() {
   }
 }
 
+/**
+ * Regression from the 9-ply straight-line loss:
+ * H8 G7 H7 G8 H6. White must stop the vertical open-three with H5/H9.
+ * I7 was already proved losing by Threat-space in the real game, but OTHER
+ * reintroduced it as a wildcard. A wildcard may never bypass a hard proof.
+ */
+async function testStraightFiveWildcardCannotBypassThreatProof() {
+  let requestCount = 0;
+  const captured = [];
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requestCount++;
+      captured.push(payload);
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Straight-five mock question has no choices: ' + id);
+
+        let choice;
+        if (id === 'recall_check') {
+          choice = keys.includes('OTHER') ? 'OTHER' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          choice = keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('duel_')) {
+          choice = keys.includes('H5') ? 'H5' : keys.includes('H9') ? 'H9' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id === 'wildcard_pick') {
+          choice = keys.includes('I7') ? 'I7' : keys[0];
+        } else if (id === 'best_move') {
+          choice = keys.includes('H5') ? 'H5' : keys.includes('H9') ? 'H9' : keys[0];
+        } else {
+          choice = keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-straight-five',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = ['H8','G7','H7','G8','H6'];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const threat = await engine.threatAnalyze(['H5','H9','I7','G6','H10','G9'], 'max');
+  const i7 = threat?.analyses?.find(item => item.move === 'I7');
+  if (!i7?.forced || i7.line?.[0] !== 'H9') {
+    throw new Error('Historical I7 must be proved losing through Black H9');
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (!['H5','H9'].includes(result.finalChoice)) {
+    throw new Error('Jev Max failed to stop the straight-line open-three: ' + result.finalChoice);
+  }
+  if (result.finalChoice === 'I7') {
+    throw new Error('Threat-proved I7 re-entered through wildcard');
+  }
+  if (requestCount < 2 || requestCount > 3) {
+    throw new Error('Straight-five defense must stay within the normal 2–3 Jev request budget, got ' + requestCount);
+  }
+
+  const pairwisePayload = captured[1] || null;
+  if (pairwisePayload?.state?.wildcard_pool?.includes('I7')) {
+    throw new Error('Threat-proved I7 must be excluded from wildcard_pool');
+  }
+  if (result.decisionTrace?.wildcard?.accepted === 'I7') {
+    throw new Error('Threat-proved I7 was accepted as a wildcard');
+  }
+  const excluded = new Set(result.decisionTrace?.wildcard?.excludedByThreatProof || []);
+  if (!excluded.has('I7')) {
+    throw new Error('Decision trace must record I7 as excluded by Threat-space proof');
+  }
+}
+
+/**
+ * If the historical blunder is forcibly replayed and Black gets H5 after White
+ * I7, Black has two distinct immediate winning points H4 and H9. White has no
+ * one-move defense. Jev should not spend Atomic/Pairwise/Final requests deciding
+ * between two mathematically losing blocks.
+ */
+async function testDoubleImmediateWinShortCircuitsJev() {
+  let requestCount = 0;
+  const engine = await loadProductionEngine({
+    request: async () => {
+      requestCount++;
+      throw new Error('Double-immediate forced loss must not call Jev');
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const sequence = ['H8','G7','H7','G8','H6','I7','H5'];
+  const position = positionFromSequence(sequence);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  if (context.forced !== 'forced_loss_double_win') {
+    throw new Error('Expected forced_loss_double_win, got ' + context.forced);
+  }
+  const keys = new Set(context.candidates.map(move => move.key));
+  if (!keys.has('H4') || !keys.has('H9')) {
+    throw new Error('Double immediate win must expose both H4 and H9');
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (requestCount !== 0) {
+    throw new Error('Proven double-immediate loss wasted ' + requestCount + ' Jev requests');
+  }
+  if (result.forced !== 'forced_loss_double_win') {
+    throw new Error('Jev Max lost the forced double-win state');
+  }
+  if (result.decisionTrace?.requestShape?.logicalRequests !== 0) {
+    throw new Error('Double-immediate loss should report 0 logical Jev requests');
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -1422,6 +1555,8 @@ function testCoordinateHelpers() {
   }
 }
 
+await testStraightFiveWildcardCannotBypassThreatProof();
+await testDoubleImmediateWinShortCircuitsJev();
 await testOldGameEarlyForcingExtensionWarning();
 await testOldGameForcedDefenseResidualNetwork();
 await testOldGameK8ForcedLossProof();
