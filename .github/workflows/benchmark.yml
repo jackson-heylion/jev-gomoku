@@ -57,6 +57,7 @@ jobs:
         run: npm run benchmark:smoke
 
       - name: Run engine regressions
+        if: github.event_name != 'push'
         run: npm run benchmark:regression
 
       - name: Run Jev final-decision benchmark
