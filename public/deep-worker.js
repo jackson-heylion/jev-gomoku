@@ -1246,14 +1246,23 @@ function runThreatSearch(message) {
     playMove(move, rootSide);
     try {
       if (!isWin(move.r, move.c, rootSide)) {
-        counterThreat = analyzeCounterThreatNetwork(
-          opponentSide,
-          rootSide,
-          branch,
-          radius
-        );
         const memo = new Map();
         proof = proveForcingWin(opponentSide, maxThreatTurns, branch, radius, memo);
+        if (!proof.forced) {
+          counterThreat = analyzeCounterThreatNetwork(
+            opponentSide,
+            rootSide,
+            branch,
+            radius
+          );
+        } else {
+          counterThreat = {
+            risk: 'PROVEN_FORCED_LOSS',
+            reason: 'hard_forcing_proof_available',
+            forcedDefenseMove: null,
+            networkMoves: []
+          };
+        }
       }
     } catch (error) {
       if (error !== TIMEOUT) throw error;
