@@ -1852,8 +1852,13 @@
     return `${rules.overline ? 1 : 0}${rules.fourFour ? 1 : 0}${rules.threeThree ? 1 : 0}`;
   }
 
-  function localTtKey(toMove, cfg) {
-    return `${aiColor()}:${toMove}:${localRuleSignature()}:${cfg.branch}:${cfg.radius}:${localHashA}:${localHashB}`;
+  function localTtKey(toMove, cfg, depth) {
+    // Move width is root-ply-sensitive in this engine. Include the ply profile
+    // so a value searched under a wider node is never treated as an EXACT value
+    // for a different narrowing profile. Iterative depths still share the root
+    // child key (ply=1), allowing the prior depth's bestMove to order the next.
+    const plyFromRoot = Math.max(0, Number(cfg.depth || depth) - depth);
+    return `${aiColor()}:${toMove}:${localRuleSignature()}:${cfg.branch}:${cfg.radius}:p${plyFromRoot}:${localHashA}:${localHashB}`;
   }
 
   function pruneLocalTranspositionTable() {
@@ -1946,7 +1951,9 @@
       rootTimedOut: runtime.rootTimedOut,
       depthReached: runtime.depthReached,
       targetDepth: runtime.targetDepth,
-      checks: runtime.checks
+      checks: runtime.checks,
+      transpositionEntries: runtime.transpositionEntries ?? localTranspositionTable.size,
+      transpositionGeneration: runtime.transpositionGeneration ?? localTtGeneration
     };
     if (activeLocalSearch === runtime) activeLocalSearch = null;
     return result;
@@ -2264,7 +2271,7 @@
   function alphaBeta(depth, alpha, beta, toMove, cfg) {
     if (depth <= 0 || localSearchExpired()) return evaluateStatic();
 
-    const key = localTtKey(toMove, cfg);
+    const key = localTtKey(toMove, cfg, depth);
     const alphaStart = alpha;
     const betaStart = beta;
     const cached = localTranspositionTable.get(key);
@@ -2301,9 +2308,13 @@
     let value = maximizing ? -Infinity : Infinity;
     let bestMove = candidates[0]?.key || null;
     let explored = 0;
+    let completedNode = true;
 
     for (const m of candidates) {
-      if (localSearchExpired()) break;
+      if (localSearchExpired()) {
+        completedNode = false;
+        break;
+      }
       explored++;
       localSearchPlay(m, toMove);
       let child;
@@ -2331,6 +2342,10 @@
     }
 
     if (!explored) return evaluateStatic();
+    // A time-bounded partial node is useful to the current iterative layer, but
+    // it is not a valid transposition bound and must never survive into another
+    // depth or turn.
+    if (!completedNode) return value;
 
     let flag = 'EXACT';
     if (value <= alphaStart) flag = 'UPPER';
