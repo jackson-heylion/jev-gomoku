@@ -3134,7 +3134,7 @@
 
   let threatWorkerSequence = 0;
 
-  async function runThreatWorkerAnalysis(candidateMoves, mode, trigger = 'parallel_threat_evidence') {
+  async function runThreatWorkerAnalysis(candidateMoves, mode, trigger = 'parallel_threat_evidence', overrides = {}) {
     const uniqueMoves = [...new Map(
       (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
     ).values()].slice(0, 6);
@@ -3154,11 +3154,18 @@
     }
 
     const id = ++threatWorkerSequence;
-    const timeBudgetMs = mode === 'max'
+    const defaultTimeBudgetMs = mode === 'max'
       ? (moves.length < 10 ? 1100 : 1450)
       : (moves.length < 10 ? 800 : 1200);
-    const maxThreatTurns = moves.length < 10 ? 4 : 6;
-    const branch = mode === 'max' ? 9 : 8;
+    const timeBudgetMs = Number.isFinite(overrides.timeBudgetMs)
+      ? Math.max(250, Math.min(defaultTimeBudgetMs, overrides.timeBudgetMs))
+      : defaultTimeBudgetMs;
+    const maxThreatTurns = Number.isFinite(overrides.maxThreatTurns)
+      ? Math.max(2, Math.min(8, overrides.maxThreatTurns))
+      : (moves.length < 10 ? 4 : 6);
+    const branch = Number.isFinite(overrides.branch)
+      ? Math.max(4, Math.min(10, overrides.branch))
+      : (mode === 'max' ? 9 : 8);
 
     return await new Promise(resolve => {
       let settled = false;
@@ -3445,12 +3452,25 @@
     return filtered.slice(0, maxCandidateLimit());
   }
 
-  function extraWildcardPool(mainCandidates, limit = 12) {
+  function threatEvidenceForMove(threatAnalysis, key) {
+    return (threatAnalysis?.analyses || []).find(item => item.move === key) || null;
+  }
+
+  function provenThreatLossKeys(threatAnalysis) {
+    return new Set(
+      (threatAnalysis?.analyses || [])
+        .filter(item => item?.forced === true)
+        .map(item => item.move)
+    );
+  }
+
+  function extraWildcardPool(mainCandidates, limit = 12, blockedKeys = new Set()) {
     const excluded = new Set(mainCandidates.map(move => move.key));
     const side = aiColor();
     const opponent = otherColor(side);
     return nearbyMoves(2)
       .filter(move => !excluded.has(move.key))
+      .filter(move => !blockedKeys.has(move.key))
       .filter(move => isLegalMoveForColor(move.r, move.c, side))
       .map(move => ({
         ...move,
@@ -3524,6 +3544,92 @@
           blocks_opponent_pattern: blockedOpponentPattern.className,
           blocks_opponent_pattern_score: Math.round(blockedOpponentPattern.score)
         }
+      }
+    };
+  }
+
+  async function validateWildcardForMax(move, initialThreatAnalysis) {
+    const candidate = validateWildcardCandidate(move);
+    if (!candidate) {
+      return {
+        candidate: null,
+        validation: {
+          accepted: false,
+          reason: 'illegal_or_one_ply_loss',
+          source: 'local_guard'
+        }
+      };
+    }
+
+    const existing = threatEvidenceForMove(initialThreatAnalysis, candidate.key);
+    if (existing && !existing.timedOut) {
+      attachThreatEvidence([candidate], { analyses: [existing] });
+      if (existing.forced) {
+        return {
+          candidate: null,
+          validation: {
+            accepted: false,
+            reason: 'existing_threat_proof_forced_loss',
+            source: 'initial_threat_worker',
+            forcedLine: Array.isArray(existing.line) ? existing.line.slice(0, 12) : []
+          }
+        };
+      }
+      return {
+        candidate,
+        validation: {
+          accepted: true,
+          reason: 'existing_threat_analysis_safe_from_proof',
+          source: 'initial_threat_worker',
+          elapsedMs: 0
+        }
+      };
+    }
+
+    const targeted = await runThreatWorkerAnalysis(
+      [candidate],
+      'max',
+      'jev_max_wildcard_validation',
+      { timeBudgetMs: 700, maxThreatTurns: 4, branch: 8 }
+    );
+    const row = threatEvidenceForMove(targeted, candidate.key);
+
+    // Wildcard is optional. If its deterministic threat check cannot complete,
+    // fail closed and keep the already-vetted main candidates.
+    if (!row || targeted?.status !== 'completed' || targeted?.timedOut || row.timedOut) {
+      return {
+        candidate: null,
+        validation: {
+          accepted: false,
+          reason: 'wildcard_threat_validation_incomplete',
+          source: targeted?.source || 'threat-worker',
+          status: targeted?.status || 'unavailable',
+          elapsedMs: targeted?.elapsedMs ?? null
+        }
+      };
+    }
+
+    attachThreatEvidence([candidate], targeted);
+    if (row.forced) {
+      return {
+        candidate: null,
+        validation: {
+          accepted: false,
+          reason: 'wildcard_threat_proof_forced_loss',
+          source: targeted.source || 'threat-worker',
+          elapsedMs: targeted.elapsedMs ?? null,
+          forcedLine: Array.isArray(row.line) ? row.line.slice(0, 12) : []
+        }
+      };
+    }
+
+    return {
+      candidate,
+      validation: {
+        accepted: true,
+        reason: 'wildcard_threat_validation_passed',
+        source: targeted.source || 'threat-worker',
+        elapsedMs: targeted.elapsedMs ?? null
       }
     };
   }
@@ -3853,8 +3959,9 @@
     addCriticQuestions(tournament.payload.questions, atomicTop4);
 
     let wildcardPool = [];
+    const hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
     if (recallChoice === 'OTHER') {
-      wildcardPool = extraWildcardPool(candidates, 12);
+      wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
       if (wildcardPool.length) {
         tournament.payload.state.wildcard_pool = wildcardPool.map(move => move.key);
         tournament.payload.questions.wildcard_pick = {
@@ -3876,10 +3983,13 @@
     let ranked = pairwiseRank(atomicTop4);
 
     let wildcard = null;
+    let wildcardValidation = null;
     const wildcardChoice = String(pairwiseData?.answers?.wildcard_pick?.choice || '').toUpperCase();
     if (wildcardChoice) {
       const proposed = wildcardPool.find(move => move.key === wildcardChoice);
-      wildcard = validateWildcardCandidate(proposed);
+      const checked = await validateWildcardForMax(proposed, threatAnalysis);
+      wildcard = checked.candidate;
+      wildcardValidation = checked.validation;
       if (wildcard) {
         wildcard.atomicScore = .5;
         wildcard.pairScore = 0;
@@ -3971,8 +4081,10 @@
         wildcard: {
           requested: recallChoice === 'OTHER',
           pool: wildcardPool.map(move => move.key),
+          excludedByThreatProof: [...hardRejectedThreatKeys],
           proposed: wildcardChoice || null,
           accepted: wildcard?.key || null,
+          validation: wildcardValidation,
           enteredFinalists: Boolean(wildcard && finalists.some(move => move.key === wildcard.key)),
           chosen: finalChoice === wildcard?.key
         },
