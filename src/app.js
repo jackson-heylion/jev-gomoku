@@ -4356,7 +4356,12 @@
     let verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
     let supplemental = false;
 
-    if (verdict.reason === 'insufficient_pair_deep_evidence') {
+    // A broad 5-root Deep batch is useful evidence but its time slice per root
+    // varies with candidate ordering and persistent-TT state. It may veto an
+    // obviously catastrophic override early, but it must never *approve* a Jev
+    // override by itself. Whenever Jev truly overturns a surviving Alpha-Beta
+    // #1, narrow the same worker to exactly those two roots and re-check.
+    if (!verdict.vetoed) {
       updateApiState('busy', 'Jev Max：Jev 改写 Alpha-Beta #1，执行两点 Deep 复核…');
       analysis = await runDeepWorkerVerification(
         [localMove, semanticMove],
