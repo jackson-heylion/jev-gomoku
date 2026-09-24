@@ -4382,6 +4382,42 @@
     return Number.isFinite(rank) ? { risk, rank } : null;
   }
 
+  function selectMaxDeepSafetyFinalist(candidates, finalists, deepAnalysis) {
+    const rows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+    if (
+      deepAnalysis?.status !== 'completed'
+      || Number(deepAnalysis?.depthReached || 0) < 5
+      || rows.length < 1
+      || !Array.isArray(finalists)
+      || finalists.length < 2
+    ) return null;
+
+    const leaderRow = rows[0];
+    if (
+      !leaderRow?.move
+      || (leaderRow.forcedResult?.forced === true && leaderRow.forcedResult.result === 'loss')
+    ) return null;
+
+    const leader = candidates.find(move => move.key === leaderRow.move) || null;
+    if (!leader || maxHardProvenLoss(leader) || finalists.some(move => move.key === leader.key)) {
+      return null;
+    }
+
+    const finalistRisks = finalists.map(completedCounterThreatRisk);
+    if (finalistRisks.some(item => !item)) return null;
+
+    // Only widen a tactically dangerous final: all current finalists must still
+    // leave at least HIGH opponent counter-pressure. The Deep leader must have
+    // completed Threat evidence and be no worse than the safest current finalist.
+    const safestFinalistRank = Math.min(...finalistRisks.map(item => item.rank));
+    if (safestFinalistRank < 2) return null;
+
+    const leaderRisk = completedCounterThreatRisk(leader);
+    if (!leaderRisk || leaderRisk.rank > safestFinalistRank) return null;
+
+    return leader;
+  }
+
   async function runMaxSemanticOverrideGuard(context, candidates, semanticMove, initialDeepAnalysis) {
     const localKey = context?.localSearchChoice || null;
     const semanticKey = semanticMove?.key || null;
@@ -5780,6 +5816,7 @@
     let critic = [];
     let ranked = [];
     let finalists = [];
+    let deepSafetyFinalist = null;
     let answer = null;
     let finalChoice = null;
     let secondData = null;
@@ -5792,11 +5829,21 @@
       critic = maxCriticTrace(atomicTop4, fanoutData?.answers || {});
       ranked = pairwiseRank(atomicTop4);
       finalists = ranked.slice(0, Math.min(2, ranked.length));
-      if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
+
+      deepSafetyFinalist = selectMaxDeepSafetyFinalist(candidates, finalists, deepAnalysis);
+      if (deepSafetyFinalist && !finalists.some(move => move.key === deepSafetyFinalist.key)) {
+        finalists = [...finalists, deepSafetyFinalist].slice(0, 3);
+      }
+      if (wildcard && !finalists.some(move => move.key === wildcard.key) && finalists.length < 3) {
         finalists = [...finalists, wildcard].slice(0, 3);
       }
 
-      const converged = !wildcard && highConfidenceMaxConvergence(ranked, globalBest);
+      // If deterministic Deep/Threat evidence widened the final for safety, a
+      // second Final Judge is required so the extra candidate actually gets a
+      // semantic comparison instead of being ignored by one-request convergence.
+      const converged = !wildcard
+        && !deepSafetyFinalist
+        && highConfidenceMaxConvergence(ranked, globalBest);
       if (converged) {
         answer = pairwiseAnswer(ranked);
         finalChoice = answer.choice;
@@ -5985,6 +6032,14 @@
           elapsedMs: coverage.supplemental?.elapsedMs ?? null
         },
         finalDecision: secondData ? compactAnswer(answer) : null,
+        deepSafetyFinalist: deepSafetyFinalist ? {
+          move: deepSafetyFinalist.key,
+          deepRank: deepSafetyFinalist.deepSearchRank ?? null,
+          deepScore: Number.isFinite(deepSafetyFinalist.deepSearchScore)
+            ? deepSafetyFinalist.deepSearchScore
+            : null,
+          counterThreatRisk: deepSafetyFinalist.threatSearch?.counterThreat?.risk || null
+        } : null,
         semanticOverrideGuard: {
           vetoed: Boolean(overrideGuard?.vetoed),
           reason: overrideGuard?.reason || null,
@@ -6029,6 +6084,7 @@
           localTranspositionEntries: context.localSearch?.transpositionEntries ?? null,
           localTranspositionGeneration: context.localSearch?.transpositionGeneration ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
+          deepSafetyFinalist: deepSafetyFinalist?.key || null,
           deepDominanceApplied: Boolean(deepDominance?.applied),
           deepDominanceLeader: deepDominance?.leader || null,
           deepDominanceLocalLeader: deepDominance?.localLeader || context.localSearchChoice || null,
