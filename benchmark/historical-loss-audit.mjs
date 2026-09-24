@@ -96,8 +96,8 @@ for (const sample of CASES) {
       try {
         arbitration = engine.arbitrate(historicalLocal, chosen, {
           mode: 'expert',
-          depth: 8,
-          branch: 8,
+          depth: 7,
+          branch: 6,
           vcfDepth: 5,
           vctDepth: 3
         });
