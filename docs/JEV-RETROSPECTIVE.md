@@ -1,7 +1,7 @@
 # JEV × 五子棋：从 146 次提交看它到底适合做什么
 
 > 本文是对 **Jev Gomoku** 的一次阶段性复盘。  
-> 历史统计基线：从仓库初始化提交 \`20866827\` 到 \`907ac552\`，共 **146 条提交**。  
+> 历史统计基线：从仓库初始化提交 `20866827` 到 `907ac552`，共 **146 条提交**。  
 > 本文由这 146 条既有提交整理而来；为了避免“文档提交把自己也算进去”的递归问题，本次新增文档本身不计入下面的历史统计。
 
 ## 先说结论
@@ -134,7 +134,7 @@ TypeSafe System One
 
 这是项目第一次真正改变架构的地方。
 
-提交 \`376109f3\` 明确把 JEV 做成 **independent challenger**：
+提交 `376109f3` 明确把 JEV 做成 **independent challenger**：
 
 - Local Engine 自己算；
 - JEV 不直接照抄 Local 排名；
@@ -152,7 +152,7 @@ TypeSafe System One
 
 ### 阶段 E：浏览器性能逼着架构做工程化
 
-为了提高棋力，一度把更重的 horizon search 放进浏览器，随后出现页面崩溃，提交 \`01f0ed94\` 直接回滚。
+为了提高棋力，一度把更重的 horizon search 放进浏览器，随后出现页面崩溃，提交 `01f0ed94` 直接回滚。
 
 之后换成更合理的方案：
 
@@ -169,7 +169,7 @@ TypeSafe System One
 
 ### 阶段 F：明确“JEV 做最终决定”，但不能推翻数学事实
 
-提交 \`9a6ee3dc\` 把 JEV 提升成最终落子决策者。
+提交 `9a6ee3dc` 把 JEV 提升成最终落子决策者。
 
 紧接着加入：
 
@@ -190,7 +190,7 @@ TypeSafe System One
 
 ### 阶段 G：JEV Max——从“一次选择”变成多视角裁决
 
-\`c8701286\` 开始引入 Jev Max。
+`c8701286` 开始引入 Jev Max。
 
 JEV Max 不是简单问一句“哪个最好”，而是把同一组候选拆成多个问题：
 
@@ -234,7 +234,7 @@ Jev Max 上线后，真实棋谱继续暴露问题：
 
 ### 阶段 I：性能优化不是少算，而是“并行、多算少等”
 
-\`acb65cac\` 之后，Jev Max 重点优化延迟：
+`acb65cac` 之后，Jev Max 重点优化延迟：
 
 - Zobrist + bounded persistent TT；
 - iterative deepening 复用；
@@ -321,7 +321,7 @@ JEV 最适合面对这种输入：
 
 ### 2.3 它是独立 second opinion
 
-Max 模式特意不把 \`local_rank\` / \`local_engine_grade\` 直接喂给 Atomic。
+Max 模式特意不把 `local_rank` / `local_engine_grade` 直接喂给 Atomic。
 
 原因很简单：
 
@@ -354,7 +354,7 @@ JEV 的价值在于：
 
 ### 2.5 它可以发现候选召回的盲区，但不能自由发挥
 
-JEV 可以说 \`OTHER\`，提示“主候选可能漏了”。
+JEV 可以说 `OTHER`，提示“主候选可能漏了”。
 
 但程序不会让它直接随便编一个坐标。
 
@@ -459,7 +459,7 @@ TypeSafe 当前把 Jev 定义为 **System One Model**。
 
 它的 API 不是让模型写一大段自然语言，而是：
 
-- 输入 \`state\`；
+- 输入 `state`；
 - 同时输入多个 typed questions；
 - question 支持 Choice / Score / Noul；
 - 返回结构化答案、概率和置信信息。
@@ -751,7 +751,7 @@ p <= 0.65 人工/更深搜索
 
 ### 6. 把模型版本漂移纳入 benchmark
 
-\`jev-latest\` 会变。
+`jev-latest` 会变。
 
 所以长期比较最好同时记录：
 
