@@ -4102,6 +4102,14 @@
       move.deepSearchScore = deep?.rank && Number.isFinite(deep?.row?.score) && !isSentinelSearchScore(deep.row.score)
         ? deep.row.score
         : null;
+      move.deepSearchForcedResult = deep?.row?.forcedResult?.forced
+        ? {
+            forced: true,
+            result: deep.row.forcedResult.result,
+            proofType: deep.row.forcedResult.proofType || 'DEEP_SEARCH',
+            mateOrForcingDistance: deep.row.forcedResult.mateOrForcingDistance ?? null
+          }
+        : structuredForcedResult(deep?.row?.score, 'DEEP_SEARCH_SENTINEL', false);
       move.deepEvidence = deep?.evidence || null;
       if (move.analysis?.facts) {
         move.analysis.facts.deep_search = deep?.evidence || {
@@ -4144,6 +4152,11 @@
       && counter.networkMoves.some(item => item?.kind === 'DOUBLE_OPEN_THREE');
   }
 
+  function isDeepMateLoss(move) {
+    return move?.deepSearchForcedResult?.forced === true
+      && move.deepSearchForcedResult.result === 'loss';
+  }
+
   function hardFilterMaxCandidates(candidates, threatAnalysis) {
     attachThreatEvidence(candidates, threatAnalysis);
     let filtered = candidates;
@@ -4157,14 +4170,27 @@
     const safeFromThreatProof = filtered.filter(move => move.threatSearch?.forced !== true);
     if (safeFromThreatProof.length) filtered = safeFromThreatProof;
 
+    // Deep Search is branch-limited and therefore remains advisory rather than
+    // mathematical proof. It is still strong enough to veto an avoidable mate
+    // sentinel: if at least one candidate is not a Deep mate-loss, never let
+    // semantic voting restore a candidate that Deep has already driven into a
+    // mate/forcing-loss sentinel. If all candidates are mate-losses, preserve
+    // them for the existing rescue / longest-resistance path.
+    const safeFromDeepMate = filtered.filter(move => !isDeepMateLoss(move));
+    if (safeFromDeepMate.length && safeFromDeepMate.length < filtered.length) {
+      filtered = safeFromDeepMate;
+    }
+
     // A DOUBLE_OPEN_THREE is one tempo earlier than an open-four fork. It is
     // not always a mathematical forced loss because the defender may have a
     // counter-forcing resource, so do not label it LOSING globally. But when
     // at least one candidate prevents the CRITICAL junction, never let Jev
-    // prefer a move that voluntarily leaves that junction available.
-    if (moves.length < 16) {
-      const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
-      if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    // prefer a move that voluntarily leaves that junction available. This is
+    // phase-independent: the supplied 37-ply loss proved the same pattern can
+    // decide a late middlegame, not only the opening.
+    const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
+    if (safeFromDoubleOpenThree.length && safeFromDoubleOpenThree.length < filtered.length) {
+      filtered = safeFromDoubleOpenThree;
     }
 
     return filtered.slice(0, maxCandidateLimit());
