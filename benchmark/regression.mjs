@@ -2520,6 +2520,73 @@ async function testSemanticLowerThreatRiskOutranksNumericGuard() {
   }
 }
 
+
+/**
+ * Coverage history at ply 29: J5/F5 are the semantic/local front pair but both
+ * retain CRITICAL opponent counter-pressure. Completed depth-5 Deep ranks E13
+ * first and E13 is not hard-lost. The final must be widened to let Jev compare
+ * E13 instead of forcing a binary J5/F5 choice.
+ */
+function testCoverageDeepSafetyFinalistInjection() {
+  const request = async () => {
+    throw new Error('Deep safety finalist selector test must not call Jev');
+  };
+  return loadProductionEngine({ request }).then(engine => {
+    engine.setGameConfig({
+      playerColor: 'black',
+      overline: true,
+      fourFour: false,
+      threeThree: false
+    });
+    const position = positionFromSequence([
+      'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
+      'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12'
+    ]);
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+
+    const deepAnalysis = {
+      status: 'completed',
+      depthReached: 5,
+      timedOut: true,
+      scores: [
+        { move: 'E13', score: -1205, forcedResult: null },
+        { move: 'J5', score: -2280, forcedResult: null },
+        { move: 'F5', score: -2302, forcedResult: null }
+      ]
+    };
+    const critical = move => ({
+      move,
+      forced: false,
+      timedOut: false,
+      reason: 'not_proven',
+      counterThreat: {
+        risk: 'CRITICAL',
+        reason: 'latent_threat_network',
+        forcedDefenseMove: null,
+        networkMoves: []
+      }
+    });
+    const threatAnalysis = {
+      status: 'completed',
+      timedOut: false,
+      analyses: [critical('J5'), critical('F5'), critical('E13')]
+    };
+
+    const selected = engine.maxDeepSafetyFinalist(
+      'max',
+      ['J5','F5'],
+      deepAnalysis,
+      threatAnalysis
+    );
+    if (selected.choice !== 'E13') {
+      throw new Error('Coverage dangerous final must inject Deep #1 E13: ' + JSON.stringify(selected));
+    }
+    if (selected.selectedRisk !== 'CRITICAL') {
+      throw new Error('Coverage E13 selector must preserve completed Threat risk: ' + JSON.stringify(selected));
+    }
+  });
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2547,6 +2614,7 @@ await testHistoricalDeepDominanceGuard();
 await testRecentDepthZeroSemanticOverrideGuard();
 await testSemanticOverrideNeverResurrectsHardLostLocal();
 await testSemanticLowerThreatRiskOutranksNumericGuard();
+await testCoverageDeepSafetyFinalistInjection();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
