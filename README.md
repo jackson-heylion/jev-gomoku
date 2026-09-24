@@ -253,8 +253,8 @@ Deep Worker 侧同样保留 Zobrist TT，并在长驻 Worker 生命周期内跨�
 
 真实历史棋谱回放额外暴露了两类“未达到数学 hard proof、但继续交给 Jev 风险过高”的局面：
 
-- **DOUBLE_OPEN_THREE 全阶段防守**：对手能制造双轴活三时，不再只在前 16 手处理；只要 Threat evidence 标记为 `CRITICAL + DOUBLE_OPEN_THREE`，且候选池存在能消除该结构的替代点，就先剔除主动放任它的候选。它仍不是 VCF/forced-loss 数学证明，因此只有“存在更安全替代”时才生效。
-- **Local + Deep 强一致性 guard**：当 Local #1 与完成至少 5 层的 Deep #1 一致，而某个实际被 Deep 搜索过的候选低于共同第一名至少 20k、且自身进入明显危险分值区（≤ -20k）时，只淘汰这个灾难性候选。未被 Deep 搜索的候选仍保留给 Jev。
+- **DOUBLE_OPEN_THREE 分阶段防守**：前 16 手以内，如果 Threat evidence 标记为 `CRITICAL + DOUBLE_OPEN_THREE` 且存在能消除该结构的替代点，就先剔除主动放任它的候选；更晚的中盘/残局把同类形状保留为高优先级 advisory evidence，因为此时可能存在反向先手与对攻节奏。
+- **Local + Deep 强一致性 guard**：只有生产链路实际的 Local #1（即 `context.candidates[0]`）与完成至少 5 层的 Deep #1 一致时 guard 才能生效；若某个实际被 Deep 搜索过的候选低于共同第一名至少 20k、且自身进入明显危险分值区（≤ -20k），只淘汰这个灾难性候选。未被 Deep 搜索的候选仍保留给 Jev。
 
 这两个 guard 不把 bounded search 冒充 hard proof；VCF / Threat forced result 仍然拥有更高优先级。
 
