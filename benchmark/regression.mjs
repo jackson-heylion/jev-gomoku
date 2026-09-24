@@ -2238,7 +2238,7 @@ async function testHistoricalSemanticOverrideGuard() {
     throw new Error('Historical Local #1 must remain F7, got ' + result.localChoice);
   }
   if (result.finalChoice === 'G10') {
-    throw new Error('Semantic override guard failed to veto historical G10');
+    throw new Error('Semantic override guard failed to veto historical G10: ' + JSON.stringify(guard));
   }
   if (!guard?.vetoed || guard.semanticMove !== 'G10' || guard.localMove !== 'F7') {
     throw new Error('Historical G10 must be vetoed by narrowed Deep override guard: ' + JSON.stringify(guard));
