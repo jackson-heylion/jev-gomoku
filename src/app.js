@@ -3786,7 +3786,7 @@
     });
   }
 
-  async function runDeepWorkerVerification(candidateMoves, mode, trigger) {
+  async function runDeepWorkerVerification(candidateMoves, mode, trigger, overrides = {}) {
     const uniqueMoves = [...new Map(
       (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
     ).values()];
@@ -3811,12 +3811,22 @@
     }
 
     const id = ++heavyWorkerTaskSequence;
-    const timeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
+    const defaultTimeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1300 : 1800)
       : mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400)
         : 1500);
-    const maxDepth = mode === 'max' ? 8 : 7;
-    const branch = mode === 'max' ? 8 : 7;
+    const timeBudgetMs = Math.max(
+      250,
+      Math.min(6500, Number(overrides.timeBudgetMs) || defaultTimeBudgetMs)
+    );
+    const maxDepth = Math.max(
+      3,
+      Math.min(8, Number(overrides.maxDepth) || (mode === 'max' ? 8 : 7))
+    );
+    const branch = Math.max(
+      4,
+      Math.min(9, Number(overrides.branch) || (mode === 'max' ? 8 : 7))
+    );
 
     return submitHeavyWorkerTask({
       id,
@@ -4271,7 +4281,15 @@
     const analysis = await runDeepWorkerVerification(
       [localMove, semanticMove],
       'max',
-      'jev_max_semantic_override_guard'
+      'jev_max_semantic_override_guard',
+      {
+        // Two roots only: spend extra background-worker time here instead of
+        // widening every normal Max turn. This is the highest-value place to
+        // fight horizon effects because Jev is about to overturn Local #1.
+        timeBudgetMs: 5200,
+        maxDepth: 8,
+        branch: 9
+      }
     );
     const verdict = deepOverrideGuardVerdict(localMove, semanticMove, analysis);
     return {
