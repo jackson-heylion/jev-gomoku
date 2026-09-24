@@ -1083,9 +1083,10 @@ async function testJevMaxPipelineAndWildcard() {
 }
 
 /**
- * Real position from the recent Jev/Local game: Local preferred D5 while the
- * completed deeper search preferred I6. Keep both moves in the candidate recall
- * so Jev Max can actually override instead of losing the alternative upstream.
+ * Real position from the recent Jev/Local game. Heterogeneous recall must keep
+ * the historical I6/D5 alternatives, but the current Alpha-Beta leader E6 is
+ * also a Deep forced-win line. Jev may semantically propose I6; the final
+ * two-point Deep guard must not throw away the stronger E6 continuation.
  */
 async function testRecentGameLocalDeepDisagreementRecall() {
   let requestCount = 0;
@@ -1135,17 +1136,19 @@ async function testRecentGameLocalDeepDisagreementRecall() {
 
   const context = engine.candidates('max');
   const keys = new Set(context.candidates.map(move => move.key));
-  if (!keys.has('I6')) {
-    throw new Error('Jev Max candidate recall lost the real-game Jev alternative I6');
+  for (const key of ['E6','D5','I6']) {
+    if (!keys.has(key)) {
+      throw new Error('Jev Max candidate recall lost the real-game alternative ' + key);
+    }
   }
-  if (!keys.has('D5')) {
-    throw new Error('Jev Max candidate recall lost the real-game Local alternative D5');
+  if (context.localSearchChoice !== 'E6') {
+    throw new Error('Real-game Alpha-Beta leader must remain E6, got ' + context.localSearchChoice);
   }
 
-  const deep = await engine.deepAnalyze(['D5','I6','F9','E10'], 'max');
+  const deep = await engine.deepAnalyze(['E6','D5','I6','F9'], 'max');
   const deepKeys = new Set((deep.scores || []).map(item => item.move));
-  if (!deepKeys.has('D5') || !deepKeys.has('I6')) {
-    throw new Error('Real-game deep evidence must retain both D5 and I6 for comparison');
+  if (!deepKeys.has('E6') || !deepKeys.has('I6')) {
+    throw new Error('Real-game deep evidence must retain E6 and I6 for comparison');
   }
   if (Number(deep.depthReached || 0) === 0 && deep.status !== 'no_completed_depth' && deep.status !== 'timeout') {
     throw new Error('Real-game deep disagreement returned invalid depth=0 semantics: ' + deep.status);
@@ -1153,11 +1156,15 @@ async function testRecentGameLocalDeepDisagreementRecall() {
 
   engine.setPosition(position.board, position.moves, 'jev-latest');
   const result = await engine.jevMax();
-  if (!result.candidates.some(candidate => candidate.key === 'I6')) {
-    throw new Error('I6 disappeared before Jev Max final selection');
+  if (result.jevSuggested !== 'I6') {
+    throw new Error('Regression mock must still make Jev propose I6, got ' + result.jevSuggested);
   }
-  if (result.finalChoice !== 'I6') {
-    throw new Error('Jev Max could not exercise final authority for the real-game I6 alternative: ' + result.finalChoice);
+  if (result.finalChoice !== 'E6') {
+    throw new Error('Semantic Deep guard must preserve stronger E6 over I6, got ' + result.finalChoice);
+  }
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (!guard?.vetoed || guard.localMove !== 'E6' || guard.semanticMove !== 'I6') {
+    throw new Error('Real-game E6/I6 semantic guard did not veto the override: ' + JSON.stringify(guard));
   }
   if (requestCount < 1 || requestCount > 2) {
     throw new Error('Real-game Jev Max override must stay within the 1–2 request budget, got ' + requestCount);
@@ -1667,6 +1674,30 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
     );
   if (!j5LeavesI3DoubleThree) {
     throw new Error('Historical J5 must expose the late-game I3 DOUBLE_OPEN_THREE counter-threat');
+  }
+
+  const criticalTieBreak = engine.maxCriticalDoubleThreeTieBreak(
+    ['J5','F5'],
+    explicitThreat,
+    {
+      status: 'completed',
+      depthReached: 5,
+      timedOut: true,
+      scores: [
+        { move: 'F5', score: -38493, forcedResult: null },
+        { move: 'J5', score: -74983, forcedResult: null }
+      ]
+    }
+  );
+  if (
+    !criticalTieBreak.applied
+    || criticalTieBreak.winner !== 'F5'
+    || criticalTieBreak.loser !== 'J5'
+    || criticalTieBreak.candidates.length !== 1
+    || criticalTieBreak.candidates[0] !== 'F5'
+  ) {
+    throw new Error('CRITICAL double-three Deep tie-break must retain F5 over J5: '
+      + JSON.stringify(criticalTieBreak));
   }
 
   engine.setPosition(beforeG14.board, beforeG14.moves, 'jev-latest');
@@ -2362,6 +2393,90 @@ async function testRecentDepthZeroSemanticOverrideGuard() {
   }
 }
 
+/**
+ * If Alpha-Beta #1 is subsequently hard-proved losing by Threat-space, the
+ * semantic Deep guard must not resurrect it from raw recall. This is the next
+ * ply of the recent depth=0 historical line: D9 is the search leader, but
+ * Threat proves D9 loses by force while H6 remains unproved.
+ */
+async function testSemanticGuardCannotReviveThreatProvenLocalChoice() {
+  let requests = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Threat-safe override mock has no choices: ' + id);
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'H6' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.includes('H6') ? 'H6' : keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-threat-safe-override',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G9','H9','H10','F8','G8','I11','G10','G7','G11','G12','F10','I10','D10','E10',
+    'I9','F12','J8','K7','H12','I13','D8','E9'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  if (context.localSearchChoice !== 'D9') {
+    throw new Error('Threat-safe override fixture expected Alpha-Beta #1 D9, got ' + context.localSearchChoice);
+  }
+  const threat = await engine.threatAnalyze(['D9','H6'], 'max', {
+    timeBudgetMs: 1450,
+    maxThreatTurns: 8,
+    branch: 9
+  });
+  const byMove = new Map((threat?.analyses || []).map(row => [row.move, row]));
+  if (!byMove.get('D9')?.forced || byMove.get('H6')?.forced) {
+    throw new Error('Fixture must prove D9 losing while H6 remains unproved: ' + JSON.stringify(threat));
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (result.finalChoice === 'D9') {
+    throw new Error('Semantic guard resurrected Threat-proven Alpha-Beta #1 D9');
+  }
+  if (result.jevSuggested === 'H6') {
+    const guard = result.decisionTrace?.semanticOverrideGuard || null;
+    if (guard?.vetoed) {
+      throw new Error('Threat-proven D9 must not veto semantic H6: ' + JSON.stringify(guard));
+    }
+    if (guard?.reason !== 'local_search_choice_filtered_by_tactical_proof') {
+      throw new Error('Expected filtered-local guard reason, got ' + JSON.stringify(guard));
+    }
+  }
+  if (requests > 2) {
+    throw new Error('Threat-safe semantic guard changed Jev request cap: ' + requests);
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2387,6 +2502,7 @@ await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
 await testHistoricalDeepDominanceGuard();
 await testRecentDepthZeroSemanticOverrideGuard();
+await testSemanticGuardCannotReviveThreatProvenLocalChoice();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
