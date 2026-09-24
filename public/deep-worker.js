@@ -822,7 +822,9 @@ function evaluateRootCandidate(move, depth, branch, radius, cache) {
     principalVariation = [move.key, ...continuation].slice(0, 8);
     opponentBestReplies = replyTrace
       .sort((a, b) => a.score - b.score)
-      .slice(0, 2)
+      // Keep a small bounded reply set for the semantic opponent-likelihood
+      // model. Search cost is unchanged: these rows were already evaluated.
+      .slice(0, 4)
       .map(item => ({
         ...item,
         forcedResult: forcingResultFromScore(item.score, [item.move])
