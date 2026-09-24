@@ -4112,6 +4112,65 @@
     }
   }
 
+  const MAX_DEEP_DOMINANCE_MIN_DEPTH = 5;
+  const MAX_DEEP_DOMINANCE_MIN_GAP = 20000;
+  const MAX_DEEP_DOMINANCE_DANGER_SCORE = -20000;
+
+  function applyMaxDeepDominance(candidates, deepAnalysis) {
+    const rows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+    if (
+      deepAnalysis?.status !== 'completed'
+      || Number(deepAnalysis?.depthReached || 0) < MAX_DEEP_DOMINANCE_MIN_DEPTH
+      || rows.length < 2
+      || candidates.length < 2
+    ) {
+      return { candidates, applied: false, leader: null, rejected: [], gapThreshold: null };
+    }
+
+    const localLeader = candidates.find(move => Number(move.localRank) === 1);
+    const deepLeader = rows[0];
+    if (!localLeader || deepLeader?.move !== localLeader.key) {
+      return { candidates, applied: false, leader: deepLeader?.move || null, rejected: [], gapThreshold: null };
+    }
+    if (!Number.isFinite(deepLeader.score) || isSentinelSearchScore(deepLeader.score)) {
+      return { candidates, applied: false, leader: deepLeader.move, rejected: [], gapThreshold: null };
+    }
+
+    // Deep is bounded and therefore advisory, not a hard proof. Only use it as
+    // a veto when the independent Local #1 and Deep #1 agree AND another
+    // actually-searched candidate is catastrophically below that leader.
+    // Unsearched candidates stay in the pool for Jev.
+    const gapThreshold = Math.max(
+      MAX_DEEP_DOMINANCE_MIN_GAP,
+      Math.min(60000, Math.abs(deepLeader.score) * 2)
+    );
+    const scoreByMove = new Map(rows.map(row => [row.move, row]));
+    const rejected = [];
+    const filtered = candidates.filter(move => {
+      if (move.key === deepLeader.move) return true;
+      const row = scoreByMove.get(move.key);
+      if (!row || !Number.isFinite(row.score) || isSentinelSearchScore(row.score)) return true;
+      const dominated = row.score <= MAX_DEEP_DOMINANCE_DANGER_SCORE
+        && (deepLeader.score - row.score) >= gapThreshold;
+      if (dominated) rejected.push({
+        move: move.key,
+        score: Math.round(row.score),
+        rank: rows.findIndex(item => item.move === move.key) + 1
+      });
+      return !dominated;
+    });
+
+    return {
+      candidates: filtered.length ? filtered : candidates,
+      applied: rejected.length > 0,
+      leader: deepLeader.move,
+      leaderScore: Math.round(deepLeader.score),
+      depthReached: Number(deepAnalysis.depthReached || 0),
+      rejected,
+      gapThreshold: Math.round(gapThreshold)
+    };
+  }
+
   function selectMaxThreatCandidates(candidates, limit = 6) {
     const selected = [];
     const seen = new Set();
@@ -5273,6 +5332,8 @@
 
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
+    const deepDominance = applyMaxDeepDominance(candidates, deepAnalysis);
+    candidates = deepDominance.candidates;
 
     const preAtomicFrontier = await closePreAtomicLossFrontier(
       context.candidates,
@@ -5637,6 +5698,12 @@
           localTranspositionEntries: context.localSearch?.transpositionEntries ?? null,
           localTranspositionGeneration: context.localSearch?.transpositionGeneration ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
+          deepDominanceApplied: Boolean(deepDominance?.applied),
+          deepDominanceLeader: deepDominance?.leader || null,
+          deepDominanceLeaderScore: deepDominance?.leaderScore ?? null,
+          deepDominanceDepthReached: deepDominance?.depthReached ?? null,
+          deepDominanceRejected: deepDominance?.rejected || [],
+          deepDominanceGapThreshold: deepDominance?.gapThreshold ?? null,
           threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
           threatSpeculativeElapsedMs: coverage.speculative?.elapsedMs ?? null,
           threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
