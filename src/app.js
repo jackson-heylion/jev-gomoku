@@ -4433,9 +4433,13 @@
         'max',
         'jev_max_semantic_override_guard',
         {
-          timeBudgetMs: 3200,
-          maxDepth: 8,
-          branch: 9
+          // Real historical A/B: 3.2s/8/9 was not stable enough to separate
+          // I6 from the losing E10 override after E6-D5. This path runs only
+          // when Jev actually overrides Local #1, so spend a little more budget
+          // on two roots instead of weakening the normal candidate search.
+          timeBudgetMs: 4800,
+          maxDepth: 9,
+          branch: 10
         }
       );
       verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
