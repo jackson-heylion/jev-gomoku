@@ -258,6 +258,7 @@ Deep Worker 侧同样保留 Zobrist TT，并在长驻 Worker 生命周期内跨�
 - **Semantic override 两点 Deep guard**：Deep 不再提前修改 Jev 的候选池。只有 Jev 最终要推翻实际 `localSearchChoice` 时，才比较“Alpha-Beta #1 vs Jev 最终点”；优先复用已有 Deep evidence，证据不足时补一次仅两点的窄化 Worker 深搜。只有 forced-loss 或巨大、稳定的分值分离才 veto Jev，且不会增加 Jev API 请求。
 - **Threat 风险优先于数值 guard**：当 Local #1 与 Jev 最终点都有完整 Threat evidence，且 Jev 点把对手 counter-threat 明确降到更低等级时，不能仅凭 bounded Deep / Local 分值把它否决；hard Threat proof 仍高于所有数值评分。
 - **Local 分数只做最后兜底**：确定性 Local 大分差仅在两点 Deep 没拿到可用数值结论时使用；如果完成的 pair Deep 明确返回“差距不具决定性”，浅层 Local 分数不能覆盖这个结论。
+- **危险局 Deep safety finalist**：若当前 Final top2 都仍有完整的 `HIGH/CRITICAL` 对手 counter-threat，且完成至少 5 层的 Deep #1 仍在安全候选池、Threat 风险不比 top2 更差，则把 Deep #1 作为第三 finalist 交给 Jev Final Judge。它只扩充最终比较，不直接替 Jev 落子，也不提高每回合 2 次 API 请求上限。
 - **不复活已过滤 Local**：`localSearchChoice` 必须仍存在于经过 legality / local hard proof / Threat hard proof 后的当前候选池，final guard 才能回退到它；如果 Local #1 已被 deterministic proof 淘汰，Jev 的安全候选不会被 guard 反向覆盖。
 
 这些 guard 不把 bounded search 冒充 hard proof；VCF / Threat forced result 始终拥有更高优先级。
