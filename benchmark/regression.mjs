@@ -1676,6 +1676,30 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
     throw new Error('Historical J5 must expose the late-game I3 DOUBLE_OPEN_THREE counter-threat');
   }
 
+  const criticalTieBreak = engine.maxCriticalDoubleThreeTieBreak(
+    ['J5','F5'],
+    explicitThreat,
+    {
+      status: 'completed',
+      depthReached: 5,
+      timedOut: true,
+      scores: [
+        { move: 'F5', score: -38493, forcedResult: null },
+        { move: 'J5', score: -74983, forcedResult: null }
+      ]
+    }
+  );
+  if (
+    !criticalTieBreak.applied
+    || criticalTieBreak.winner !== 'F5'
+    || criticalTieBreak.loser !== 'J5'
+    || criticalTieBreak.candidates.length !== 1
+    || criticalTieBreak.candidates[0] !== 'F5'
+  ) {
+    throw new Error('CRITICAL double-three Deep tie-break must retain F5 over J5: '
+      + JSON.stringify(criticalTieBreak));
+  }
+
   engine.setPosition(beforeG14.board, beforeG14.moves, 'jev-latest');
   const result = await engine.jevMax();
   if (result.finalChoice === 'G14') {
