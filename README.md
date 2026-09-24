@@ -251,12 +251,12 @@ Deep Worker 侧同样保留 Zobrist TT，并在长驻 Worker 生命周期内跨�
 
 ### 历史败局安全守卫
 
-真实历史棋谱回放额外暴露了两类“未达到数学 hard proof、但继续交给 Jev 风险过高”的局面：
+真实历史棋谱回放额外暴露了两类“未达到数学 hard proof、但需要额外防守”的局面：
 
-- **DOUBLE_OPEN_THREE 全阶段防守**：对手能制造双轴活三时，不再只在前 16 手处理；只要 Threat evidence 标记为 `CRITICAL + DOUBLE_OPEN_THREE`，且候选池存在能消除该结构的替代点，就先剔除主动放任它的候选。它仍不是 VCF/forced-loss 数学证明，因此只有“存在更安全替代”时才生效。
-- **Local + Deep 强一致性 guard**：当 Local #1 与完成至少 5 层的 Deep #1 一致，而某个实际被 Deep 搜索过的候选低于共同第一名至少 20k、且自身进入明显危险分值区（≤ -20k）时，只淘汰这个灾难性候选。未被 Deep 搜索的候选仍保留给 Jev。
+- **DOUBLE_OPEN_THREE 早中盘防守**：在前 16 手内，对手能制造 `CRITICAL + DOUBLE_OPEN_THREE` 且存在可消除该结构的替代点时，Jev Max 会优先保留阻断点。晚中盘不再仅凭“双活三形状”做全局硬过滤，因为 37 手历史样本证明双方可能同时存在反先/强制节奏，形状本身不足以判死。
+- **最终语义覆盖 Deep guard**：Jev 仍然正常完成 Atomic / Pairwise / Critic / Final；只有当最终语义选择要**推翻实际 Local #1**时才复核。若 Local #1 已被 Threat/本地战术硬证明失败，guard 不会把它扶回；否则先使用已有 Deep 证据，必要时只对 `Local #1 vs Jev pick` 两点做一次窄化 Deep。只有 semantic move 出现 forced-loss 或“Local 仍可抗、semantic 已进入明显灾难分值且差距 ≥25k”时才 veto，并回退到 Local #1。
 
-这两个 guard 不把 bounded search 冒充 hard proof；VCF / Threat forced result 仍然拥有更高优先级。
+这个 guard 不预先改写整个候选池，也不把 bounded search 冒充 hard proof；VCF / Threat forced result 仍然拥有更高优先级。
 
 ---
 
