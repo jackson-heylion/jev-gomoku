@@ -4167,6 +4167,27 @@
       && move.deepSearchForcedResult.result === 'loss';
   }
 
+  function deepCatastrophicSurvivors(candidates) {
+    const rows = (candidates || []).filter(move => Number.isFinite(move?.deepSearchScore));
+    if (rows.length < 2) return candidates || [];
+
+    const bestScore = Math.max(...rows.map(move => move.deepSearchScore));
+    // Deep search is branch/time bounded, so only act on a very large,
+    // asymmetric separation. A normal positional gap must remain advisory.
+    // The thresholds are intentionally conservative relative to the engine's
+    // tactical evaluation scale: >= -10k means "still contestable" while
+    // <= -50k with >= 40k separation is a catastrophic line.
+    if (bestScore < -10000) return candidates || [];
+
+    const survivors = (candidates || []).filter(move => {
+      if (isDeepMateLoss(move)) return false;
+      if (!Number.isFinite(move?.deepSearchScore)) return true;
+      const gap = bestScore - move.deepSearchScore;
+      return !(move.deepSearchScore <= -50000 && gap >= 40000);
+    });
+    return survivors.length ? survivors : (candidates || []);
+  }
+
   function hardFilterMaxCandidates(candidates, threatAnalysis) {
     attachThreatEvidence(candidates, threatAnalysis);
     let filtered = candidates;
@@ -4189,6 +4210,11 @@
     const safeFromDeepMate = filtered.filter(move => !isDeepMateLoss(move));
     if (safeFromDeepMate.length && safeFromDeepMate.length < filtered.length) {
       filtered = safeFromDeepMate;
+    }
+
+    const safeFromDeepCatastrophe = deepCatastrophicSurvivors(filtered);
+    if (safeFromDeepCatastrophe.length < filtered.length) {
+      filtered = safeFromDeepCatastrophe;
     }
 
     // A DOUBLE_OPEN_THREE is one tempo earlier than an open-four fork. Keep the
