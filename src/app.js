@@ -4262,6 +4262,54 @@
     return filtered.slice(0, maxCandidateLimit());
   }
 
+  function maxLocalOverrideVerdict(localMove, semanticMove) {
+    if (!localMove || !semanticMove || localMove.key === semanticMove.key) {
+      return { vetoed: false, reason: 'no_semantic_override' };
+    }
+    if (maxHardProvenLoss(localMove)) {
+      return { vetoed: false, reason: 'local_hard_lost' };
+    }
+
+    const localScore = Number(localMove.searchScore);
+    const semanticScore = Number(semanticMove.searchScore);
+    if (
+      !Number.isFinite(localScore)
+      || !Number.isFinite(semanticScore)
+      || isSentinelSearchScore(localScore)
+      || isSentinelSearchScore(semanticScore)
+    ) {
+      return { vetoed: false, reason: 'insufficient_local_score_evidence' };
+    }
+
+    const margin = localScore - semanticScore;
+    const catastrophicNegative = localScore >= -10000
+      && semanticScore <= -25000
+      && margin >= 25000;
+    const throwsStrongAdvantage = localScore >= 10000
+      && semanticScore <= 0
+      && margin >= 25000;
+
+    if (catastrophicNegative || throwsStrongAdvantage) {
+      return {
+        vetoed: true,
+        reason: catastrophicNegative
+          ? 'semantic_catastrophic_local_separation'
+          : 'semantic_throws_strong_local_advantage',
+        localScore,
+        semanticScore,
+        margin
+      };
+    }
+
+    return {
+      vetoed: false,
+      reason: 'local_score_not_decisive',
+      localScore,
+      semanticScore,
+      margin
+    };
+  }
+
   function maxDeepOverrideVerdict(localKey, semanticKey, analysis) {
     const rows = new Map((analysis?.scores || []).map(row => [row.move, row]));
     const local = rows.get(localKey) || null;
@@ -4349,12 +4397,35 @@
         supplemental: false
       };
     }
+    if (maxHardProvenLoss(localMove)) {
+      return {
+        vetoed: false,
+        reason: 'local_hard_lost',
+        choice: semanticKey,
+        localMove: localKey,
+        semanticMove: semanticKey,
+        analysis: initialDeepAnalysis || null,
+        supplemental: false
+      };
+    }
 
     let analysis = initialDeepAnalysis;
     let verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
     let supplemental = false;
+    const localVerdict = maxLocalOverrideVerdict(localMove, semanticMove);
 
-    if (verdict.reason === 'insufficient_pair_deep_evidence') {
+    // The Local fallback is deliberately extreme and deterministic. It prevents
+    // correctness from depending on whether a two-root Worker happens to finish
+    // depth 4 under transient browser/CI load. Normal Local-vs-Jev disagreements
+    // remain semantic decisions.
+    if (!verdict.vetoed && localVerdict.vetoed) {
+      verdict = {
+        ...localVerdict,
+        deepReason: verdict.reason
+      };
+    }
+
+    if (!verdict.vetoed && verdict.reason === 'insufficient_pair_deep_evidence') {
       updateApiState('busy', 'Jev Max：Jev 改写 Alpha-Beta #1，执行两点 Deep 复核…');
       analysis = await runDeepWorkerVerification(
         [localMove, semanticMove],
@@ -4368,6 +4439,12 @@
       );
       verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
       supplemental = true;
+      if (!verdict.vetoed && localVerdict.vetoed) {
+        verdict = {
+          ...localVerdict,
+          deepReason: verdict.reason
+        };
+      }
     }
 
     return {
