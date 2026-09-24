@@ -956,6 +956,52 @@ async function testJevMaxPayloadBounds() {
     }
   }
 
+  const baseCandidates = engine.candidates('max').candidates.slice(0, 4);
+  const replyKeys = ['A1', 'B1', 'C1', 'D1'];
+  const syntheticDeep = {
+    status: 'completed',
+    depthReached: 4,
+    timedOut: false,
+    scores: baseCandidates.map((move, moveIndex) => ({
+      move: move.key,
+      score: 100 - moveIndex,
+      principalVariation: [move.key, replyKeys[0]],
+      opponentBestReplies: replyKeys.map((reply, replyIndex) => ({
+        move: reply,
+        score: -10 - replyIndex,
+        forcedResult: null,
+        tacticalFacts: {
+          source: 'synthetic-regression',
+          rank: replyIndex + 1
+        }
+      }))
+    }))
+  };
+  const opponentPayload = engine.maxSpeculativePayloadWithDeep('max', syntheticDeep);
+  const opponentPredictionIds = Object.keys(opponentPayload?.questions || {})
+    .filter(id => id.startsWith('predict_reply_'));
+  if (!opponentPredictionIds.length || opponentPredictionIds.length > 4) {
+    throw new Error('Opponent-likelihood payload must contain 1..4 bounded prediction questions');
+  }
+  if (!opponentPayload?.state?.opponent_profile || opponentPayload.state.opponent_profile.scope !== 'CURRENT_GAME_ONLY') {
+    throw new Error('Opponent-likelihood payload must expose the bounded current-game profile once');
+  }
+  if (!opponentPayload?.state?.opponent_prediction_policy) {
+    throw new Error('Opponent-likelihood payload is missing the advisory-only policy');
+  }
+  for (const id of opponentPredictionIds) {
+    const keys = Object.keys(opponentPayload.questions[id]?.criteria || {});
+    const replies = keys.filter(key => key !== 'OTHER');
+    if (replies.length !== 4 || !keys.includes('OTHER')) {
+      throw new Error('Synthetic opponent prediction must preserve four searched replies plus OTHER');
+    }
+    const candidate = id.slice('predict_reply_'.length);
+    const shared = opponentPayload.state.opponent_reply_options?.[candidate];
+    if (!shared || Object.keys(shared).length !== 4) {
+      throw new Error('Opponent reply evidence must be factored into shared state');
+    }
+  }
+
   const speculative = engine.maxSpeculativePayload('max');
   const speculativeDuelIds = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('duel_'));
   const speculativeCritics = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('critic_'));
