@@ -2221,6 +2221,22 @@ async function testHistoricalDeepDominanceGuard() {
     throw new Error('Deep dominance guard failed to reject historical G10: ' + JSON.stringify(guard));
   }
 
+  // If Deep #1 disagrees with the actual production Local #1, the guard must
+  // remain advisory even if Deep's own leader looks much stronger numerically.
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  guard = engine.maxDeepDominance('max', {
+    status: 'completed',
+    depthReached: 7,
+    scores: [
+      { move: 'G10', score: 1200, forcedResult: null },
+      { move: 'F7', score: -60000, forcedResult: null }
+    ]
+  });
+  if (guard.applied || !guard.candidates.includes('F7') || !guard.candidates.includes('G10')) {
+    throw new Error('Deep dominance must not act when Deep #1 disagrees with actual Local #1: '
+      + JSON.stringify(guard));
+  }
+
   // Recent-long continuation before the historical H9 blunder.
   position = positionFromSequence([
     'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7',
