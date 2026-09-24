@@ -2215,73 +2215,34 @@ async function testDeepMateSeparationVeto() {
     'H8','G7','H7','G8','H6','H9','H5','H4','G6'
   ]);
   engine.setPosition(position.board, position.moves, 'jev-latest');
-
-  const deep = await engine.deepAnalyze(['F7','G10'], 'max');
-  const byMove = new Map((deep?.scores || []).map(row => [row.move, row]));
-  const f7 = byMove.get('F7');
-  const g10 = byMove.get('G10');
-  if (!g10?.forcedResult?.forced || g10.forcedResult.result !== 'loss') {
-    throw new Error('Historical G10 must enter the Deep mate-loss band: ' + JSON.stringify(g10 || null));
-  }
-  if (f7?.forcedResult?.forced && f7.forcedResult.result === 'loss') {
-    throw new Error('Historical F7 must remain outside the avoidable Deep mate-loss band');
-  }
-
-  engine.setPosition(position.board, position.moves, 'jev-latest');
   const result = await engine.jevMax();
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (result.jevSuggested !== 'G10') {
+    throw new Error('Regression mock must make Jev semantically prefer G10, got ' + result.jevSuggested);
+  }
   if (result.finalChoice === 'G10') {
-    throw new Error('Jev restored historical G10 despite an avoidable Deep mate-loss sentinel');
+    throw new Error('Semantic override guard failed to veto historical G10');
   }
-  for (const payload of captured) {
-    const facts = payload?.state?.candidate_facts || {};
-    if (Object.prototype.hasOwnProperty.call(facts, 'G10')) {
-      throw new Error('Deep mate-loss G10 reached Jev candidate_facts');
-    }
-    for (const question of Object.values(payload?.questions || {})) {
-      if (Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'G10')) {
-        throw new Error('Deep mate-loss G10 reached Jev semantic voting');
-      }
-    }
+  if (!guard?.vetoed || guard.semanticMove !== 'G10' || guard.choice !== result.finalChoice) {
+    throw new Error('Historical G10 must be vetoed by narrowed Deep override guard: ' + JSON.stringify(guard));
   }
-  if (requests > 2) throw new Error('Deep mate veto changed Jev request cap: ' + requests);
+  if (!String(result.decisionTrace?.requestShape?.decisionAuthority || '').endsWith('_deep_guard')) {
+    throw new Error('Deep override veto must be visible in decisionAuthority');
+  }
+  if (requests > 2) throw new Error('Deep override guard changed Jev request cap: ' + requests);
 }
 
 /**
- * Historical 37-ply coverage loss: after White J5, Black I3 creates a
- * DOUBLE_OPEN_THREE and the following position collapses. The phase-independent
- * critical-junction veto must prefer an available candidate that does not leave
- * that double-open-three, even though the game is already well past ply 16.
+ * Historical 37-ply coverage position: both J5 and F5 leave the latent I3
+ * DOUBLE_OPEN_THREE network. This pins the important negative result from the
+ * audit: late-game DOUBLE_OPEN_THREE is CRITICAL evidence, but shape alone is
+ * not sufficient for a universal hard veto because both principal defenses can
+ * expose the same junction while differing in counter-forcing tempo.
  */
-async function testLateDoubleOpenThreeVeto() {
-  const captured = [];
+async function testLateDoubleOpenThreeStaysAdvisory() {
   const engine = await loadProductionEngine({
-    request: async ({ payload }) => {
-      captured.push(payload);
-      const answers = {};
-      for (const [id, question] of Object.entries(payload?.questions || {})) {
-        const keys = Object.keys(question?.criteria || {});
-        if (!keys.length) throw new Error('Late-double-three mock question has no choices: ' + id);
-        let choice = keys[0];
-        if (id === 'recall_check') {
-          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
-        } else if (id.startsWith('judge_')) {
-          const move = id.slice('judge_'.length);
-          choice = move === 'J5' && keys.includes('EXCELLENT')
-            ? 'EXCELLENT'
-            : keys.includes('GOOD') ? 'GOOD' : keys[0];
-        } else if (id.startsWith('critic_')) {
-          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
-        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
-          choice = keys.includes('J5') ? 'J5' : keys[0];
-        }
-        answers[id] = oneHotChoice(choice, keys);
-      }
-      return {
-        model: 'mock-late-double-open-three',
-        answers,
-        usage: { input_tokens: 1, output_tokens: 1 },
-        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
-      };
+    request: async () => {
+      throw new Error('Late double-open-three evidence regression must not call Jev');
     }
   });
 
@@ -2303,30 +2264,18 @@ async function testLateDoubleOpenThreeVeto() {
     branch: 9
   });
   const rows = new Map((threat?.analyses || []).map(row => [row.move, row]));
-  const j5 = rows.get('J5');
-  const f5 = rows.get('F5');
-  const j5DoubleThree = j5?.counterThreat?.risk === 'CRITICAL'
-    && (j5?.counterThreat?.networkMoves || []).some(row =>
-      row.move === 'I3' && row.kind === 'DOUBLE_OPEN_THREE'
-    );
-  if (!j5DoubleThree) {
-    throw new Error('Historical J5 must expose CRITICAL I3 DOUBLE_OPEN_THREE: ' + JSON.stringify(j5 || null));
-  }
-  const f5DoubleThree = f5?.counterThreat?.risk === 'CRITICAL'
-    && (f5?.counterThreat?.networkMoves || []).some(row => row.kind === 'DOUBLE_OPEN_THREE');
-  if (f5DoubleThree) {
-    throw new Error('Historical F5 should be the available non-double-three alternative: ' + JSON.stringify(f5));
-  }
-
-  engine.setPosition(position.board, position.moves, 'jev-latest');
-  const result = await engine.jevMax();
-  if (result.finalChoice === 'J5') {
-    throw new Error('Jev selected late-game J5 that leaves CRITICAL I3 double-open-three');
-  }
-  for (const payload of captured) {
-    const facts = payload?.state?.candidate_facts || {};
-    if (Object.prototype.hasOwnProperty.call(facts, 'J5')) {
-      throw new Error('Late-game critical J5 reached Jev candidate_facts');
+  for (const key of ['J5','F5']) {
+    const row = rows.get(key);
+    const exposesI3 = row?.counterThreat?.risk === 'CRITICAL'
+      && (row?.counterThreat?.networkMoves || []).some(item =>
+        item.move === 'I3' && item.kind === 'DOUBLE_OPEN_THREE'
+      );
+    if (!exposesI3) {
+      throw new Error('Historical ' + key + ' must retain CRITICAL I3 DOUBLE_OPEN_THREE evidence: '
+        + JSON.stringify(row || null));
+    }
+    if (row?.forced) {
+      throw new Error('Late DOUBLE_OPEN_THREE shape alone must not be upgraded to hard forced loss for ' + key);
     }
   }
 }
@@ -2355,7 +2304,7 @@ await testRealGameMove42ProofBoundary();
 await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
 await testDeepMateSeparationVeto();
-await testLateDoubleOpenThreeVeto();
+await testLateDoubleOpenThreeStaysAdvisory();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
