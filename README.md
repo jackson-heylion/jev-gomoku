@@ -255,10 +255,10 @@ Deep Worker 侧同样保留 Zobrist TT，并在长驻 Worker 生命周期内跨�
 
 - **DOUBLE_OPEN_THREE 分阶段防守**：前 16 手以内，如果 Threat evidence 标记为 `CRITICAL + DOUBLE_OPEN_THREE` 且存在能消除该结构的替代点，就先剔除主动放任它的候选；更晚的中盘/残局把同类形状保留为高优先级 advisory evidence，因为此时可能存在反向先手与对攻节奏。
 - **Recall 与 Local #1 分离**：Max 的候选顺序承担“别漏掉防守点/Pattern/Threat/搜索种子”的 recall 职责，不再冒充 Alpha-Beta 排名。真正的本地搜索第一名单独记录为 `localSearchChoice`。
-- **Local + Deep 强一致性 guard**：只有 `localSearchChoice` 与完成至少 5 层的 Deep #1 一致时，才允许提前淘汰已被 Deep 搜索且灾难性落后的候选；未被 Deep 搜索的候选仍保留给 Jev。
-- **Semantic override 两点 Deep guard**：Jev 最终若要推翻 `localSearchChoice`，优先复用现成 Deep evidence；两点中任一未覆盖或深度不足时，只对“Alpha-Beta #1 vs Jev 最终点”补一次窄化 Worker 深搜。只有 forced-loss 或巨大、稳定的分值分离才 veto Jev，且不会增加 Jev API 请求。
+- **Semantic override 两点 Deep guard**：Deep 不再提前修改 Jev 的候选池。只有 Jev 最终要推翻实际 `localSearchChoice` 时，才比较“Alpha-Beta #1 vs Jev 最终点”；如果普通 Deep evidence 不足，会补一次仅两点的窄化 Worker 深搜。只有 forced-loss 或巨大、稳定的分值分离才 veto Jev，且不会增加 Jev API 请求。
+- **不复活已过滤 Local**：`localSearchChoice` 必须仍存在于经过 legality / local hard proof / Threat hard proof 后的当前候选池，final guard 才能回退到它；如果 Local #1 已被 deterministic proof 淘汰，Jev 的安全候选不会被 guard 反向覆盖。
 
-这两个 guard 不把 bounded search 冒充 hard proof；VCF / Threat forced result 仍然拥有更高优先级。
+这些 guard 不把 bounded search 冒充 hard proof；VCF / Threat forced result 始终拥有更高优先级。
 
 ---
 
