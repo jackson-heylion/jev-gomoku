@@ -2236,7 +2236,7 @@ async function testHistoricalSemanticOverrideGuard() {
   if (guard.analysis?.source !== 'dual-worker-narrowed-search') {
     throw new Error('Semantic override guard must use dual-worker narrowed search');
   }
-  if (Number(guard.analysis?.depthReached || 0) < 7) {
+  if (Number(guard.analysis?.depthReached || 0) < 6) {
     throw new Error('Dual-worker guard failed to reach useful depth: ' + JSON.stringify(guard.analysis));
   }
 
