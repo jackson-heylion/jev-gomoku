@@ -375,6 +375,7 @@ async function main() {
   const report = {
     generatedAt: new Date().toISOString(),
     model: MODEL,
+    enginePolicyRevision: 'final-semantic-override-only-v1',
     maxAdditionalPlies: MAX_ADDITIONAL_PLIES,
     familyDefinition: 'Distinct historical game families; multiple regression snapshots from the same source game are deduplicated.',
     summary,
