@@ -2875,7 +2875,7 @@
         // Double-open-three creators are one ply earlier than the existing
         // direct-double-win/open-four detector. They matter in the early-midgame
         // too, so do not gate them behind the old moves.length >= 16 threshold.
-        const opponentDoubleOpenThrees = mode === 'max' && !localSearchExpired()
+        const opponentDoubleOpenThrees = mode === 'max' && moves.length < 16 && !localSearchExpired()
           ? directDoubleOpenThreeCreators(opponent, cfg.radius, 3)
           : { count: 0, points: [], moves: [] };
         const opponentForks = moves.length >= 16 && !localSearchExpired()
@@ -4112,64 +4112,162 @@
     }
   }
 
-  const MAX_DEEP_DOMINANCE_MIN_DEPTH = 5;
-  const MAX_DEEP_DOMINANCE_MIN_GAP = 20000;
-  const MAX_DEEP_DOMINANCE_DANGER_SCORE = -20000;
+  const MAX_OVERRIDE_GUARD_MIN_DEPTH = 4;
+  const MAX_OVERRIDE_GUARD_MIN_GAP = 25000;
+  const MAX_OVERRIDE_GUARD_DANGER_SCORE = -25000;
+  const MAX_OVERRIDE_GUARD_LOCAL_FLOOR = -15000;
 
-  function applyMaxDeepDominance(candidates, deepAnalysis) {
-    const rows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+  function deepRowMap(deepAnalysis) {
+    return new Map((deepAnalysis?.scores || []).map(row => [row.move, row]));
+  }
+
+  function semanticOverrideDeepVerdict(localMove, semanticMove, deepAnalysis) {
+    if (!localMove || !semanticMove || localMove.key === semanticMove.key) {
+      return { vetoed: false, reason: 'no_semantic_override' };
+    }
+    if (maxHardProvenLoss(localMove)) {
+      return { vetoed: false, reason: 'local_hard_lost' };
+    }
     if (
       deepAnalysis?.status !== 'completed'
-      || Number(deepAnalysis?.depthReached || 0) < MAX_DEEP_DOMINANCE_MIN_DEPTH
-      || rows.length < 2
-      || candidates.length < 2
+      || Number(deepAnalysis?.depthReached || 0) < MAX_OVERRIDE_GUARD_MIN_DEPTH
     ) {
-      return { candidates, applied: false, leader: null, rejected: [], gapThreshold: null };
+      return { vetoed: false, reason: 'insufficient_deep_depth' };
     }
 
-    const localLeader = candidates
-      .filter(move => Number.isFinite(move.searchScore) && !isSentinelSearchScore(move.searchScore))
-      .sort((a, b) => b.searchScore - a.searchScore)[0] || null;
-    const deepLeader = rows[0];
-    if (!localLeader || deepLeader?.move !== localLeader.key) {
-      return { candidates, applied: false, leader: deepLeader?.move || null, rejected: [], gapThreshold: null };
-    }
-    if (!Number.isFinite(deepLeader.score) || isSentinelSearchScore(deepLeader.score)) {
-      return { candidates, applied: false, leader: deepLeader.move, rejected: [], gapThreshold: null };
+    const rows = deepRowMap(deepAnalysis);
+    const local = rows.get(localMove.key);
+    const semantic = rows.get(semanticMove.key);
+    if (!local || !semantic) {
+      return { vetoed: false, reason: 'missing_pair_deep_evidence' };
     }
 
-    // Deep is bounded and therefore advisory, not a hard proof. Only use it as
-    // a veto when the independent Local #1 and Deep #1 agree AND another
-    // actually-searched candidate is catastrophically below that leader.
-    // Unsearched candidates stay in the pool for Jev.
-    const gapThreshold = Math.max(
-      MAX_DEEP_DOMINANCE_MIN_GAP,
-      Math.min(60000, Math.abs(deepLeader.score) * 2)
-    );
-    const scoreByMove = new Map(rows.map(row => [row.move, row]));
-    const rejected = [];
-    const filtered = candidates.filter(move => {
-      if (move.key === deepLeader.move) return true;
-      const row = scoreByMove.get(move.key);
-      if (!row || !Number.isFinite(row.score) || isSentinelSearchScore(row.score)) return true;
-      const dominated = row.score <= MAX_DEEP_DOMINANCE_DANGER_SCORE
-        && (deepLeader.score - row.score) >= gapThreshold;
-      if (dominated) rejected.push({
-        move: move.key,
-        score: Math.round(row.score),
-        rank: rows.findIndex(item => item.move === move.key) + 1
-      });
-      return !dominated;
-    });
+    const localForcedLoss = local?.forcedResult?.forced === true && local.forcedResult.result === 'loss';
+    const semanticForcedLoss = semantic?.forcedResult?.forced === true && semantic.forcedResult.result === 'loss';
+    if (semanticForcedLoss && !localForcedLoss) {
+      return {
+        vetoed: true,
+        reason: 'semantic_deep_forced_loss',
+        local,
+        semantic,
+        margin: null
+      };
+    }
+    if (localForcedLoss) {
+      return { vetoed: false, reason: 'local_deep_forced_loss', local, semantic };
+    }
+
+    const localScore = Number(local.score);
+    const semanticScore = Number(semantic.score);
+    const margin = localScore - semanticScore;
+    if (
+      Number.isFinite(localScore)
+      && Number.isFinite(semanticScore)
+      && localScore >= MAX_OVERRIDE_GUARD_LOCAL_FLOOR
+      && semanticScore <= MAX_OVERRIDE_GUARD_DANGER_SCORE
+      && margin >= MAX_OVERRIDE_GUARD_MIN_GAP
+    ) {
+      return {
+        vetoed: true,
+        reason: 'semantic_catastrophic_deep_separation',
+        local,
+        semantic,
+        margin
+      };
+    }
 
     return {
-      candidates: filtered.length ? filtered : candidates,
-      applied: rejected.length > 0,
-      leader: deepLeader.move,
-      leaderScore: Math.round(deepLeader.score),
-      depthReached: Number(deepAnalysis.depthReached || 0),
-      rejected,
-      gapThreshold: Math.round(gapThreshold)
+      vetoed: false,
+      reason: 'deep_pair_not_decisive',
+      local,
+      semantic,
+      margin: Number.isFinite(margin) ? margin : null
+    };
+  }
+
+  function shouldRunNarrowOverrideDeep(localMove, semanticMove, deepAnalysis) {
+    if (!localMove || !semanticMove || localMove.key === semanticMove.key) return false;
+    if (maxHardProvenLoss(localMove)) return false;
+
+    const existing = semanticOverrideDeepVerdict(localMove, semanticMove, deepAnalysis);
+    if (existing.vetoed) return false;
+
+    const localScore = Number(localMove.searchScore);
+    const semanticScore = Number(semanticMove.searchScore);
+    const shallowGap = localScore - semanticScore;
+    if (
+      Number.isFinite(localScore)
+      && Number.isFinite(semanticScore)
+      && !isSentinelSearchScore(localScore)
+      && !isSentinelSearchScore(semanticScore)
+      && semanticScore <= -15000
+      && shallowGap >= 15000
+    ) return true;
+
+    const rows = deepRowMap(deepAnalysis);
+    const localDeep = rows.get(localMove.key);
+    const semanticDeep = rows.get(semanticMove.key);
+    if (!localDeep || !semanticDeep) return true;
+
+    const deepGap = Number(localDeep.score) - Number(semanticDeep.score);
+    return Number.isFinite(deepGap)
+      && Number(semanticDeep.score) <= -20000
+      && deepGap >= 15000;
+  }
+
+  async function runMaxSemanticOverrideGuard(context, candidates, semanticMove, deepAnalysis) {
+    const localKey = context?.candidates?.[0]?.key || null;
+    const localMove = candidates.find(move => move.key === localKey) || null;
+    if (!localMove || !semanticMove || localMove.key === semanticMove.key) {
+      return {
+        vetoed: false,
+        reason: 'no_eligible_override',
+        choice: semanticMove?.key || localMove?.key || null,
+        localMove: localMove?.key || localKey,
+        semanticMove: semanticMove?.key || null,
+        analysis: null,
+        usedNarrowSearch: false
+      };
+    }
+    if (maxHardProvenLoss(localMove)) {
+      return {
+        vetoed: false,
+        reason: 'local_hard_lost',
+        choice: semanticMove.key,
+        localMove: localMove.key,
+        semanticMove: semanticMove.key,
+        analysis: null,
+        usedNarrowSearch: false
+      };
+    }
+
+    let analysis = deepAnalysis;
+    let verdict = semanticOverrideDeepVerdict(localMove, semanticMove, analysis);
+    let usedNarrowSearch = false;
+
+    if (!verdict.vetoed && shouldRunNarrowOverrideDeep(localMove, semanticMove, deepAnalysis)) {
+      updateApiState('busy', 'Jev Max：Jev 覆盖 Local #1，窄化 Deep 复核两点…');
+      analysis = await runDeepWorkerVerification(
+        [localMove, semanticMove],
+        'max',
+        'jev_max_semantic_override_guard',
+        {
+          timeBudgetMs: 3600,
+          maxDepth: 8,
+          branch: 9
+        }
+      );
+      usedNarrowSearch = true;
+      verdict = semanticOverrideDeepVerdict(localMove, semanticMove, analysis);
+    }
+
+    return {
+      ...verdict,
+      choice: verdict.vetoed ? localMove.key : semanticMove.key,
+      localMove: localMove.key,
+      semanticMove: semanticMove.key,
+      analysis,
+      usedNarrowSearch
     };
   }
 
@@ -4223,8 +4321,10 @@
     // counter-forcing resource, so do not label it LOSING globally. But when
     // at least one candidate prevents the CRITICAL junction, never let Jev
     // prefer a move that voluntarily leaves that junction available.
-    const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
-    if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    if (moves.length < 16) {
+      const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
+      if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    }
 
     return filtered.slice(0, maxCandidateLimit());
   }
@@ -5140,7 +5240,7 @@
       answer,
       finalChoice,
       localChoice: context.candidates[0]?.key || finalChoice,
-      jevSuggested: finalChoice,
+      jevSuggested: semanticChoice,
       mode: 'max',
       forced: context.forced,
       candidates: finalCandidates,
@@ -5334,8 +5434,6 @@
 
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
-    const deepDominance = applyMaxDeepDominance(candidates, deepAnalysis);
-    candidates = deepDominance.candidates;
 
     const preAtomicFrontier = await closePreAtomicLossFrontier(
       context.candidates,
@@ -5596,10 +5694,27 @@
       decisionAuthority = 'jev_max_resolution_fanout';
     }
 
-    const final = finalists.find(move => move.key === finalChoice)
+    let final = finalists.find(move => move.key === finalChoice)
       || ranked.find(move => move.key === finalChoice)
       || candidates.find(move => move.key === finalChoice);
     if (!final) throw new Error('Jev Max 最终选择无法映射到合法候选');
+
+    const semanticChoice = finalChoice;
+    const overrideGuard = await runMaxSemanticOverrideGuard(context, candidates, final, deepAnalysis);
+    if (overrideGuard.vetoed && overrideGuard.choice !== finalChoice) {
+      const guarded = candidates.find(move => move.key === overrideGuard.choice);
+      if (guarded) {
+        finalChoice = guarded.key;
+        final = guarded;
+        answer = {
+          ...(answer || {}),
+          choice: finalChoice,
+          confidence: null,
+          probabilities: { [finalChoice]: 1 }
+        };
+        decisionAuthority = decisionAuthority + '_deep_guard';
+      }
+    }
 
     const finalCandidates = [
       final,
@@ -5676,6 +5791,24 @@
           elapsedMs: coverage.supplemental?.elapsedMs ?? null
         },
         finalDecision: secondData ? compactAnswer(answer) : null,
+        semanticOverrideGuard: {
+          vetoed: Boolean(overrideGuard?.vetoed),
+          reason: overrideGuard?.reason || null,
+          localMove: overrideGuard?.localMove || null,
+          semanticMove: overrideGuard?.semanticMove || null,
+          choice: overrideGuard?.choice || null,
+          usedNarrowSearch: Boolean(overrideGuard?.usedNarrowSearch),
+          status: overrideGuard?.analysis?.status || null,
+          depthReached: overrideGuard?.analysis?.depthReached ?? null,
+          timedOut: Boolean(overrideGuard?.analysis?.timedOut),
+          elapsedMs: overrideGuard?.analysis?.elapsedMs ?? null,
+          scores: (overrideGuard?.analysis?.scores || []).map(row => ({
+            move: row.move,
+            score: Number.isFinite(row.score) ? row.score : null,
+            forcedResult: row.forcedResult || null,
+            principalVariation: Array.isArray(row.principalVariation) ? row.principalVariation.slice(0, 8) : []
+          }))
+        },
         requestShape: {
           decisionAuthority,
           candidateCount: candidates.length,
@@ -5700,12 +5833,10 @@
           localTranspositionEntries: context.localSearch?.transpositionEntries ?? null,
           localTranspositionGeneration: context.localSearch?.transpositionGeneration ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
-          deepDominanceApplied: Boolean(deepDominance?.applied),
-          deepDominanceLeader: deepDominance?.leader || null,
-          deepDominanceLeaderScore: deepDominance?.leaderScore ?? null,
-          deepDominanceDepthReached: deepDominance?.depthReached ?? null,
-          deepDominanceRejected: deepDominance?.rejected || [],
-          deepDominanceGapThreshold: deepDominance?.gapThreshold ?? null,
+          overrideGuardVetoed: Boolean(overrideGuard?.vetoed),
+          overrideGuardReason: overrideGuard?.reason || null,
+          overrideGuardUsedNarrowSearch: Boolean(overrideGuard?.usedNarrowSearch),
+          overrideGuardElapsedMs: overrideGuard?.usedNarrowSearch ? (overrideGuard?.analysis?.elapsedMs ?? null) : 0,
           threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
           threatSpeculativeElapsedMs: coverage.speculative?.elapsedMs ?? null,
           threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
