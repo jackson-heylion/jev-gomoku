@@ -135,7 +135,7 @@ Jev Max now separates two different questions:
 - **Best Reply** — the opponent's theoretically strongest response, owned by Alpha-Beta / Deep / Threat;
 - **Likely Reply** — the move this particular human is more likely to choose, estimated by Jev from the current board, recent move tendencies and the bounded reply set already searched by Local / Deep.
 
-The Deep Worker does not run another search for this feature. It simply retains up to four already-evaluated opponent replies instead of two. Jev also does not add a separate HTTP round trip: the existing speculative Fan-Out includes at most four bounded `predict_reply_*` questions.
+The Deep Worker does not run another search for this feature. It simply retains up to four already-evaluated opponent replies instead of two. The behavior prediction is enabled only after at least **three human moves** have been observed in the current game; with less history it is skipped. Jev also does not add a separate HTTP round trip: the existing speculative Fan-Out includes at most four bounded `predict_reply_*` questions.
 
 This signal is advisory and is only a tie-break among otherwise safe close candidates:
 
