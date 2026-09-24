@@ -5053,7 +5053,7 @@
     return payload;
   }
 
-  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = []) {
+  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = [], opponentPredictionLimit = 4) {
     const payload = buildMaxAtomicPayload(context, candidates);
     const tournament = buildPairwisePayload(speculativePool);
 
@@ -5064,7 +5064,7 @@
     payload.state.critic_policy = MAX_CRITIC_POLICY;
     Object.assign(payload.questions, tournament.payload.questions);
     addCriticQuestions(payload.questions, speculativePool);
-    const opponentPredictionCandidates = addOpponentPredictionQuestions(payload, speculativePool, 4);
+    const opponentPredictionCandidates = addOpponentPredictionQuestions(payload, speculativePool, opponentPredictionLimit);
 
     payload.questions.global_best = {
       type: 'choice',
@@ -5091,7 +5091,8 @@
       payload,
       pairs: tournament.pairs,
       speculativePool: speculativePool.map(move => move.key),
-      opponentPredictionCandidates
+      opponentPredictionCandidates,
+      opponentPredictionLimit
     };
   }
 
@@ -5803,29 +5804,48 @@
     let hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
     let wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
     let speculativePool = candidates.slice(0, Math.min(6, candidates.length));
-    let fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+    let opponentPredictionLimit = 4;
+    let fanout = buildMaxSpeculativePayload(
+      context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+    );
     let fanoutTokens = estimatePayloadTokens(fanout.payload);
 
-    // Keep the main candidate recall intact when possible. First reduce only
-    // speculative comparisons; if the shared-state payload still crosses the
-    // historical hard target, fall back to the existing six-candidate ceiling.
+    // Preserve the semantic candidate universe before spending budget on the
+    // advisory opponent model. Shedding order under payload pressure:
+    // 1) speculative Pairwise 6 -> 4;
+    // 2) opponent predictions 4 -> 2 -> 0;
+    // 3) only then use the historical six-candidate ceiling.
+    // Likely-reply modeling must never cause a recalled move to disappear.
     if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
       speculativePool = candidates.slice(0, Math.min(4, candidates.length));
-      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+      );
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
+    }
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && opponentPredictionLimit > 2) {
+      opponentPredictionLimit = 2;
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+      );
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
+    }
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && opponentPredictionLimit > 0) {
+      opponentPredictionLimit = 0;
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+      );
       fanoutTokens = estimatePayloadTokens(fanout.payload);
     }
     if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && candidates.length > 6) {
       candidates = candidates.slice(0, 6);
       hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
       wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
-      speculativePool = candidates.slice(0, Math.min(6, candidates.length));
-      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      speculativePool = candidates.slice(0, Math.min(4, candidates.length));
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, 0
+      );
       fanoutTokens = estimatePayloadTokens(fanout.payload);
-      if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
-        speculativePool = candidates.slice(0, 4);
-        fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
-        fanoutTokens = estimatePayloadTokens(fanout.payload);
-      }
     }
 
     updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / 对手预测 / Critic…');
@@ -6180,6 +6200,8 @@
           fanoutPairwiseCount: fanout.pairs.length * 2,
           fanoutCriticCount: fanout.speculativePool.length,
           opponentPredictionCount: fanout.opponentPredictionCandidates?.length || 0,
+          opponentPredictionLimit: fanout.opponentPredictionLimit ?? 0,
+          opponentPredictionShedForPayload: (fanout.opponentPredictionLimit ?? 0) < 4,
           pairwiseSource,
           payloadEstimatedInputTokens: estimatedInputTokens,
           payloadTokenBudgetTarget: 5000,
