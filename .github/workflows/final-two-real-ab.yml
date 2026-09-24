@@ -1,0 +1,23 @@
+name: Final Two Real A-B
+on:
+  push:
+    branches: [bench/final-two-real-ab]
+permissions:
+  contents: read
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.13.0'
+      - run: npm install --no-audit --no-fund
+      - name: Run real Jev A-B
+        env:
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+          BENCHMARK_CONFIRM: '1'
+        run: |
+          test -n "$JEV_API_KEY" || (echo "Missing JEV_API_KEY" && exit 1)
+          node benchmark/final-two-real-ab.mjs
