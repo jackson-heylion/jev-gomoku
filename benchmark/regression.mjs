@@ -2273,7 +2273,6 @@ async function testHistoricalSemanticOverrideGuard() {
 }
 
 /** The referee must derive its coordinates and board from the shared helpers. */
- and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
     for (let c = 0; c < SIZE; c++) {
