@@ -10,11 +10,12 @@
     "dev": "vite",
     "build": "vite build && node scripts/package-sites.mjs",
     "preview": "vite preview",
-    "check": "node --check src/jev-client.js && node --check src/app.js && node --check public/deep-worker.js && node --check server/index.js && node --check jev-proxy.mjs && node --check scripts/package-sites.mjs && node --check benchmark/harness.mjs && node --check benchmark/referee.mjs && node --check benchmark/run.mjs && node --check benchmark/regression.mjs && node --check benchmark/worker-shim.mjs && node --check benchmark/deep-worker-thread.mjs && npm run benchmark:smoke && npm run benchmark:regression && npm run benchmark:mock && npm run build",
+    "check": "node --check src/jev-client.js && node --check src/app.js && node --check public/deep-worker.js && node --check server/index.js && node --check jev-proxy.mjs && node --check scripts/package-sites.mjs && node --check benchmark/harness.mjs && node --check benchmark/referee.mjs && node --check benchmark/run.mjs && node --check benchmark/regression.mjs && node --check benchmark/worker-shim.mjs && node --check benchmark/deep-worker-thread.mjs && node --check benchmark/historical-real.mjs && npm run benchmark:smoke && npm run benchmark:regression && npm run benchmark:mock && npm run build",
     "benchmark": "node benchmark/run.mjs",
     "benchmark:smoke": "node benchmark/run.mjs --smoke",
     "benchmark:regression": "node benchmark/regression.mjs",
-    "benchmark:mock": "node benchmark/run.mjs --mock-jev --openings 1 --arms local,jev-final,jev-max --max-plies 6 --no-arbitration --output benchmark/results/mock"
+    "benchmark:mock": "node benchmark/run.mjs --mock-jev --openings 1 --arms local,jev-final,jev-max --max-plies 6 --no-arbitration --output benchmark/results/mock",
+    "benchmark:historical:real": "node benchmark/historical-real.mjs"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

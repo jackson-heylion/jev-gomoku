@@ -1,0 +1,61 @@
+name: Jev Historical Real Replay
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'benchmark/historical-real.mjs'
+      - '.github/workflows/historical-benchmark.yml'
+  workflow_dispatch:
+    inputs:
+      max_additional_plies:
+        description: 'Maximum continuation plies per historical family'
+        required: false
+        default: '30'
+      model:
+        description: 'Jev model'
+        required: false
+        default: 'jev-latest'
+
+permissions:
+  contents: read
+
+jobs:
+  historical-real:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.13.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify benchmark harness
+        run: |
+          node --check benchmark/historical-real.mjs
+          npm run benchmark:smoke
+
+      - name: Replay all historical game families with real Jev
+        env:
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+          BENCHMARK_CONFIRM: '1'
+          HISTORICAL_MAX_ADDITIONAL_PLIES: ${{ github.event_name == 'workflow_dispatch' && inputs.max_additional_plies || '30' }}
+          JEV_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'jev-latest' }}
+        run: |
+          test -n "$JEV_API_KEY" || (echo "Missing repository secret JEV_API_KEY" && exit 1)
+          npm run benchmark:historical:real
+
+      - name: Upload historical replay report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jev-historical-real-${{ github.run_id }}
+          path: benchmark/results/historical-real/
+          if-no-files-found: warn
+          retention-days: 30
