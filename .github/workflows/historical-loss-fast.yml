@@ -1,0 +1,17 @@
+name: Historical Loss Fast Audit
+on:
+  push:
+    branches: [diag/historical-loss-fast]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.13.0'
+      - run: npm install --no-audit --no-fund
+      - run: node benchmark/historical-loss-fast.mjs
