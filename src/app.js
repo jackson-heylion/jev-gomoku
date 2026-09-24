@@ -4127,7 +4127,9 @@
       return { candidates, applied: false, leader: null, rejected: [], gapThreshold: null };
     }
 
-    const localLeader = candidates.find(move => Number(move.localRank) === 1);
+    const localLeader = candidates
+      .filter(move => Number.isFinite(move.searchScore) && !isSentinelSearchScore(move.searchScore))
+      .sort((a, b) => b.searchScore - a.searchScore)[0] || null;
     const deepLeader = rows[0];
     if (!localLeader || deepLeader?.move !== localLeader.key) {
       return { candidates, applied: false, leader: deepLeader?.move || null, rejected: [], gapThreshold: null };
