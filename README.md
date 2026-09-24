@@ -151,7 +151,7 @@ JEV Max 的第一次请求可以并行问多个角度：
 
 ### 4. 可以提醒“可能漏招”，但不能乱编
 
-JEV 可以通过 \`OTHER\` 提醒：
+JEV 可以通过 `OTHER` 提醒：
 
 > 主候选集可能漏了好棋。
 
@@ -186,7 +186,7 @@ JEV 没有权力覆盖：
 
 > **没有搜到证明，不等于已经证明安全。**
 
-所以 timeout、搜索未完成、\`NO_PROOF\` 都不会被偷换成 \`SAFE\`。
+所以 timeout、搜索未完成、`NO_PROOF` 都不会被偷换成 `SAFE`。
 
 ## Semantic Override Guard
 
@@ -302,10 +302,10 @@ Jev Max 每回合逻辑请求硬上限是 **2**。
 
 | Arm | 作用 |
 |---|---|
-| \`local\` | 确定性基线 / fallback |
-| \`jev-final\` | Local/Deep 提供证据 → JEV 做一次最终裁决 |
-| \`jev-max\` | 当前完整有界多阶段架构 |
-| \`jev-blind\` | JEV 直接面对较宽合法集的诊断基线 |
+| `local` | 确定性基线 / fallback |
+| `jev-final` | Local/Deep 提供证据 → JEV 做一次最终裁决 |
+| `jev-max` | 当前完整有界多阶段架构 |
+| `jev-blind` | JEV 直接面对较宽合法集的诊断基线 |
 
 离线检查：
 
@@ -397,7 +397,7 @@ JEV 是 TypeSafe 的 System One Model。
 
 它的使用方式不是让模型自由输出一大段文字，而是：
 
-- 输入 \`state\`；
+- 输入 `state`；
 - 同时输入多个 typed questions；
 - 使用 Choice / Score / Noul；
 - 返回结构化答案、概率和置信信息。
@@ -424,7 +424,7 @@ Same-origin Server
 TypeSafe /v1/systemone
 ~~~
 
-\`JEV_API_KEY\` 只存在服务端环境变量，不会进入：
+`JEV_API_KEY` 只存在服务端环境变量，不会进入：
 
 - 浏览器 JS；
 - HTML；
@@ -452,11 +452,11 @@ npm run check
 
 ## 仓库入口
 
-- 主程序：\`src/app.js\`
-- JEV Client：\`src/jev-client.js\`
-- Deep Worker：\`public/deep-worker.js\`
-- Benchmark：\`benchmark/\`
-- 完整实验复盘：\`docs/JEV-RETROSPECTIVE.md\`
+- 主程序：`src/app.js`
+- JEV Client：`src/jev-client.js`
+- Deep Worker：`public/deep-worker.js`
+- Benchmark：`benchmark/`
+- 完整实验复盘：`docs/JEV-RETROSPECTIVE.md`
 
 ---
 
