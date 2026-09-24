@@ -1,0 +1,29 @@
+name: Override Search Audit
+
+on:
+  push:
+    branches:
+      - fix/semantic-override-guard
+    paths:
+      - 'benchmark/override-search-audit.mjs'
+      - 'benchmark/harness.mjs'
+      - 'src/app.js'
+      - 'public/deep-worker.js'
+      - '.github/workflows/override-search-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.13.0'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run override search audit
+        run: node benchmark/override-search-audit.mjs
