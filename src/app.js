@@ -675,7 +675,7 @@
       return {
         name: 'Jev Max',
         badge: 'MAX',
-        summary: '多算法异构召回 + Atomic + Pairwise + 对手最强回复 + Critic，由 Jev 做高信息量最终裁决。'
+        summary: '多算法异构召回 + Atomic + Pairwise + 对手最强回复 + 玩家可能回复预测 + Critic，由 Jev 做高信息量最终裁决。'
       };
     }
     if (mode === 'jev') {
@@ -4931,7 +4931,9 @@
           reply.move,
           compactEvidence({
             best_reply_rank: index + 1,
-            deep_score_from_ai_view: Number.isFinite(reply.score) ? reply.score : null,
+            deep_score_from_ai_view: Number.isFinite(reply.score) && !isSentinelSearchScore(reply.score)
+              ? Number(reply.score.toFixed(2))
+              : null,
             forced_result: reply.forced_result || null,
             tactical_facts: reply.tactical_facts || null
           })
@@ -5822,7 +5824,7 @@
       }
     }
 
-    updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / Critic…');
+    updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / 对手预测 / Critic…');
     const fanoutData = await callJev(fanout.payload);
     const opponentPredictions = attachOpponentPredictions(candidates, fanoutData?.answers || {});
     const atomic = atomicTraceFor(candidates, fanoutData?.answers || {});
