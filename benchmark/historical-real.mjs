@@ -23,7 +23,7 @@ const MAX_ATTEMPTS = 3;
 const MODEL = process.env.JEV_MODEL || 'jev-latest';
 const MODE = 'expert';
 const DELAY_MS = Math.max(0, Number(process.env.JEV_BENCH_DELAY_MS) || 350);
-const MAX_ADDITIONAL_PLIES = Math.max(8, Math.min(60, Number(process.env.HISTORICAL_MAX_ADDITIONAL_PLIES) || 24));
+const MAX_ADDITIONAL_PLIES = Math.max(8, Math.min(60, Number(process.env.HISTORICAL_MAX_ADDITIONAL_PLIES) || 30));
 const OUTPUT_DIR = path.resolve('benchmark/results/historical-real');
 
 const HISTORICAL_FAMILIES = [
