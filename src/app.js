@@ -3793,7 +3793,8 @@
     const uniqueMoves = [...new Map(
       (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
     ).values()];
-    if (uniqueMoves.length < 2) return null;
+    const allowSingle = overrides.allowSingle === true;
+    if (uniqueMoves.length < (allowSingle ? 1 : 2)) return null;
 
     if (typeof Worker === 'undefined') {
       const cfg = challengerVerificationConfig(mode);
@@ -3820,7 +3821,7 @@
         : 1500);
     const timeBudgetMs = Math.max(
       250,
-      Math.min(6500, Number(overrides.timeBudgetMs) || defaultTimeBudgetMs)
+      Math.min(10000, Number(overrides.timeBudgetMs) || defaultTimeBudgetMs)
     );
     const maxDepth = Math.max(
       3,
@@ -3833,7 +3834,7 @@
 
     return submitHeavyWorkerTask({
       id,
-      task: 'search',
+      task: overrides.focusedExactDepth === true ? 'focused_search' : 'search',
       board: board.map(row => row.slice()),
       side: aiColor(),
       rules: workerRuleConfig(),
@@ -4368,6 +4369,23 @@
     };
   }
 
+  async function runMaxExactPairDeep(localMove, semanticMove) {
+    return runDeepWorkerVerification(
+      [localMove, semanticMove],
+      'max',
+      'jev_max_semantic_override_exact_guard',
+      {
+        // Second-stage only. Jump straight to exact depth 8 in a Worker after
+        // the normal two-root iterative pass was inconclusive. This matches the
+        // deeper historical audit without blocking the browser main thread.
+        timeBudgetMs: 9000,
+        maxDepth: 8,
+        branch: 8,
+        focusedExactDepth: true
+      }
+    );
+  }
+
   async function runMaxSemanticOverrideGuard(context, candidates, semanticMove, initialDeepAnalysis) {
     const localKey = context?.localSearchChoice || null;
     const semanticKey = semanticMove?.key || null;
@@ -4444,6 +4462,31 @@
         verdict = {
           ...localVerdict,
           deepReason: verdict.reason
+        };
+      }
+    }
+
+    if (
+      !verdict.vetoed
+      && !localVerdict.vetoed
+      && ['pair_deep_not_decisive', 'insufficient_pair_deep_evidence'].includes(verdict.reason)
+    ) {
+      updateApiState('busy', 'Jev Max：两点仍接近，执行 exact depth-8 最终复核…');
+      const exactAnalysis = await runMaxExactPairDeep(localMove, semanticMove);
+      const exactVerdict = maxDeepOverrideVerdict(localKey, semanticKey, exactAnalysis);
+      if (exactAnalysis) analysis = exactAnalysis;
+      supplemental = true;
+      if (exactVerdict.vetoed) {
+        verdict = {
+          ...exactVerdict,
+          secondStage: true
+        };
+      } else {
+        verdict = {
+          ...verdict,
+          exactReason: exactVerdict.reason,
+          exactDepth: exactVerdict.depth ?? null,
+          secondStage: true
         };
       }
     }
