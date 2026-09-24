@@ -4116,7 +4116,7 @@
   const MAX_DEEP_DOMINANCE_MIN_GAP = 20000;
   const MAX_DEEP_DOMINANCE_DANGER_SCORE = -20000;
 
-  function applyMaxDeepDominance(candidates, deepAnalysis) {
+  function applyMaxDeepDominance(candidates, deepAnalysis, localChoiceKey = null) {
     const rows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
     if (
       deepAnalysis?.status !== 'completed'
@@ -4127,12 +4127,23 @@
       return { candidates, applied: false, leader: null, rejected: [], gapThreshold: null };
     }
 
-    const localLeader = candidates
-      .filter(move => Number.isFinite(move.searchScore) && !isSentinelSearchScore(move.searchScore))
-      .sort((a, b) => b.searchScore - a.searchScore)[0] || null;
+    // Use the production Local choice, not "largest raw searchScore". Candidate
+    // recall can reorder/merge roots for tactical coverage, so those are not
+    // equivalent. The guard is allowed to act only when actual Local #1 and
+    // completed Deep #1 agree.
+    const localLeader = localChoiceKey
+      ? candidates.find(move => move.key === localChoiceKey) || null
+      : candidates[0] || null;
     const deepLeader = rows[0];
     if (!localLeader || deepLeader?.move !== localLeader.key) {
-      return { candidates, applied: false, leader: deepLeader?.move || null, rejected: [], gapThreshold: null };
+      return {
+        candidates,
+        applied: false,
+        leader: deepLeader?.move || null,
+        localLeader: localLeader?.key || localChoiceKey || null,
+        rejected: [],
+        gapThreshold: null
+      };
     }
     if (!Number.isFinite(deepLeader.score) || isSentinelSearchScore(deepLeader.score)) {
       return { candidates, applied: false, leader: deepLeader.move, rejected: [], gapThreshold: null };
@@ -4166,6 +4177,7 @@
       candidates: filtered.length ? filtered : candidates,
       applied: rejected.length > 0,
       leader: deepLeader.move,
+      localLeader: localLeader.key,
       leaderScore: Math.round(deepLeader.score),
       depthReached: Number(deepAnalysis.depthReached || 0),
       rejected,
@@ -4223,8 +4235,14 @@
     // counter-forcing resource, so do not label it LOSING globally. But when
     // at least one candidate prevents the CRITICAL junction, never let Jev
     // prefer a move that voluntarily leaves that junction available.
-    const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
-    if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    // Keep the deterministic DOUBLE_OPEN_THREE veto in the early/mid opening
+    // window where the historical H9 fork is tempo-clean. Later in the game the
+    // same shape can participate in counter-forcing races, so retain it as
+    // CRITICAL evidence for Jev/Deep instead of a universal hard veto.
+    if (moves.length < 16) {
+      const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
+      if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    }
 
     return filtered.slice(0, maxCandidateLimit());
   }
@@ -5334,7 +5352,11 @@
 
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
-    const deepDominance = applyMaxDeepDominance(candidates, deepAnalysis);
+    const deepDominance = applyMaxDeepDominance(
+      candidates,
+      deepAnalysis,
+      context.candidates[0]?.key || null
+    );
     candidates = deepDominance.candidates;
 
     const preAtomicFrontier = await closePreAtomicLossFrontier(
@@ -5702,6 +5724,7 @@
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
           deepDominanceApplied: Boolean(deepDominance?.applied),
           deepDominanceLeader: deepDominance?.leader || null,
+          deepDominanceLocalLeader: deepDominance?.localLeader || context.candidates[0]?.key || null,
           deepDominanceLeaderScore: deepDominance?.leaderScore ?? null,
           deepDominanceDepthReached: deepDominance?.depthReached ?? null,
           deepDominanceRejected: deepDominance?.rejected || [],
