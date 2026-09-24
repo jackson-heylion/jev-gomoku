@@ -4335,13 +4335,15 @@
       };
     }
 
-    const localMove = candidates.find(move => move.key === localKey)
-      || context.candidates.find(move => move.key === localKey)
-      || null;
+    // The semantic guard may compare Jev only against a Local #1 that survived
+    // deterministic safety filtering. If Threat/VCF/local proof already removed
+    // Local #1, never resurrect it from the raw recall universe merely because
+    // a bounded Deep score looks attractive.
+    const localMove = candidates.find(move => move.key === localKey) || null;
     if (!localMove) {
       return {
         vetoed: false,
-        reason: 'local_search_choice_not_in_recall',
+        reason: 'local_search_choice_filtered_by_tactical_proof',
         choice: semanticKey,
         localMove: localKey,
         semanticMove: semanticKey,
