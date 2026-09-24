@@ -188,6 +188,7 @@ function summarizeDecision(result, latencyMs) {
     deepDominanceApplied: Boolean(shape.deepDominanceApplied),
     deepDominanceLeader: shape.deepDominanceLeader || null,
     deepDominanceRejected: Array.isArray(shape.deepDominanceRejected) ? shape.deepDominanceRejected : [],
+    deepSafetyFinalist: shape.deepSafetyFinalist || null,
     overrideGuardVetoed: Boolean(shape.overrideGuardVetoed),
     overrideGuardSupplemental: Boolean(shape.overrideGuardSupplemental),
     overrideGuardElapsedMs: shape.overrideGuardElapsedMs ?? null,
