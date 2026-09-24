@@ -58,10 +58,10 @@ const HISTORICAL_FAMILIES = [
   {
     id: 'coverage-37ply',
     label: '37手 Threat coverage 败局',
-    sourceSnapshots: ['pre-G14@31'],
+    sourceSnapshots: ['pre-E14@29','pre-G14@31'],
     moves: [
       'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
-      'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12','E14','E13'
+      'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12'
     ],
     rules: { overline: true, fourFour: false, threeThree: false }
   },
@@ -183,9 +183,10 @@ function summarizeDecision(result, latencyMs) {
     logicalRequests: Number(shape.logicalRequests ?? result?.client?.logicalRequests ?? 0) || 0,
     httpRequests: Number(shape.httpRequests ?? result?.client?.attempts ?? 0) || 0,
     decisionAuthority: shape.decisionAuthority || null,
-    deepDominanceApplied: Boolean(shape.deepDominanceApplied),
-    deepDominanceLeader: shape.deepDominanceLeader || null,
-    deepDominanceRejected: Array.isArray(shape.deepDominanceRejected) ? shape.deepDominanceRejected : [],
+    overrideGuardVetoed: Boolean(shape.overrideGuardVetoed),
+    overrideGuardReason: shape.overrideGuardReason || null,
+    overrideGuardUsedNarrowSearch: Boolean(shape.overrideGuardUsedNarrowSearch),
+    overrideGuardElapsedMs: Number(shape.overrideGuardElapsedMs) || 0,
     inputTokens: Number(result?.usage?.input_tokens) || 0,
     outputTokens: Number(result?.usage?.output_tokens) || 0,
     candidateCount: Number(shape.candidateCount ?? result?.candidates?.length ?? 0) || 0,
