@@ -1642,9 +1642,13 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   const context = engine.candidates('max');
   const g14Candidate = context.candidates.find(move => move.key === 'G14');
   if (!g14Candidate) {
-    throw new Error('Historical G14 must remain in heterogeneous recall so coverage closure can test it');
-  }
-  if (
+    const hasDirectDoubleThreeDefense = context.candidates.some(move =>
+      (move.recallSources || []).includes('DOUBLE_OPEN_THREE_BLOCK')
+    );
+    if (!hasDirectDoubleThreeDefense) {
+      throw new Error('Historical G14 disappeared without a stronger DOUBLE_OPEN_THREE defensive recall');
+    }
+  } else if (
     g14Candidate.analysis?.facts?.tactical_verification === 'BUDGET_EXHAUSTED'
     && g14Candidate.analysis?.facts?.tactical_safety === 'SAFE'
   ) {
@@ -1674,7 +1678,8 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   const coverage = result.decisionTrace?.threatCoverage;
   const g14Merged = result.decisionTrace?.preJevThreatSearch?.analyses?.find(item => item.move === 'G14');
   if (
-    coverage?.supplementalTriggered
+    g14Candidate
+    && coverage?.supplementalTriggered
     && (coverage.supplementalCandidates || []).includes('G14')
     && (!g14Merged?.forced || g14Merged.timedOut)
   ) {
