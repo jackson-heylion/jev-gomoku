@@ -3790,7 +3790,8 @@
     const uniqueMoves = [...new Map(
       (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
     ).values()];
-    if (uniqueMoves.length < 2) return null;
+    if (!uniqueMoves.length) return null;
+    if (uniqueMoves.length < 2 && overrides.allowSingleRoot !== true) return null;
 
     if (typeof Worker === 'undefined') {
       const cfg = challengerVerificationConfig(mode);
@@ -4309,17 +4310,59 @@
       };
     }
 
-    updateApiState('busy', 'Jev Max：Jev 改写 Local #1，窄化 Deep 复核两点…');
-    const analysis = await runDeepWorkerVerification(
-      [localMove, semanticMove],
-      'max',
-      'jev_max_semantic_override_guard',
-      {
-        timeBudgetMs: 5200,
-        maxDepth: 8,
-        branch: 9
+    updateApiState('busy', 'Jev Max：Jev 改写 Local #1，双 Worker 并行窄化 Deep 复核…');
+    const overrides = {
+      timeBudgetMs: 5200,
+      maxDepth: 8,
+      branch: 8,
+      allowSingleRoot: true
+    };
+    const [localAnalysis, semanticAnalysis] = await Promise.all([
+      runDeepWorkerVerification(
+        [localMove],
+        'max',
+        'jev_max_semantic_override_guard_local',
+        overrides
+      ),
+      runDeepWorkerVerification(
+        [semanticMove],
+        'max',
+        'jev_max_semantic_override_guard_semantic',
+        overrides
+      )
+    ]);
+
+    const localRow = localAnalysis?.scores?.[0] || null;
+    const semanticRow = semanticAnalysis?.scores?.[0] || null;
+    const completed = localAnalysis?.status === 'completed' && semanticAnalysis?.status === 'completed';
+    const analysis = {
+      status: completed ? 'completed' : 'incomplete',
+      source: 'dual-worker-narrowed-search',
+      depthReached: completed
+        ? Math.min(Number(localAnalysis?.depthReached || 0), Number(semanticAnalysis?.depthReached || 0))
+        : 0,
+      timedOut: Boolean(localAnalysis?.timedOut || semanticAnalysis?.timedOut),
+      elapsedMs: Math.max(Number(localAnalysis?.elapsedMs || 0), Number(semanticAnalysis?.elapsedMs || 0)),
+      budgetMs: Math.max(Number(localAnalysis?.budgetMs || 0), Number(semanticAnalysis?.budgetMs || 0)),
+      scores: [localRow, semanticRow]
+        .filter(Boolean)
+        .sort((a, b) => Number(b.score ?? -Infinity) - Number(a.score ?? -Infinity)),
+      workers: {
+        local: {
+          status: localAnalysis?.status || null,
+          depthReached: localAnalysis?.depthReached ?? null,
+          timedOut: Boolean(localAnalysis?.timedOut),
+          elapsedMs: localAnalysis?.elapsedMs ?? null
+        },
+        semantic: {
+          status: semanticAnalysis?.status || null,
+          depthReached: semanticAnalysis?.depthReached ?? null,
+          timedOut: Boolean(semanticAnalysis?.timedOut),
+          elapsedMs: semanticAnalysis?.elapsedMs ?? null
+        }
       }
-    );
+    };
+
     const verdict = deepOverrideGuardVerdict(localMove, semanticMove, analysis);
     return {
       ...verdict,
