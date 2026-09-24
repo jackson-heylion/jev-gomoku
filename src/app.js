@@ -675,7 +675,7 @@
       return {
         name: 'Jev Max',
         badge: 'MAX',
-        summary: '多算法异构召回 + Atomic + Pairwise + 对手最强回复 + Critic，由 Jev 做高信息量最终裁决。'
+        summary: '多算法异构召回 + Atomic + Pairwise + 对手最强回复 + 玩家可能回复预测 + Critic，由 Jev 做高信息量最终裁决。'
       };
     }
     if (mode === 'jev') {
@@ -1424,6 +1424,8 @@
         finalScore: Number.isFinite(m.finalScore) ? m.finalScore : null,
         sources: Array.isArray(m.recallSources) ? [...m.recallSources] : [],
         deepEvidence: m.deepEvidence ? JSON.parse(JSON.stringify(m.deepEvidence)) : null,
+        opponentPrediction: m.opponentPrediction ? JSON.parse(JSON.stringify(m.opponentPrediction)) : null,
+        opponentPredictionMeta: m.opponentPredictionMeta ? JSON.parse(JSON.stringify(m.opponentPredictionMeta)) : null,
         criticSummary: m.criticSummary ? JSON.parse(JSON.stringify(m.criticSummary)) : null,
         threatSearch: m.threatSearch ? JSON.parse(JSON.stringify(m.threatSearch)) : null,
         facts: m.analysis?.facts ? { ...m.analysis.facts } : null
@@ -1491,6 +1493,20 @@
           }
         });
       }
+    }
+    if (d.trace?.opponentModel?.predictions?.length) {
+      const model = d.trace.opponentModel;
+      lines.push(`  对手行为模型：scope=${model.profile?.scope || '—'}；sample=${model.profile?.sample_size ?? '—'}；confidence=${model.profile?.confidence || '—'}`);
+      model.predictions.forEach(item => {
+        const probs = item.probabilities && typeof item.probabilities === 'object'
+          ? Object.entries(item.probabilities)
+              .sort((a,b) => Number(b[1]) - Number(a[1]))
+              .slice(0, 5)
+              .map(([key, value]) => `${key} ${(Number(value) * 100).toFixed(1)}%`)
+              .join('，')
+          : '';
+        lines.push(`    若下 ${item.candidate}，预测玩家更可能回复 ${item.likely_reply || '—'}${probs ? ` [${probs}]` : ''}（仅作安全候选间参考）`);
+      });
     }
     if (d.trace?.preJevThreatSearch) {
       const t = d.trace.preJevThreatSearch;
@@ -3275,7 +3291,7 @@
       : structuredForcedResult(row.score, 'DEEP_SEARCH_SENTINEL', false);
 
     const replies = Array.isArray(row.opponentBestReplies)
-      ? row.opponentBestReplies.slice(0, 2).map(reply => compactEvidence({
+      ? row.opponentBestReplies.slice(0, 4).map(reply => compactEvidence({
           move: reply.move,
           score: Number.isFinite(reply.score) && !isSentinelSearchScore(reply.score)
             ? Number(reply.score.toFixed(2))
@@ -4847,6 +4863,133 @@
     };
   }
 
+  function opponentBehaviorProfile() {
+    const humanMoves = playerMovesInGame();
+    const sampleSize = humanMoves.length;
+    let centerMoves = 0;
+    let localFollowups = 0;
+    let alignedFollowups = 0;
+    let followupCount = 0;
+
+    for (let i = 0; i < humanMoves.length; i++) {
+      const move = humanMoves[i];
+      if (isCenterFive(move)) centerMoves++;
+      if (i === 0) continue;
+
+      const previous = humanMoves.slice(0, i);
+      followupCount++;
+      const nearest = previous.reduce((best, prior) =>
+        Math.min(best, Math.max(Math.abs(move.r - prior.r), Math.abs(move.c - prior.c))),
+      Infinity);
+      if (nearest <= 2) localFollowups++;
+
+      const aligned = previous.some(prior => {
+        const dr = Math.abs(move.r - prior.r);
+        const dc = Math.abs(move.c - prior.c);
+        return dr === 0 || dc === 0 || dr === dc;
+      });
+      if (aligned) alignedFollowups++;
+    }
+
+    return compactEvidence({
+      scope: 'CURRENT_GAME_ONLY',
+      sample_size: sampleSize,
+      confidence: sampleSize >= 7 ? 'MEDIUM' : sampleSize >= 4 ? 'LOW' : 'VERY_LOW',
+      usable_for_prediction: sampleSize >= 3,
+      recent_moves: humanMoves.slice(-6).map(move => move.coord),
+      center_five_rate: sampleSize ? Number((centerMoves / sampleSize).toFixed(2)) : null,
+      local_followup_rate: followupCount ? Number((localFollowups / followupCount).toFixed(2)) : null,
+      aligned_followup_rate: followupCount ? Number((alignedFollowups / followupCount).toFixed(2)) : null,
+      advisory_only: true
+    });
+  }
+
+  function opponentReplyOptions(move) {
+    const replies = move?.deepEvidence?.opponent_best_replies;
+    if (!Array.isArray(replies)) return [];
+    return replies
+      .filter(reply => reply && typeof reply.move === 'string')
+      .slice(0, 4);
+  }
+
+  function addOpponentPredictionQuestions(payload, candidates, limit = 4) {
+    const profile = opponentBehaviorProfile();
+    if (!profile.usable_for_prediction) return [];
+
+    const selected = (candidates || [])
+      .map(move => ({ move, replies: opponentReplyOptions(move) }))
+      .filter(item => item.replies.length >= 2)
+      .slice(0, Math.max(0, limit));
+
+    if (!selected.length) {
+      return [];
+    }
+
+    payload.state.opponent_profile = profile;
+    payload.state.opponent_prediction_policy = 'Predict the HUMAN opponent\'s most likely reply, not the theoretically strongest reply. This is advisory practical-play evidence only. It must never override legality, deterministic proof, Threat-space proof, or worst-case opponent-best-reply safety.';
+    payload.state.opponent_reply_options = {};
+
+    for (const { move, replies } of selected) {
+      payload.state.opponent_reply_options[move.key] = Object.fromEntries(
+        replies.map((reply, index) => [
+          reply.move,
+          compactEvidence({
+            best_reply_rank: index + 1,
+            deep_score_from_ai_view: Number.isFinite(reply.score) && !isSentinelSearchScore(reply.score)
+              ? Number(reply.score.toFixed(2))
+              : null,
+            forced_result: reply.forced_result || null,
+            tactical_facts: reply.tactical_facts || null
+          })
+        ])
+      );
+
+      payload.questions[`predict_reply_${move.key}`] = {
+        type: 'choice',
+        instructions: `Assume the AI plays ${move.key}. Predict which reply this HUMAN opponent is most likely to choose. Use state.opponent_profile, board geometry, and state.opponent_reply_options.${move.key}. Do NOT reinterpret this as a best-play question.`,
+        criteria: {
+          ...Object.fromEntries(replies.map(reply => [
+            reply.move,
+            `See state.opponent_reply_options.${move.key}.${reply.move}`
+          ])),
+          OTHER: 'The human is more likely to choose another legal reply outside the bounded Deep reply set.'
+        }
+      };
+    }
+
+    return selected.map(item => item.move.key);
+  }
+
+  function attachOpponentPredictions(candidates, answers) {
+    const trace = [];
+    for (const move of candidates || []) {
+      const raw = answers?.[`predict_reply_${move.key}`] || null;
+      if (!raw) continue;
+
+      const prediction = compactAnswer(raw);
+      move.opponentPrediction = prediction;
+      const replies = opponentReplyOptions(move);
+      const chosen = String(prediction?.choice || '').toUpperCase();
+      const replyIndex = replies.findIndex(reply => reply.move === chosen);
+      const probability = Number(prediction?.probabilities?.[chosen]);
+
+      move.opponentPredictionMeta = compactEvidence({
+        likely_reply: chosen || null,
+        likely_reply_probability: Number.isFinite(probability) ? Number(probability.toFixed(4)) : null,
+        best_reply_rank: replyIndex >= 0 ? replyIndex + 1 : null,
+        outside_bounded_reply_set: chosen === 'OTHER',
+        profile_confidence: opponentBehaviorProfile().confidence || 'VERY_LOW'
+      });
+
+      trace.push({
+        candidate: move.key,
+        ...move.opponentPredictionMeta,
+        probabilities: prediction?.probabilities || null
+      });
+    }
+    return trace;
+  }
+
   function maxSemanticEvidence(move, { includeRanks = false } = {}) {
     const facts = move.analysis?.facts || {};
     return compactEvidence({
@@ -4867,6 +5010,10 @@
       threat_verification: facts.threat_verification || (move.threatSearch ? (move.threatSearch.timedOut ? 'TIMEOUT' : 'COMPLETED') : 'NOT_RUN'),
       vcf_status: facts.vcf_status || null,
       vct_status: facts.vct_status || null,
+      opponent_likelihood_model: move.opponentPrediction ? compactEvidence({
+        prediction: move.opponentPrediction,
+        meta: move.opponentPredictionMeta || null
+      }) : null,
       threat_search: move.threatSearch ? compactEvidence({
         opponent_forced_win: Boolean(move.threatSearch.forced),
         timed_out: Boolean(move.threatSearch.timedOut),
@@ -4906,7 +5053,7 @@
     return payload;
   }
 
-  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = []) {
+  function buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool = [], opponentPredictionLimit = 4) {
     const payload = buildMaxAtomicPayload(context, candidates);
     const tournament = buildPairwisePayload(speculativePool);
 
@@ -4917,6 +5064,7 @@
     payload.state.critic_policy = MAX_CRITIC_POLICY;
     Object.assign(payload.questions, tournament.payload.questions);
     addCriticQuestions(payload.questions, speculativePool);
+    const opponentPredictionCandidates = addOpponentPredictionQuestions(payload, speculativePool, opponentPredictionLimit);
 
     payload.questions.global_best = {
       type: 'choice',
@@ -4942,7 +5090,9 @@
     return {
       payload,
       pairs: tournament.pairs,
-      speculativePool: speculativePool.map(move => move.key)
+      speculativePool: speculativePool.map(move => move.key),
+      opponentPredictionCandidates,
+      opponentPredictionLimit
     };
   }
 
@@ -4961,6 +5111,8 @@
     tournament.payload.state.atomic_results = Object.fromEntries(
       candidates.map(move => [move.key, atomicAnswers?.[`judge_${move.key}`] || null])
     );
+    tournament.payload.state.opponent_profile = opponentBehaviorProfile();
+    tournament.payload.state.opponent_prediction_policy = 'Opponent-likelihood evidence is advisory and may break ties between otherwise safe candidates, but it can never override legality, proven tactics, or worst-case reply safety.';
     addCriticQuestions(tournament.payload.questions, candidates);
     tournament.payload.questions.best_move = {
       type: 'choice',
@@ -5494,8 +5646,10 @@
         last_move: moves.length ? moves[moves.length - 1].coord : null,
         rules: renjuRuleDescription(),
         gomoku_doctrine: gomokuDecisionDoctrine(),
+        opponent_profile: opponentBehaviorProfile(),
+        opponent_prediction_policy: 'Likely-human-reply predictions are practical tie-break evidence only. First survive the strongest legal reply. Only when candidates remain safe and close may you prefer a move whose likely human reply is more favorable.',
         deterministic_engine_role: 'Deterministic engines are advisors, not authorities, except legality and proven forced results. You should disagree with Local / Deep when board geometry or opponent best-response analysis gives a stronger reason.',
-        priority: 'LEGALITY / proven forced result > forced tactical sequence > opponent best-response robustness > deep search > multi-axis strategic pressure > pattern heuristic > positional preference',
+        priority: 'LEGALITY / proven forced result > forced tactical sequence > opponent best-response robustness > deep search > likely-human-reply tie-break > multi-axis strategic pressure > pattern heuristic > positional preference',
         deep_search_status: compactEvidence({
           status: deepAnalysis?.status || 'unavailable',
           depth_reached: deepAnalysis?.depthReached ?? null,
@@ -5513,7 +5667,7 @@
       questions: {
         best_move: {
           type: 'choice',
-          instructions: 'Choose the FINAL legal move. Use the recorded Atomic, Pairwise, principal variation / opponent best replies, Threat-space proof, and critic result. Do not mechanically follow Local or Deep ranking. Never override a proven forced result or legality rule.',
+          instructions: 'Choose the FINAL legal move. Use the recorded Atomic, Pairwise, principal variation / opponent best replies, Threat-space proof, critic result, and any opponent_likelihood_model evidence. First require robustness against the strongest legal reply; only then use likely-human-reply prediction as a tie-break between otherwise safe close candidates. Do not mechanically follow Local or Deep ranking. Never override a proven forced result or legality rule.',
           criteria: Object.fromEntries(candidates.map(move => [
             move.key,
             `See state.candidates.${move.key}`
@@ -5650,33 +5804,53 @@
     let hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
     let wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
     let speculativePool = candidates.slice(0, Math.min(6, candidates.length));
-    let fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+    let opponentPredictionLimit = 4;
+    let fanout = buildMaxSpeculativePayload(
+      context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+    );
     let fanoutTokens = estimatePayloadTokens(fanout.payload);
 
-    // Keep the main candidate recall intact when possible. First reduce only
-    // speculative comparisons; if the shared-state payload still crosses the
-    // historical hard target, fall back to the existing six-candidate ceiling.
+    // Preserve the semantic candidate universe before spending budget on the
+    // advisory opponent model. Shedding order under payload pressure:
+    // 1) speculative Pairwise 6 -> 4;
+    // 2) opponent predictions 4 -> 2 -> 0;
+    // 3) only then use the historical six-candidate ceiling.
+    // Likely-reply modeling must never cause a recalled move to disappear.
     if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
       speculativePool = candidates.slice(0, Math.min(4, candidates.length));
-      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+      );
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
+    }
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && opponentPredictionLimit > 2) {
+      opponentPredictionLimit = 2;
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+      );
+      fanoutTokens = estimatePayloadTokens(fanout.payload);
+    }
+    if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && opponentPredictionLimit > 0) {
+      opponentPredictionLimit = 0;
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, opponentPredictionLimit
+      );
       fanoutTokens = estimatePayloadTokens(fanout.payload);
     }
     if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && candidates.length > 6) {
       candidates = candidates.slice(0, 6);
       hardRejectedThreatKeys = provenThreatLossKeys(threatAnalysis);
       wildcardPool = extraWildcardPool(candidates, 12, hardRejectedThreatKeys);
-      speculativePool = candidates.slice(0, Math.min(6, candidates.length));
-      fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
+      speculativePool = candidates.slice(0, Math.min(4, candidates.length));
+      fanout = buildMaxSpeculativePayload(
+        context, candidates, speculativePool, wildcardPool, 0
+      );
       fanoutTokens = estimatePayloadTokens(fanout.payload);
-      if (Number.isFinite(fanoutTokens) && fanoutTokens > 7000 && speculativePool.length > 4) {
-        speculativePool = candidates.slice(0, 4);
-        fanout = buildMaxSpeculativePayload(context, candidates, speculativePool, wildcardPool);
-        fanoutTokens = estimatePayloadTokens(fanout.payload);
-      }
     }
 
-    updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / Critic…');
+    updateApiState('busy', 'Jev Max：一次 Fan-Out 并行执行 Atomic / Pairwise / 对手预测 / Critic…');
     const fanoutData = await callJev(fanout.payload);
+    const opponentPredictions = attachOpponentPredictions(candidates, fanoutData?.answers || {});
     const atomic = atomicTraceFor(candidates, fanoutData?.answers || {});
     const atomicCandidateCount = candidates.length;
     const recallChoice = String(fanoutData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
@@ -5940,6 +6114,12 @@
         atomic,
         recallCheck: compactAnswer(fanoutData?.answers?.recall_check),
         globalBest,
+        opponentModel: {
+          profile: opponentBehaviorProfile(),
+          predictions: opponentPredictions,
+          candidates: fanout.opponentPredictionCandidates || [],
+          advisoryOnly: true
+        },
         pairwise,
         critic,
         wildcard: {
@@ -5970,7 +6150,7 @@
               advisory: true
             } : structuredForcedResult(item.score, 'DEEP_SEARCH_SENTINEL', false),
             principalVariation: Array.isArray(item.principalVariation) ? item.principalVariation.slice(0, 8) : [],
-            opponentBestReplies: Array.isArray(item.opponentBestReplies) ? item.opponentBestReplies.slice(0, 2) : []
+            opponentBestReplies: Array.isArray(item.opponentBestReplies) ? item.opponentBestReplies.slice(0, 4) : []
           }))
         } : null,
         preJevThreatSearch: threatEvidenceSnapshot(threatAnalysis),
@@ -6019,6 +6199,9 @@
           fanoutSpeculativePool: fanout.speculativePool,
           fanoutPairwiseCount: fanout.pairs.length * 2,
           fanoutCriticCount: fanout.speculativePool.length,
+          opponentPredictionCount: fanout.opponentPredictionCandidates?.length || 0,
+          opponentPredictionLimit: fanout.opponentPredictionLimit ?? 0,
+          opponentPredictionShedForPayload: (fanout.opponentPredictionLimit ?? 0) < 4,
           pairwiseSource,
           payloadEstimatedInputTokens: estimatedInputTokens,
           payloadTokenBudgetTarget: 5000,
@@ -6056,6 +6239,8 @@
           deepSearchRank: move.deepSearchRank ?? null,
           deepSearchScore: Number.isFinite(move.deepSearchScore) ? move.deepSearchScore : null,
           deepEvidence: move.deepEvidence || null,
+          opponentPrediction: move.opponentPrediction || null,
+          opponentPredictionMeta: move.opponentPredictionMeta || null,
           atomicScore: Number.isFinite(move.atomicScore) ? move.atomicScore : null,
           pairScore: Number.isFinite(move.pairScore) ? move.pairScore : null,
           criticSummary: move.criticSummary || null,

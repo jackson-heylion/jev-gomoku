@@ -956,6 +956,59 @@ async function testJevMaxPayloadBounds() {
     }
   }
 
+  const opponentProfilePosition = positionFromSequence(['H8', 'I9', 'F7', 'J10', 'G10']);
+  engine.setPosition(opponentProfilePosition.board, opponentProfilePosition.moves, 'jev-latest');
+  const profile = engine.opponentProfile();
+  if (profile.sample_size !== 3 || profile.usable_for_prediction !== true) {
+    throw new Error('Opponent profile must require and recognize three human samples');
+  }
+
+  const baseCandidates = engine.candidates('max').candidates.slice(0, 4);
+  const replyKeys = ['A1', 'B1', 'C1', 'D1'];
+  const syntheticDeep = {
+    status: 'completed',
+    depthReached: 4,
+    timedOut: false,
+    scores: baseCandidates.map((move, moveIndex) => ({
+      move: move.key,
+      score: 100 - moveIndex,
+      principalVariation: [move.key, replyKeys[0]],
+      opponentBestReplies: replyKeys.map((reply, replyIndex) => ({
+        move: reply,
+        score: -10 - replyIndex,
+        forcedResult: null,
+        tacticalFacts: {
+          source: 'synthetic-regression',
+          rank: replyIndex + 1
+        }
+      }))
+    }))
+  };
+  const opponentPayload = engine.maxSpeculativePayloadWithDeep('max', syntheticDeep);
+  const opponentPredictionIds = Object.keys(opponentPayload?.questions || {})
+    .filter(id => id.startsWith('predict_reply_'));
+  if (!opponentPredictionIds.length || opponentPredictionIds.length > 4) {
+    throw new Error('Opponent-likelihood payload must contain 1..4 bounded prediction questions');
+  }
+  if (!opponentPayload?.state?.opponent_profile || opponentPayload.state.opponent_profile.scope !== 'CURRENT_GAME_ONLY') {
+    throw new Error('Opponent-likelihood payload must expose the bounded current-game profile once');
+  }
+  if (!opponentPayload?.state?.opponent_prediction_policy) {
+    throw new Error('Opponent-likelihood payload is missing the advisory-only policy');
+  }
+  for (const id of opponentPredictionIds) {
+    const keys = Object.keys(opponentPayload.questions[id]?.criteria || {});
+    const replies = keys.filter(key => key !== 'OTHER');
+    if (replies.length !== 4 || !keys.includes('OTHER')) {
+      throw new Error('Synthetic opponent prediction must preserve four searched replies plus OTHER');
+    }
+    const candidate = id.slice('predict_reply_'.length);
+    const shared = opponentPayload.state.opponent_reply_options?.[candidate];
+    if (!shared || Object.keys(shared).length !== 4) {
+      throw new Error('Opponent reply evidence must be factored into shared state');
+    }
+  }
+
   const speculative = engine.maxSpeculativePayload('max');
   const speculativeDuelIds = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('duel_'));
   const speculativeCritics = Object.keys(speculative?.questions || {}).filter(id => id.startsWith('critic_'));
@@ -998,6 +1051,9 @@ async function testJevMaxPipelineAndWildcard() {
           choice = keys[0];
         } else if (id.startsWith('critic_')) {
           choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('predict_reply_')) {
+          const boundedReplies = keys.filter(key => key !== 'OTHER');
+          choice = boundedReplies[Math.min(1, boundedReplies.length - 1)] || keys[0];
         } else if (id === 'wildcard_pick') {
           choice = keys[0];
         } else if (id === 'best_move') {
@@ -1043,6 +1099,7 @@ async function testJevMaxPipelineAndWildcard() {
   if ((result.decisionTrace?.requestShape?.candidateCount || 0) > 8) throw new Error('Jev Max candidate universe exceeded 8');
   if ((result.decisionTrace?.requestShape?.pairwiseCount || 0) > 12) throw new Error('Jev Max pairwise budget exceeded 12 questions');
   if ((result.decisionTrace?.requestShape?.criticCount || 0) > 4) throw new Error('Jev Max critic budget exceeded Top 4');
+  if ((result.decisionTrace?.requestShape?.opponentPredictionCount || 0) > 4) throw new Error('Jev Max opponent prediction budget exceeded Top 4');
   if ((result.decisionTrace?.requestShape?.payloadEstimatedInputTokens || []).some(value => value > 7000)) {
     throw new Error('Jev Max estimated request payload exceeded the 7000-token hard target');
   }
@@ -1064,6 +1121,33 @@ async function testJevMaxPipelineAndWildcard() {
   if ((fanoutPayload?.state?.wildcard_pool || []).length > 16) throw new Error('Wildcard pool exceeded 16');
   if (!fanoutPayload?.questions?.global_best) throw new Error('Fan-Out must include an independent global_best consensus question');
 
+  const predictionIds = Object.keys(fanoutPayload?.questions || {}).filter(id => id.startsWith('predict_reply_'));
+  if (predictionIds.length > 4) throw new Error('Opponent-likelihood fan-out exceeded four bounded prediction questions');
+  if (predictionIds.length) {
+    if (!fanoutPayload?.state?.opponent_profile) throw new Error('Opponent-likelihood questions require one shared opponent profile');
+    if (!fanoutPayload?.state?.opponent_prediction_policy) throw new Error('Opponent-likelihood advisory policy missing from Fan-Out');
+    if (!fanoutPayload?.state?.opponent_reply_options) throw new Error('Opponent-likelihood reply options missing from shared state');
+    for (const id of predictionIds) {
+      const keys = Object.keys(fanoutPayload.questions[id]?.criteria || {});
+      const bounded = keys.filter(key => key !== 'OTHER');
+      if (bounded.length < 2 || bounded.length > 4) {
+        throw new Error('Each opponent prediction must expose 2..4 Local/Deep reply candidates');
+      }
+      const candidate = id.slice('predict_reply_'.length);
+      if (!fanoutPayload.state.opponent_reply_options[candidate]) {
+        throw new Error('Prediction question is missing shared reply evidence for ' + candidate);
+      }
+    }
+  }
+
+  const opponentModel = result.decisionTrace?.opponentModel;
+  if (!opponentModel || opponentModel.advisoryOnly !== true) {
+    throw new Error('Jev Max must trace the opponent model as advisory-only evidence');
+  }
+  if ((result.decisionTrace?.requestShape?.opponentPredictionCount || 0) !== predictionIds.length) {
+    throw new Error('Opponent prediction request-shape count does not match the actual Fan-Out');
+  }
+
   const wildcard = result.decisionTrace?.wildcard;
   if (!wildcard?.requested || !wildcard?.accepted || !wildcard?.enteredFinalists) {
     throw new Error('Validated wildcard did not enter final candidates');
@@ -1079,6 +1163,17 @@ async function testJevMaxPipelineAndWildcard() {
   const finalEvidence = finalPayload?.state?.candidates?.[result.finalChoice];
   if (!finalEvidence?.critic_summary && !Array.isArray(finalEvidence?.candidate_sources)) {
     throw new Error('Final judge did not receive structured prior-stage evidence');
+  }
+  if (!finalPayload?.state?.opponent_prediction_policy) {
+    throw new Error('Final judge is missing the likely-reply tie-break policy');
+  }
+  if (predictionIds.length) {
+    const predictedEvidence = Object.values(finalPayload?.state?.candidates || {})
+      .filter(Boolean)
+      .some(candidate => candidate.opponent_likelihood_model?.prediction);
+    if (!predictedEvidence) {
+      throw new Error('Final judge did not receive any request-1 opponent-likelihood prediction');
+    }
   }
 }
 
