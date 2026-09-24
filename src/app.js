@@ -4232,6 +4232,59 @@
       && counter.networkMoves.some(item => item?.kind === 'DOUBLE_OPEN_THREE');
   }
 
+  function applyCriticalDoubleThreeDeepTieBreak(candidates, deepAnalysis) {
+    if (
+      !Array.isArray(candidates)
+      || candidates.length !== 2
+      || deepAnalysis?.status !== 'completed'
+      || Number(deepAnalysis?.depthReached || 0) < 5
+      || !candidates.every(leavesCriticalDoubleOpenThree)
+    ) {
+      return { candidates, applied: false, winner: null, loser: null, gap: null };
+    }
+
+    const scoreByMove = new Map((deepAnalysis.scores || []).map(row => [row.move, row]));
+    const scored = candidates.map(move => ({
+      move,
+      row: scoreByMove.get(move.key) || null
+    }));
+    if (scored.some(item =>
+      !Number.isFinite(item.row?.score) || isSentinelSearchScore(item.row.score)
+    )) {
+      return { candidates, applied: false, winner: null, loser: null, gap: null };
+    }
+
+    scored.sort((a, b) => b.row.score - a.row.score);
+    const best = scored[0];
+    const worst = scored[1];
+    const gap = best.row.score - worst.row.score;
+
+    // Both moves already share the same CRITICAL tactical class; this is only
+    // a tie-break inside that narrow class. Require a large completed-Deep
+    // separation and a clearly dangerous losing evaluation for the worse move.
+    if (gap < 30000 || worst.row.score > -50000) {
+      return {
+        candidates,
+        applied: false,
+        winner: best.move.key,
+        loser: worst.move.key,
+        gap: Math.round(gap)
+      };
+    }
+
+    addRecallSource(best.move, 'CRITICAL_DEEP_TIEBREAK');
+    return {
+      candidates: [best.move],
+      applied: true,
+      winner: best.move.key,
+      loser: worst.move.key,
+      winnerScore: Math.round(best.row.score),
+      loserScore: Math.round(worst.row.score),
+      gap: Math.round(gap),
+      depthReached: Number(deepAnalysis.depthReached || 0)
+    };
+  }
+
   function hardFilterMaxCandidates(candidates, threatAnalysis) {
     attachThreatEvidence(candidates, threatAnalysis);
     let filtered = candidates;
@@ -5498,6 +5551,8 @@
       context.localSearchChoice || null
     );
     candidates = deepDominance.candidates;
+    const criticalDeepTieBreak = applyCriticalDoubleThreeDeepTieBreak(candidates, deepAnalysis);
+    candidates = criticalDeepTieBreak.candidates;
 
     const preAtomicFrontier = await closePreAtomicLossFrontier(
       context.candidates,
@@ -5519,7 +5574,11 @@
     if (candidates.length === 1) {
       return deterministicMaxResult(
         context, candidates, candidates[0].key, deepAnalysis, threatAnalysis,
-        candidates[0].analysis?.vcf ? 'proven_vcf_single' : 'threat_filter_single'
+        candidates[0].analysis?.vcf
+          ? 'proven_vcf_single'
+          : criticalDeepTieBreak.applied
+            ? 'critical_double_three_deep_tiebreak'
+            : 'threat_filter_single'
       );
     }
 
