@@ -4267,7 +4267,10 @@
     const local = rows.get(localKey) || null;
     const semantic = rows.get(semanticKey) || null;
     const depth = Number(analysis?.depthReached || 0);
-    if (analysis?.status !== 'completed' || depth < 5 || !local || !semantic) {
+    // This guard narrows to exactly two roots (Alpha-Beta #1 vs Jev choice).
+    // Depth 4 here covers much more of each root than the normal 5-root Deep
+    // batch; keep the broader pre-Jev dominance rule at depth >=5.
+    if (analysis?.status !== 'completed' || depth < 4 || !local || !semantic) {
       return { vetoed: false, reason: 'insufficient_pair_deep_evidence', local, semantic, depth };
     }
 
