@@ -3006,6 +3006,9 @@
         cfg,
         forced,
         candidates: selected,
+        // Max recall order is deliberately heterogeneous (defense/pattern/search)
+        // and must not be confused with the Alpha-Beta engine's own #1.
+        localSearchChoice: scored[0]?.key || selected[0]?.key || null,
         recall: mode === 'max'
           ? selected.map(move => ({ move: move.key, sources: [...(move.recallSources || [])] }))
           : null
@@ -3786,7 +3789,7 @@
     });
   }
 
-  async function runDeepWorkerVerification(candidateMoves, mode, trigger) {
+  async function runDeepWorkerVerification(candidateMoves, mode, trigger, overrides = {}) {
     const uniqueMoves = [...new Map(
       (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
     ).values()];
@@ -3811,12 +3814,22 @@
     }
 
     const id = ++heavyWorkerTaskSequence;
-    const timeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
+    const defaultTimeBudgetMs = TIMEOUT_SCALE * (mode === 'max'
       ? (moves.length < 10 ? 1300 : 1800)
       : mode === 'grandmaster' ? (moves.length < 10 ? 900 : 1400)
         : 1500);
-    const maxDepth = mode === 'max' ? 8 : 7;
-    const branch = mode === 'max' ? 8 : 7;
+    const timeBudgetMs = Math.max(
+      250,
+      Math.min(6500, Number(overrides.timeBudgetMs) || defaultTimeBudgetMs)
+    );
+    const maxDepth = Math.max(
+      3,
+      Math.min(8, Number(overrides.maxDepth) || (mode === 'max' ? 8 : 7))
+    );
+    const branch = Math.max(
+      4,
+      Math.min(9, Number(overrides.branch) || (mode === 'max' ? 8 : 7))
+    );
 
     return submitHeavyWorkerTask({
       id,
@@ -4029,6 +4042,8 @@
           httpRequests: 0,
           decisionAuthority: reason,
           parallelEvidence: true,
+          localSearchChoice: context.localSearchChoice || null,
+          recallPriorityChoice: context.candidates[0]?.key || null,
           localSearchBudgetMs: context.localSearch?.budgetMs ?? null,
           localSearchElapsedMs: context.localSearch?.elapsedMs ?? null,
           localSearchTimedOut: Boolean(context.localSearch?.timedOut),
@@ -4116,7 +4131,7 @@
   const MAX_DEEP_DOMINANCE_MIN_GAP = 20000;
   const MAX_DEEP_DOMINANCE_DANGER_SCORE = -20000;
 
-  function applyMaxDeepDominance(candidates, deepAnalysis) {
+  function applyMaxDeepDominance(candidates, deepAnalysis, localChoiceKey = null) {
     const rows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
     if (
       deepAnalysis?.status !== 'completed'
@@ -4127,12 +4142,23 @@
       return { candidates, applied: false, leader: null, rejected: [], gapThreshold: null };
     }
 
-    const localLeader = candidates
-      .filter(move => Number.isFinite(move.searchScore) && !isSentinelSearchScore(move.searchScore))
-      .sort((a, b) => b.searchScore - a.searchScore)[0] || null;
+    // Use the production Local choice, not "largest raw searchScore". Candidate
+    // recall can reorder/merge roots for tactical coverage, so those are not
+    // equivalent. The guard is allowed to act only when actual Local #1 and
+    // completed Deep #1 agree.
+    const localLeader = localChoiceKey
+      ? candidates.find(move => move.key === localChoiceKey) || null
+      : candidates[0] || null;
     const deepLeader = rows[0];
     if (!localLeader || deepLeader?.move !== localLeader.key) {
-      return { candidates, applied: false, leader: deepLeader?.move || null, rejected: [], gapThreshold: null };
+      return {
+        candidates,
+        applied: false,
+        leader: deepLeader?.move || null,
+        localLeader: localLeader?.key || localChoiceKey || null,
+        rejected: [],
+        gapThreshold: null
+      };
     }
     if (!Number.isFinite(deepLeader.score) || isSentinelSearchScore(deepLeader.score)) {
       return { candidates, applied: false, leader: deepLeader.move, rejected: [], gapThreshold: null };
@@ -4166,6 +4192,7 @@
       candidates: filtered.length ? filtered : candidates,
       applied: rejected.length > 0,
       leader: deepLeader.move,
+      localLeader: localLeader.key,
       leaderScore: Math.round(deepLeader.score),
       depthReached: Number(deepAnalysis.depthReached || 0),
       rejected,
@@ -4223,10 +4250,134 @@
     // counter-forcing resource, so do not label it LOSING globally. But when
     // at least one candidate prevents the CRITICAL junction, never let Jev
     // prefer a move that voluntarily leaves that junction available.
-    const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
-    if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    // Keep the deterministic DOUBLE_OPEN_THREE veto in the early/mid opening
+    // window where the historical H9 fork is tempo-clean. Later in the game the
+    // same shape can participate in counter-forcing races, so retain it as
+    // CRITICAL evidence for Jev/Deep instead of a universal hard veto.
+    if (moves.length < 16) {
+      const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
+      if (safeFromDoubleOpenThree.length) filtered = safeFromDoubleOpenThree;
+    }
 
     return filtered.slice(0, maxCandidateLimit());
+  }
+
+  function maxDeepOverrideVerdict(localKey, semanticKey, analysis) {
+    const rows = new Map((analysis?.scores || []).map(row => [row.move, row]));
+    const local = rows.get(localKey) || null;
+    const semantic = rows.get(semanticKey) || null;
+    const depth = Number(analysis?.depthReached || 0);
+    // This guard narrows to exactly two roots (Alpha-Beta #1 vs Jev choice).
+    // Depth 4 here covers much more of each root than the normal 5-root Deep
+    // batch; keep the broader pre-Jev dominance rule at depth >=5.
+    if (analysis?.status !== 'completed' || depth < 4 || !local || !semantic) {
+      return { vetoed: false, reason: 'insufficient_pair_deep_evidence', local, semantic, depth };
+    }
+
+    const localForcedLoss = local.forcedResult?.forced === true && local.forcedResult.result === 'loss';
+    const semanticForcedLoss = semantic.forcedResult?.forced === true && semantic.forcedResult.result === 'loss';
+    if (semanticForcedLoss && !localForcedLoss) {
+      return { vetoed: true, reason: 'semantic_deep_forced_loss', local, semantic, depth };
+    }
+
+    const localScore = Number(local.score);
+    const semanticScore = Number(semantic.score);
+    const margin = localScore - semanticScore;
+    if (!Number.isFinite(localScore) || !Number.isFinite(semanticScore)) {
+      return { vetoed: false, reason: 'non_numeric_pair_deep_evidence', local, semantic, depth };
+    }
+
+    // Two conservative catastrophic-separation shapes:
+    // A) Local is still roughly contestable, semantic move collapses deeply.
+    // B) Local is strongly positive while semantic move crosses to <= 0.
+    const catastrophicNegative = localScore >= -10000
+      && semanticScore <= -20000
+      && margin >= 25000;
+    const throwsStrongAdvantage = localScore >= 10000
+      && semanticScore <= 0
+      && margin >= 25000;
+
+    if (catastrophicNegative || throwsStrongAdvantage) {
+      return {
+        vetoed: true,
+        reason: catastrophicNegative
+          ? 'semantic_catastrophic_deep_separation'
+          : 'semantic_throws_strong_deep_advantage',
+        local,
+        semantic,
+        depth,
+        margin
+      };
+    }
+
+    return {
+      vetoed: false,
+      reason: 'pair_deep_not_decisive',
+      local,
+      semantic,
+      depth,
+      margin
+    };
+  }
+
+  async function runMaxSemanticOverrideGuard(context, candidates, semanticMove, initialDeepAnalysis) {
+    const localKey = context?.localSearchChoice || null;
+    const semanticKey = semanticMove?.key || null;
+    if (!localKey || !semanticKey || localKey === semanticKey) {
+      return {
+        vetoed: false,
+        reason: 'no_semantic_override',
+        choice: semanticKey || localKey || null,
+        localMove: localKey,
+        semanticMove: semanticKey,
+        analysis: null,
+        supplemental: false
+      };
+    }
+
+    const localMove = candidates.find(move => move.key === localKey)
+      || context.candidates.find(move => move.key === localKey)
+      || null;
+    if (!localMove) {
+      return {
+        vetoed: false,
+        reason: 'local_search_choice_not_in_recall',
+        choice: semanticKey,
+        localMove: localKey,
+        semanticMove: semanticKey,
+        analysis: null,
+        supplemental: false
+      };
+    }
+
+    let analysis = initialDeepAnalysis;
+    let verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
+    let supplemental = false;
+
+    if (verdict.reason === 'insufficient_pair_deep_evidence') {
+      updateApiState('busy', 'Jev Max：Jev 改写 Alpha-Beta #1，执行两点 Deep 复核…');
+      analysis = await runDeepWorkerVerification(
+        [localMove, semanticMove],
+        'max',
+        'jev_max_semantic_override_guard',
+        {
+          timeBudgetMs: 3200,
+          maxDepth: 8,
+          branch: 9
+        }
+      );
+      verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
+      supplemental = true;
+    }
+
+    return {
+      ...verdict,
+      choice: verdict.vetoed ? localKey : semanticKey,
+      localMove: localKey,
+      semanticMove: semanticKey,
+      analysis,
+      supplemental
+    };
   }
 
   async function closePreAtomicLossFrontier(contextCandidates, survivors, threatAnalysis) {
@@ -5334,7 +5485,11 @@
 
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
-    const deepDominance = applyMaxDeepDominance(candidates, deepAnalysis);
+    const deepDominance = applyMaxDeepDominance(
+      candidates,
+      deepAnalysis,
+      context.localSearchChoice || null
+    );
     candidates = deepDominance.candidates;
 
     const preAtomicFrontier = await closePreAtomicLossFrontier(
@@ -5596,10 +5751,33 @@
       decisionAuthority = 'jev_max_resolution_fanout';
     }
 
-    const final = finalists.find(move => move.key === finalChoice)
+    let final = finalists.find(move => move.key === finalChoice)
       || ranked.find(move => move.key === finalChoice)
       || candidates.find(move => move.key === finalChoice);
     if (!final) throw new Error('Jev Max 最终选择无法映射到合法候选');
+
+    const semanticChoice = finalChoice;
+    const overrideGuard = await runMaxSemanticOverrideGuard(
+      context,
+      candidates,
+      final,
+      deepAnalysis
+    );
+    if (overrideGuard.vetoed && overrideGuard.choice !== finalChoice) {
+      const guarded = candidates.find(move => move.key === overrideGuard.choice)
+        || context.candidates.find(move => move.key === overrideGuard.choice);
+      if (guarded) {
+        finalChoice = guarded.key;
+        final = guarded;
+        answer = {
+          ...(answer || {}),
+          choice: finalChoice,
+          confidence: null,
+          probabilities: { [finalChoice]: 1 }
+        };
+        decisionAuthority = decisionAuthority + '_deep_guard';
+      }
+    }
 
     const finalCandidates = [
       final,
@@ -5615,8 +5793,8 @@
     return {
       answer,
       finalChoice,
-      localChoice: context.candidates[0]?.key || candidates[0]?.key || finalChoice,
-      jevSuggested: finalChoice,
+      localChoice: context.localSearchChoice || context.candidates[0]?.key || candidates[0]?.key || finalChoice,
+      jevSuggested: semanticChoice,
       mode: 'max',
       forced: context.forced,
       candidates: finalCandidates,
@@ -5676,6 +5854,26 @@
           elapsedMs: coverage.supplemental?.elapsedMs ?? null
         },
         finalDecision: secondData ? compactAnswer(answer) : null,
+        semanticOverrideGuard: {
+          vetoed: Boolean(overrideGuard?.vetoed),
+          reason: overrideGuard?.reason || null,
+          localMove: overrideGuard?.localMove || null,
+          semanticMove: overrideGuard?.semanticMove || null,
+          choice: overrideGuard?.choice || null,
+          supplemental: Boolean(overrideGuard?.supplemental),
+          status: overrideGuard?.analysis?.status || null,
+          depthReached: overrideGuard?.analysis?.depthReached ?? null,
+          timedOut: Boolean(overrideGuard?.analysis?.timedOut),
+          elapsedMs: overrideGuard?.analysis?.elapsedMs ?? null,
+          scores: (overrideGuard?.analysis?.scores || []).map(row => ({
+            move: row.move,
+            score: Number.isFinite(row.score) ? row.score : null,
+            forcedResult: row.forcedResult || null,
+            principalVariation: Array.isArray(row.principalVariation)
+              ? row.principalVariation.slice(0, 8)
+              : []
+          }))
+        },
         requestShape: {
           decisionAuthority,
           candidateCount: candidates.length,
@@ -5702,6 +5900,10 @@
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
           deepDominanceApplied: Boolean(deepDominance?.applied),
           deepDominanceLeader: deepDominance?.leader || null,
+          deepDominanceLocalLeader: deepDominance?.localLeader || context.localSearchChoice || null,
+          overrideGuardVetoed: Boolean(overrideGuard?.vetoed),
+          overrideGuardSupplemental: Boolean(overrideGuard?.supplemental),
+          overrideGuardElapsedMs: overrideGuard?.analysis?.elapsedMs ?? null,
           deepDominanceLeaderScore: deepDominance?.leaderScore ?? null,
           deepDominanceDepthReached: deepDominance?.depthReached ?? null,
           deepDominanceRejected: deepDominance?.rejected || [],
@@ -5730,11 +5932,13 @@
           facts: move.analysis?.facts || null
         }))
       },
-      stageNote: logicalRequests === 1
-        ? `Jev Max：Speculative Fan-Out 单请求收敛，选择 ${finalChoice}`
-        : decisionAuthority === 'jev_max_resolution_fanout'
-          ? `Jev Max：首轮 Fan-Out + 困难局面 Resolution Fan-Out，2 次 Jev 请求后选择 ${finalChoice}`
-          : `Jev Max：首轮 Fan-Out 后证据仍有分歧，第 2 次 Final Judge 选择 ${finalChoice}`
+      stageNote: overrideGuard?.vetoed
+        ? `Jev Max：Jev 语义选择 ${semanticChoice}，两点 Deep 复核后保留 Alpha-Beta #1 ${finalChoice}`
+        : logicalRequests === 1
+          ? `Jev Max：Speculative Fan-Out 单请求收敛，选择 ${finalChoice}`
+          : decisionAuthority === 'jev_max_resolution_fanout'
+            ? `Jev Max：首轮 Fan-Out + 困难局面 Resolution Fan-Out，2 次 Jev 请求后选择 ${finalChoice}`
+            : `Jev Max：首轮 Fan-Out 后证据仍有分歧，第 2 次 Final Judge 选择 ${finalChoice}`
     };
   }
 
