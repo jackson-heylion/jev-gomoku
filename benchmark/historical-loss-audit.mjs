@@ -90,6 +90,12 @@ for (const sample of CASES) {
     const forced = completed.filter(key => rows.get(key)?.forced === true);
     const unresolved = keys.filter(key => !rows.has(key) || rows.get(key)?.timedOut === true);
 
+    let deepPair = null;
+    if (chosen && historicalLocal && chosen !== historicalLocal) {
+      engine.setPosition(cloneBoard(referee.board), referee.moves.map(m => ({...m})), 'jev-latest');
+      deepPair = await engine.deepAnalyze([historicalLocal, chosen], 'max');
+    }
+
     let arbitration = null;
     if (chosen && historicalLocal && chosen !== historicalLocal) {
       engine.setPosition(cloneBoard(referee.board), referee.moves.map(m => ({...m})), 'jev-latest');
@@ -120,6 +126,7 @@ for (const sample of CASES) {
       unresolved,
       chosenThreat: compactThreat(rows.get(chosen)),
       localThreat: compactThreat(rows.get(historicalLocal)),
+      deepPair,
       arbitration
     }));
 
