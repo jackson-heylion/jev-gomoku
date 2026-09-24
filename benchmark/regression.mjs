@@ -956,6 +956,13 @@ async function testJevMaxPayloadBounds() {
     }
   }
 
+  const opponentProfilePosition = positionFromSequence(['H8', 'I9', 'F7', 'J10', 'G10']);
+  engine.setPosition(opponentProfilePosition.board, opponentProfilePosition.moves, 'jev-latest');
+  const profile = engine.opponentProfile();
+  if (profile.sample_size !== 3 || profile.usable_for_prediction !== true) {
+    throw new Error('Opponent profile must require and recognize three human samples');
+  }
+
   const baseCandidates = engine.candidates('max').candidates.slice(0, 4);
   const replyKeys = ['A1', 'B1', 'C1', 'D1'];
   const syntheticDeep = {
