@@ -2442,6 +2442,82 @@ async function testSemanticOverrideNeverResurrectsHardLostLocal() {
   }
 }
 
+
+/**
+ * Real Jev A/B on the recent-long family proved that after E6-D5, allowing
+ * semantic E10 loses while forcing production Local #1 I6 survives the 30-ply
+ * continuation. Force Jev to prefer E10 and require the deeper two-root guard
+ * to preserve I6.
+ */
+async function testRecentLongSemanticOverrideGuard() {
+  let requests = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Recent-long override mock has no choices: ' + id);
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'E10' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.includes('E10') ? 'E10' : keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-recent-long-override',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7',
+    'E6','D5'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const context = engine.candidates('max');
+  if (context.localSearchChoice !== 'I6') {
+    throw new Error('Recent-long Alpha-Beta #1 must be I6, got ' + context.localSearchChoice);
+  }
+  if (!context.candidates.some(move => move.key === 'E10')) {
+    throw new Error('Recent-long E10 must remain available for semantic-override regression');
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (result.jevSuggested !== 'E10') {
+    throw new Error('Regression mock must semantically prefer E10, got ' + result.jevSuggested);
+  }
+  if (result.finalChoice !== 'I6') {
+    throw new Error('Deeper two-root guard must retain I6 over historical E10, got ' + result.finalChoice);
+  }
+  if (!guard?.vetoed || guard.localMove !== 'I6' || guard.semanticMove !== 'E10') {
+    throw new Error('Recent-long E10 override was not vetoed: ' + JSON.stringify(guard));
+  }
+  if (requests < 1 || requests > 2) {
+    throw new Error('Recent-long semantic guard changed Jev request cap: ' + requests);
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2467,6 +2543,7 @@ await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
 await testHistoricalDeepDominanceGuard();
 await testRecentDepthZeroSemanticOverrideGuard();
+await testRecentLongSemanticOverrideGuard();
 await testSemanticOverrideNeverResurrectsHardLostLocal();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
