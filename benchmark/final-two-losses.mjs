@@ -19,6 +19,13 @@ const CASES = [
     ]
   },
   {
+    id: 'coverage-pre-D11',
+    moves: [
+      'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
+      'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9'
+    ]
+  },
+  {
     id: 'recent-long-after-E6-D5',
     moves: [
       'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7',
@@ -52,7 +59,9 @@ for (const sample of CASES) {
     ? [['J9','E6'],['J9','D5'],['E6','D5']]
     : sample.id === 'recent-long-after-E6-D5'
       ? [['I6','E10'],['I6','H9'],['I6','F9'],['E10','H9']]
-      : [['E13','F5'],['E13','J5'],['J5','F5'],['E14','F5']];
+      : sample.id === 'coverage-pre-D11'
+        ? [['D11','C12'],['D11','F5'],['D11','J5'],['C12','F5']]
+        : [['E13','F5'],['E13','J5'],['J5','F5'],['E14','F5']];
   const arbitration = [];
   for (const [a,b] of focusPairs) {
     engine.setPosition(cloneBoard(referee.board),referee.moves.map(m=>({...m})),'jev-latest');
