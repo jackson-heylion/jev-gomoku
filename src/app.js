@@ -4383,13 +4383,14 @@
       };
     }
 
-    const localMove = candidates.find(move => move.key === localKey)
-      || context.candidates.find(move => move.key === localKey)
-      || null;
+    // Never resurrect a Local #1 that deterministic pre-Jev filtering already
+    // removed. The final guard may choose only between candidates that are still
+    // alive after legality / local hard proof / Threat hard proof filtering.
+    const localMove = candidates.find(move => move.key === localKey) || null;
     if (!localMove) {
       return {
         vetoed: false,
-        reason: 'local_search_choice_not_in_recall',
+        reason: 'local_search_choice_filtered_before_semantic',
         choice: semanticKey,
         localMove: localKey,
         semanticMove: semanticKey,
@@ -5562,12 +5563,22 @@
 
     attachMaxDeepEvidence(candidates, deepAnalysis);
     candidates = hardFilterMaxCandidates(candidates, threatAnalysis);
-    const deepDominance = applyMaxDeepDominance(
-      candidates,
-      deepAnalysis,
-      context.localSearchChoice || null
-    );
-    candidates = deepDominance.candidates;
+
+    // Do not mutate the semantic candidate pool from bounded Deep rankings.
+    // Real historical replay showed that early global dominance pruning can
+    // improve one line while regressing unrelated positions. Deep remains
+    // advisory here; a catastrophic Local-vs-Jev disagreement is checked only
+    // after Jev has actually chosen to override the production Local #1.
+    const deepDominance = {
+      applied: false,
+      leader: null,
+      localLeader: context.localSearchChoice || null,
+      leaderScore: null,
+      depthReached: deepAnalysis?.depthReached ?? null,
+      rejected: [],
+      gapThreshold: null,
+      disabledReason: 'final_semantic_override_guard_only'
+    };
 
     const preAtomicFrontier = await closePreAtomicLossFrontier(
       context.candidates,
