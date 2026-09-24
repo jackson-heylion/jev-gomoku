@@ -2202,11 +2202,9 @@ async function testHistoricalDeepDominanceGuard() {
   ]);
   engine.setPosition(position.board, position.moves, 'jev-latest');
   let context = engine.candidates('max');
-  const straightLocalLeader = [...context.candidates]
-    .filter(move => Number.isFinite(move.searchScore))
-    .sort((a, b) => b.searchScore - a.searchScore)[0]?.key;
+  const straightLocalLeader = context.localSearchChoice || null;
   if (straightLocalLeader !== 'F7' || !context.candidates.some(move => move.key === 'G10')) {
-    throw new Error('Historical straight-five alpha-beta leader changed: ' + straightLocalLeader);
+    throw new Error('Historical straight-five Alpha-Beta leader changed: ' + straightLocalLeader);
   }
   let guard = engine.maxDeepDominance('max', {
     status: 'completed',
@@ -2244,17 +2242,15 @@ async function testHistoricalDeepDominanceGuard() {
   ]);
   engine.setPosition(position.board, position.moves, 'jev-latest');
   context = engine.candidates('max');
-  const actualRecentLocal = context.candidates[0]?.key || null;
-  const recentRawScoreLeader = [...context.candidates]
-    .filter(move => Number.isFinite(move.searchScore))
-    .sort((a, b) => b.searchScore - a.searchScore)[0]?.key;
+  const recallPriority = context.candidates[0]?.key || null;
+  const recentLocalSearchChoice = context.localSearchChoice || null;
   if (
-    actualRecentLocal !== 'J9'
-    || recentRawScoreLeader !== 'I6'
+    recallPriority !== 'J9'
+    || recentLocalSearchChoice !== 'I6'
     || !context.candidates.some(move => move.key === 'H9')
   ) {
-    throw new Error('Historical recent-long leader split changed: '
-      + JSON.stringify({ actualRecentLocal, recentRawScoreLeader }));
+    throw new Error('Historical recent-long recall/search split changed: '
+      + JSON.stringify({ recallPriority, recentLocalSearchChoice }));
   }
   guard = engine.maxDeepDominance('max', {
     status: 'completed',
@@ -2265,24 +2261,104 @@ async function testHistoricalDeepDominanceGuard() {
       { move: 'H9', score: -37177, forcedResult: null }
     ]
   });
-  if (guard.applied || !guard.candidates.includes('H9') || !guard.candidates.includes('I6')) {
-    throw new Error('Deep dominance must stay advisory when actual Local #1 J9 disagrees with Deep #1 I6: '
+  if (!guard.applied || guard.candidates.includes('H9') || !guard.candidates.includes('I6')) {
+    throw new Error('Deep dominance must use Alpha-Beta #1 I6, not recall-priority J9: '
       + JSON.stringify(guard));
   }
 
-  // It must also remain advisory below the reliability floor even when actual
-  // Local #1 and Deep #1 do agree.
+  // It must also remain advisory below the reliability floor even when
+  // Alpha-Beta #1 and Deep #1 agree.
   engine.setPosition(position.board, position.moves, 'jev-latest');
   guard = engine.maxDeepDominance('max', {
     status: 'completed',
     depthReached: 4,
     scores: [
-      { move: 'J9', score: 83, forcedResult: null },
+      { move: 'I6', score: 83, forcedResult: null },
       { move: 'H9', score: -50000, forcedResult: null }
     ]
   });
   if (guard.applied || !guard.candidates.includes('H9')) {
     throw new Error('Deep dominance guard must not activate below depth 5');
+  }
+}
+
+/**
+ * Second real historical replay: at ply 21 in the recent depth=0 family,
+ * heterogeneous recall kept D8 available and real Jev promoted it, but the
+ * actual Alpha-Beta #1 E9 was dramatically better under deeper search.
+ * Force the semantic layer to prefer D8; the final two-point Deep guard must
+ * keep E9 without adding a third Jev request.
+ */
+async function testRecentDepthZeroSemanticOverrideGuard() {
+  let requests = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Depth0 override-guard mock has no choices: ' + id);
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'D8' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.includes('D8') ? 'D8' : keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-depth0-override-guard',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G9','H9','H10','F8','G8','I11','G10','G7','G11','G12','F10','I10','D10','E10',
+    'I9','F12','J8','K7','H12','I13'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  if (context.localSearchChoice !== 'E9') {
+    throw new Error('Recent depth0 Alpha-Beta leader must be E9, got ' + context.localSearchChoice);
+  }
+  if (!context.candidates.some(move => move.key === 'D8')) {
+    throw new Error('Recent depth0 D8 must remain in recall for semantic-override regression');
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (result.jevSuggested !== 'D8') {
+    throw new Error('Regression mock must semantically prefer D8, got ' + result.jevSuggested);
+  }
+  if (result.finalChoice !== 'E9') {
+    throw new Error('Two-point Deep guard must keep Alpha-Beta #1 E9, got ' + result.finalChoice);
+  }
+  if (!guard?.vetoed || guard.localMove !== 'E9' || guard.semanticMove !== 'D8') {
+    throw new Error('Recent depth0 D8 override was not vetoed: ' + JSON.stringify(guard));
+  }
+  if (requests < 1 || requests > 2) {
+    throw new Error('Semantic Deep guard must not add Jev requests, got ' + requests);
+  }
+  if (!String(result.decisionTrace?.requestShape?.decisionAuthority || '').endsWith('_deep_guard')) {
+    throw new Error('Semantic Deep guard decisionAuthority missing _deep_guard suffix');
   }
 }
 
@@ -2310,6 +2386,7 @@ await testRealGameMove42ProofBoundary();
 await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
 await testHistoricalDeepDominanceGuard();
+await testRecentDepthZeroSemanticOverrideGuard();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
