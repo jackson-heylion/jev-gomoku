@@ -1656,6 +1656,14 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   if (!g14Proof?.forced || !['F5','J5'].includes(g14Proof.line?.[0])) {
     throw new Error('Historical G14 must be proved losing through Black F5/J5 fork creator');
   }
+  const j5Threat = explicitThreat?.analyses?.find(item => item.move === 'J5');
+  const j5LeavesI3DoubleThree = j5Threat?.counterThreat?.risk === 'CRITICAL'
+    && (j5Threat?.counterThreat?.networkMoves || []).some(item =>
+      item.move === 'I3' && item.kind === 'DOUBLE_OPEN_THREE' && item.openThreeDirections >= 2
+    );
+  if (!j5LeavesI3DoubleThree) {
+    throw new Error('Historical J5 must expose the late-game I3 DOUBLE_OPEN_THREE counter-threat');
+  }
 
   engine.setPosition(beforeG14.board, beforeG14.moves, 'jev-latest');
   const result = await engine.jevMax();
@@ -1685,8 +1693,8 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
     throw new Error('Threat-proved G14 reached the second-stage finalist set');
   }
 
-  if (!['F5','J5'].includes(result.finalChoice)) {
-    throw new Error('Regression mock should retain the direct defensive F5/J5 family, got ' + result.finalChoice);
+  if (result.finalChoice !== 'F5') {
+    throw new Error('Late-game DOUBLE_OPEN_THREE veto should eliminate J5 and retain F5, got ' + result.finalChoice);
   }
   if (requestCount < 1 || requestCount > 2) {
     throw new Error('Threat coverage closure changed the Jev request budget: ' + requestCount);
