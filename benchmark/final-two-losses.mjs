@@ -41,6 +41,19 @@ for (const sample of CASES) {
   const deep=await engine.deepAnalyze(keys.slice(0,5),'max');
 
   const rows=new Map((threat?.analyses||[]).map(r=>[r.move,r]));
+  const focusPairs = sample.id === 'recent-long-root'
+    ? [['J9','E6'],['J9','D5'],['E6','D5']]
+    : [['E13','F5'],['E13','J5'],['J5','F5'],['E14','F5']];
+  const arbitration = [];
+  for (const [a,b] of focusPairs) {
+    engine.setPosition(cloneBoard(referee.board),referee.moves.map(m=>({...m})),'jev-latest');
+    try {
+      arbitration.push(engine.arbitrate(a,b,{mode:'expert',depth:8,branch:8,vcfDepth:5,vctDepth:3}));
+    } catch (error) {
+      arbitration.push({a,b,error:String(error?.message||error)});
+    }
+  }
+
   console.log('FINAL_AUDIT',JSON.stringify({
     id:sample.id,
     ply:referee.plies,
@@ -65,6 +78,7 @@ for (const sample of CASES) {
         }:null
       };
     }),
+    arbitration,
     deep:{
       status:deep?.status||null,
       depthReached:deep?.depthReached??null,
