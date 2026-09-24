@@ -1642,9 +1642,13 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   const context = engine.candidates('max');
   const g14Candidate = context.candidates.find(move => move.key === 'G14');
   if (!g14Candidate) {
-    throw new Error('Historical G14 must remain in heterogeneous recall so coverage closure can test it');
-  }
-  if (
+    const hasDirectDoubleThreeDefense = context.candidates.some(move =>
+      (move.recallSources || []).includes('DOUBLE_OPEN_THREE_BLOCK')
+    );
+    if (!hasDirectDoubleThreeDefense) {
+      throw new Error('Historical G14 disappeared without a stronger DOUBLE_OPEN_THREE defensive recall');
+    }
+  } else if (
     g14Candidate.analysis?.facts?.tactical_verification === 'BUDGET_EXHAUSTED'
     && g14Candidate.analysis?.facts?.tactical_safety === 'SAFE'
   ) {
@@ -1656,6 +1660,14 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   if (!g14Proof?.forced || !['F5','J5'].includes(g14Proof.line?.[0])) {
     throw new Error('Historical G14 must be proved losing through Black F5/J5 fork creator');
   }
+  const j5Threat = explicitThreat?.analyses?.find(item => item.move === 'J5');
+  const j5LeavesI3DoubleThree = j5Threat?.counterThreat?.risk === 'CRITICAL'
+    && (j5Threat?.counterThreat?.networkMoves || []).some(item =>
+      item.move === 'I3' && item.kind === 'DOUBLE_OPEN_THREE' && item.openThreeDirections >= 2
+    );
+  if (!j5LeavesI3DoubleThree) {
+    throw new Error('Historical J5 must expose the late-game I3 DOUBLE_OPEN_THREE counter-threat');
+  }
 
   engine.setPosition(beforeG14.board, beforeG14.moves, 'jev-latest');
   const result = await engine.jevMax();
@@ -1666,7 +1678,8 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
   const coverage = result.decisionTrace?.threatCoverage;
   const g14Merged = result.decisionTrace?.preJevThreatSearch?.analyses?.find(item => item.move === 'G14');
   if (
-    coverage?.supplementalTriggered
+    g14Candidate
+    && coverage?.supplementalTriggered
     && (coverage.supplementalCandidates || []).includes('G14')
     && (!g14Merged?.forced || g14Merged.timedOut)
   ) {
@@ -1685,8 +1698,8 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
     throw new Error('Threat-proved G14 reached the second-stage finalist set');
   }
 
-  if (!['F5','J5'].includes(result.finalChoice)) {
-    throw new Error('Regression mock should retain the direct defensive F5/J5 family, got ' + result.finalChoice);
+  if (result.finalChoice !== 'F5') {
+    throw new Error('Late-game DOUBLE_OPEN_THREE veto should eliminate J5 and retain F5, got ' + result.finalChoice);
   }
   if (requestCount < 1 || requestCount > 2) {
     throw new Error('Threat coverage closure changed the Jev request budget: ' + requestCount);
@@ -2164,6 +2177,91 @@ async function testHistoricalDoubleOpenThreeForkDefense() {
   }));
 }
 
+/**
+ * Historical real-Jev losses showed a second failure mode that is not a hard
+ * Threat proof: Local #1 and Deep #1 agree, while Jev promotes a candidate that
+ * the completed Deep search scores catastrophically lower. Keep this advisory:
+ * only the dominated searched candidate is removed; unsearched candidates stay.
+ */
+async function testHistoricalDeepDominanceGuard() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Deep-dominance unit regression must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+
+  // Straight-five continuation before the historical G10 blunder.
+  let position = positionFromSequence([
+    'H8','G7','H7','G8','H6','H9','H5','H4','G6'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  let context = engine.candidates('max');
+  const straightLocalLeader = [...context.candidates]
+    .filter(move => Number.isFinite(move.searchScore))
+    .sort((a, b) => b.searchScore - a.searchScore)[0]?.key;
+  if (straightLocalLeader !== 'F7' || !context.candidates.some(move => move.key === 'G10')) {
+    throw new Error('Historical straight-five alpha-beta leader changed: ' + straightLocalLeader);
+  }
+  let guard = engine.maxDeepDominance('max', {
+    status: 'completed',
+    depthReached: 6,
+    timedOut: true,
+    scores: [
+      { move: 'F7', score: -679, forcedResult: null },
+      { move: 'G10', score: -75287, forcedResult: null }
+    ]
+  });
+  if (!guard.applied || guard.candidates.includes('G10') || !guard.candidates.includes('F7')) {
+    throw new Error('Deep dominance guard failed to reject historical G10: ' + JSON.stringify(guard));
+  }
+
+  // Recent-long continuation before the historical H9 blunder.
+  position = positionFromSequence([
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7',
+    'E6','D5'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  context = engine.candidates('max');
+  const recentLocalLeader = [...context.candidates]
+    .filter(move => Number.isFinite(move.searchScore))
+    .sort((a, b) => b.searchScore - a.searchScore)[0]?.key;
+  if (recentLocalLeader !== 'I6' || !context.candidates.some(move => move.key === 'H9')) {
+    throw new Error('Historical recent-long alpha-beta leader changed: ' + recentLocalLeader);
+  }
+  guard = engine.maxDeepDominance('max', {
+    status: 'completed',
+    depthReached: 5,
+    timedOut: true,
+    scores: [
+      { move: 'I6', score: 83, forcedResult: null },
+      { move: 'H9', score: -37177, forcedResult: null }
+    ]
+  });
+  if (!guard.applied || guard.candidates.includes('H9') || !guard.candidates.includes('I6')) {
+    throw new Error('Deep dominance guard failed to reject historical H9: ' + JSON.stringify(guard));
+  }
+
+  // It must remain advisory: depth below the reliability floor cannot reject.
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  guard = engine.maxDeepDominance('max', {
+    status: 'completed',
+    depthReached: 4,
+    scores: [
+      { move: 'I6', score: 83, forcedResult: null },
+      { move: 'H9', score: -50000, forcedResult: null }
+    ]
+  });
+  if (guard.applied || !guard.candidates.includes('H9')) {
+    throw new Error('Deep dominance guard must not activate below depth 5');
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2187,6 +2285,7 @@ await testRealGameMove44AllMainLossTriggersRescueSweep();
 await testRealGameMove42ProofBoundary();
 await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
+await testHistoricalDeepDominanceGuard();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
