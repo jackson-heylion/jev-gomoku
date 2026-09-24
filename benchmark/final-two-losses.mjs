@@ -92,7 +92,7 @@ for (const sample of CASES) {
 }
 
 
-await audit(
+await analyze(
   'recent-long-after-E6-D5',
   [
     'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7',
@@ -101,7 +101,7 @@ await audit(
   ['I6','E10','H9','F9','J9','D5']
 );
 
-await audit(
+await analyze(
   'coverage-compare-E13-F5-J5',
   [
     'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
