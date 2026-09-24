@@ -4895,6 +4895,7 @@
       scope: 'CURRENT_GAME_ONLY',
       sample_size: sampleSize,
       confidence: sampleSize >= 7 ? 'MEDIUM' : sampleSize >= 4 ? 'LOW' : 'VERY_LOW',
+      usable_for_prediction: sampleSize >= 3,
       recent_moves: humanMoves.slice(-6).map(move => move.coord),
       center_five_rate: sampleSize ? Number((centerMoves / sampleSize).toFixed(2)) : null,
       local_followup_rate: followupCount ? Number((localFollowups / followupCount).toFixed(2)) : null,
@@ -4912,6 +4913,9 @@
   }
 
   function addOpponentPredictionQuestions(payload, candidates, limit = 4) {
+    const profile = opponentBehaviorProfile();
+    if (!profile.usable_for_prediction) return [];
+
     const selected = (candidates || [])
       .map(move => ({ move, replies: opponentReplyOptions(move) }))
       .filter(item => item.replies.length >= 2)
@@ -4921,7 +4925,7 @@
       return [];
     }
 
-    payload.state.opponent_profile = opponentBehaviorProfile();
+    payload.state.opponent_profile = profile;
     payload.state.opponent_prediction_policy = 'Predict the HUMAN opponent\'s most likely reply, not the theoretically strongest reply. This is advisory practical-play evidence only. It must never override legality, deterministic proof, Threat-space proof, or worst-case opponent-best-reply safety.';
     payload.state.opponent_reply_options = {};
 
