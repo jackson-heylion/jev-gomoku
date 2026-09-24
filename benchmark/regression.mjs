@@ -2423,8 +2423,8 @@ async function testSemanticOverrideNeverResurrectsHardLostLocal() {
   engine.setPosition(position.board, position.moves, 'jev-latest');
 
   const context = engine.candidates('max');
-  if (context.localSearchChoice !== 'D9') {
-    throw new Error('Expected historical Alpha-Beta #1 D9, got ' + context.localSearchChoice);
+  if (!context.candidates.some(move => move.key === 'D9')) {
+    throw new Error('Historical D9 must remain in recall so its hard-loss filter is exercised');
   }
 
   const threat = await engine.threatAnalyze(['D9','H6'], 'max', {
