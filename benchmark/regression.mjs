@@ -1083,9 +1083,10 @@ async function testJevMaxPipelineAndWildcard() {
 }
 
 /**
- * Real position from the recent Jev/Local game: Local preferred D5 while the
- * completed deeper search preferred I6. Keep both moves in the candidate recall
- * so Jev Max can actually override instead of losing the alternative upstream.
+ * Real position from the recent Jev/Local game. Heterogeneous recall must keep
+ * the historical I6/D5 alternatives, but the current Alpha-Beta leader E6 is
+ * also a Deep forced-win line. Jev may semantically propose I6; the final
+ * two-point Deep guard must not throw away the stronger E6 continuation.
  */
 async function testRecentGameLocalDeepDisagreementRecall() {
   let requestCount = 0;
@@ -1135,17 +1136,19 @@ async function testRecentGameLocalDeepDisagreementRecall() {
 
   const context = engine.candidates('max');
   const keys = new Set(context.candidates.map(move => move.key));
-  if (!keys.has('I6')) {
-    throw new Error('Jev Max candidate recall lost the real-game Jev alternative I6');
+  for (const key of ['E6','D5','I6']) {
+    if (!keys.has(key)) {
+      throw new Error('Jev Max candidate recall lost the real-game alternative ' + key);
+    }
   }
-  if (!keys.has('D5')) {
-    throw new Error('Jev Max candidate recall lost the real-game Local alternative D5');
+  if (context.localSearchChoice !== 'E6') {
+    throw new Error('Real-game Alpha-Beta leader must remain E6, got ' + context.localSearchChoice);
   }
 
-  const deep = await engine.deepAnalyze(['D5','I6','F9','E10'], 'max');
+  const deep = await engine.deepAnalyze(['E6','D5','I6','F9'], 'max');
   const deepKeys = new Set((deep.scores || []).map(item => item.move));
-  if (!deepKeys.has('D5') || !deepKeys.has('I6')) {
-    throw new Error('Real-game deep evidence must retain both D5 and I6 for comparison');
+  if (!deepKeys.has('E6') || !deepKeys.has('I6')) {
+    throw new Error('Real-game deep evidence must retain E6 and I6 for comparison');
   }
   if (Number(deep.depthReached || 0) === 0 && deep.status !== 'no_completed_depth' && deep.status !== 'timeout') {
     throw new Error('Real-game deep disagreement returned invalid depth=0 semantics: ' + deep.status);
@@ -1153,11 +1156,15 @@ async function testRecentGameLocalDeepDisagreementRecall() {
 
   engine.setPosition(position.board, position.moves, 'jev-latest');
   const result = await engine.jevMax();
-  if (!result.candidates.some(candidate => candidate.key === 'I6')) {
-    throw new Error('I6 disappeared before Jev Max final selection');
+  if (result.jevSuggested !== 'I6') {
+    throw new Error('Regression mock must still make Jev propose I6, got ' + result.jevSuggested);
   }
-  if (result.finalChoice !== 'I6') {
-    throw new Error('Jev Max could not exercise final authority for the real-game I6 alternative: ' + result.finalChoice);
+  if (result.finalChoice !== 'E6') {
+    throw new Error('Semantic Deep guard must preserve stronger E6 over I6, got ' + result.finalChoice);
+  }
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (!guard?.vetoed || guard.localMove !== 'E6' || guard.semanticMove !== 'I6') {
+    throw new Error('Real-game E6/I6 semantic guard did not veto the override: ' + JSON.stringify(guard));
   }
   if (requestCount < 1 || requestCount > 2) {
     throw new Error('Real-game Jev Max override must stay within the 1–2 request budget, got ' + requestCount);
