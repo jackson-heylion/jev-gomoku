@@ -15,6 +15,7 @@ Jev Gomoku 是一个运行在浏览器中的 15×15 五子棋实验项目，用�
 - **确定性代码**负责合法性、禁手、立即胜负、唯一防守和已经证明的战术结论；
 - **Alpha-Beta / Pattern / VCF / VCT / Deep Search / Threat-space** 负责搜索、召回候选和产生证据；
 - **JEV** 只在“几个候选都还活着、传统算法意见又不一致”的区域做独立判断和最终裁决；
+- **Opponent Likelihood Model** 把“对手理论最强回复”和“这个玩家更可能怎么下”拆开：Local / Deep 提供最多 4 个已搜索回复，JEV 在现有 Fan-Out 中预测人类更可能选择哪一个；
 - JEV 真正推翻强 Local 基线时，还会再经过一层窄化深搜校验。
 
 一句话：
@@ -149,7 +150,22 @@ JEV Max 的第一次请求可以并行问多个角度：
 
 如果出现明显分歧，才进入第 2 次 Final / Resolution 裁决。
 
-### 4. 可以提醒“可能漏招”，但不能乱编
+### 4. 预测“这个玩家更可能怎么应对”
+
+Jev Max 现在明确区分两件事：
+
+- **Best Reply**：对手理论上的最强回复，由 Alpha-Beta / Deep / Threat 负责；
+- **Likely Reply**：这个真实玩家更可能选择的回复，由 JEV 根据当前局面、最近落子习惯和 Local 已搜索的回复候选做概率判断。
+
+Deep Worker 不会为此多搜一遍，只把已经搜索过的对手回复从 Top 2 扩到最多 Top 4。JEV 也不会新增独立 HTTP 请求，而是在原有首轮 Speculative Fan-Out 中最多增加 4 个 `predict_reply_*` 问题。
+
+这层证据只能用于**安全候选之间的 tie-break**：
+
+> **先扛住最强回复，再考虑玩家更可能怎么下。**
+
+它不能覆盖 legality、立即胜负、VCF / Threat-space proof、forced loss 或 Semantic Override Guard。
+
+### 5. 可以提醒“可能漏招”，但不能乱编
 
 JEV 可以通过 `OTHER` 提醒：
 
