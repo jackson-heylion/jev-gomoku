@@ -4181,19 +4181,106 @@
       filtered = safeFromDeepMate;
     }
 
-    // A DOUBLE_OPEN_THREE is one tempo earlier than an open-four fork. It is
-    // not always a mathematical forced loss because the defender may have a
-    // counter-forcing resource, so do not label it LOSING globally. But when
-    // at least one candidate prevents the CRITICAL junction, never let Jev
-    // prefer a move that voluntarily leaves that junction available. This is
-    // phase-independent: the supplied 37-ply loss proved the same pattern can
-    // decide a late middlegame, not only the opening.
-    const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
-    if (safeFromDoubleOpenThree.length && safeFromDoubleOpenThree.length < filtered.length) {
-      filtered = safeFromDoubleOpenThree;
+    // A DOUBLE_OPEN_THREE is one tempo earlier than an open-four fork. Keep the
+    // deterministic veto conservative in the early/mid opening window where
+    // the historical H9 fork is unambiguous. In later positions the defender
+    // can have counter-forcing races, so DOUBLE_OPEN_THREE stays CRITICAL
+    // evidence for Jev/Deep rather than a universal hard loss.
+    if (moves.length < 16) {
+      const safeFromDoubleOpenThree = filtered.filter(move => !leavesCriticalDoubleOpenThree(move));
+      if (safeFromDoubleOpenThree.length && safeFromDoubleOpenThree.length < filtered.length) {
+        filtered = safeFromDoubleOpenThree;
+      }
     }
 
     return filtered.slice(0, maxCandidateLimit());
+  }
+
+  function deepOverrideGuardVerdict(localMove, semanticMove, pairAnalysis) {
+    const rows = new Map((pairAnalysis?.scores || []).map(row => [row.move, row]));
+    const local = rows.get(localMove?.key);
+    const semantic = rows.get(semanticMove?.key);
+    if (!local || !semantic || pairAnalysis?.status !== 'completed' || Number(pairAnalysis?.depthReached || 0) <= 0) {
+      return {
+        vetoed: false,
+        reason: 'insufficient_pair_deep_evidence',
+        local: local || null,
+        semantic: semantic || null
+      };
+    }
+
+    const localForcedLoss = local.forcedResult?.forced === true && local.forcedResult.result === 'loss';
+    const semanticForcedLoss = semantic.forcedResult?.forced === true && semantic.forcedResult.result === 'loss';
+    if (semanticForcedLoss && !localForcedLoss) {
+      return {
+        vetoed: true,
+        reason: 'semantic_deep_forced_loss',
+        local,
+        semantic
+      };
+    }
+
+    const localScore = Number(local.score);
+    const semanticScore = Number(semantic.score);
+    const margin = localScore - semanticScore;
+    // Branch-limited Deep is not a proof engine, so numeric vetoes require a
+    // very large separation after narrowing to exactly Local#1 vs Jev's pick.
+    // This catches the historical G10 horizon collapse (-75k class after pair
+    // deepening) without turning normal few-thousand evaluation noise into a
+    // deterministic override.
+    if (
+      Number.isFinite(localScore)
+      && Number.isFinite(semanticScore)
+      && semanticScore <= -30000
+      && localScore >= -15000
+      && margin >= 30000
+    ) {
+      return {
+        vetoed: true,
+        reason: 'semantic_catastrophic_deep_separation',
+        local,
+        semantic,
+        margin
+      };
+    }
+
+    return {
+      vetoed: false,
+      reason: 'pair_deep_not_decisive',
+      local,
+      semantic,
+      margin: Number.isFinite(margin) ? margin : null
+    };
+  }
+
+  async function runMaxSemanticOverrideGuard(context, candidates, semanticMove) {
+    const localKey = context?.candidates?.[0]?.key || null;
+    const localMove = candidates.find(move => move.key === localKey) || null;
+    if (!localMove || !semanticMove || localMove.key === semanticMove.key) {
+      return {
+        vetoed: false,
+        reason: 'no_semantic_override',
+        choice: semanticMove?.key || localMove?.key || null,
+        localMove: localMove?.key || null,
+        semanticMove: semanticMove?.key || null,
+        analysis: null
+      };
+    }
+
+    updateApiState('busy', 'Jev Max：Jev 改写 Local #1，窄化 Deep 复核两点…');
+    const analysis = await runDeepWorkerVerification(
+      [localMove, semanticMove],
+      'max',
+      'jev_max_semantic_override_guard'
+    );
+    const verdict = deepOverrideGuardVerdict(localMove, semanticMove, analysis);
+    return {
+      ...verdict,
+      choice: verdict.vetoed ? localMove.key : semanticMove.key,
+      localMove: localMove.key,
+      semanticMove: semanticMove.key,
+      analysis
+    };
   }
 
   async function closePreAtomicLossFrontier(contextCandidates, survivors, threatAnalysis) {
@@ -5561,10 +5648,27 @@
       decisionAuthority = 'jev_max_resolution_fanout';
     }
 
-    const final = finalists.find(move => move.key === finalChoice)
+    let final = finalists.find(move => move.key === finalChoice)
       || ranked.find(move => move.key === finalChoice)
       || candidates.find(move => move.key === finalChoice);
     if (!final) throw new Error('Jev Max 最终选择无法映射到合法候选');
+
+    const semanticChoice = finalChoice;
+    const overrideGuard = await runMaxSemanticOverrideGuard(context, candidates, final);
+    if (overrideGuard.vetoed && overrideGuard.choice !== finalChoice) {
+      const guarded = candidates.find(move => move.key === overrideGuard.choice);
+      if (guarded) {
+        finalChoice = guarded.key;
+        final = guarded;
+        answer = {
+          ...(answer || {}),
+          choice: finalChoice,
+          confidence: null,
+          probabilities: { [finalChoice]: 1 }
+        };
+        decisionAuthority = decisionAuthority + '_deep_guard';
+      }
+    }
 
     const finalCandidates = [
       final,
@@ -5581,7 +5685,7 @@
       answer,
       finalChoice,
       localChoice: context.candidates[0]?.key || candidates[0]?.key || finalChoice,
-      jevSuggested: finalChoice,
+      jevSuggested: semanticChoice,
       mode: 'max',
       forced: context.forced,
       candidates: finalCandidates,
@@ -5641,6 +5745,23 @@
           elapsedMs: coverage.supplemental?.elapsedMs ?? null
         },
         finalDecision: secondData ? compactAnswer(answer) : null,
+        semanticOverrideGuard: overrideGuard ? {
+          vetoed: Boolean(overrideGuard.vetoed),
+          reason: overrideGuard.reason || null,
+          localMove: overrideGuard.localMove || null,
+          semanticMove: overrideGuard.semanticMove || null,
+          choice: overrideGuard.choice || null,
+          status: overrideGuard.analysis?.status || null,
+          depthReached: overrideGuard.analysis?.depthReached ?? null,
+          timedOut: Boolean(overrideGuard.analysis?.timedOut),
+          elapsedMs: overrideGuard.analysis?.elapsedMs ?? null,
+          scores: (overrideGuard.analysis?.scores || []).map(row => ({
+            move: row.move,
+            score: Number.isFinite(row.score) ? row.score : null,
+            forcedResult: row.forcedResult || null,
+            principalVariation: Array.isArray(row.principalVariation) ? row.principalVariation.slice(0, 8) : []
+          }))
+        } : null,
         requestShape: {
           decisionAuthority,
           candidateCount: candidates.length,
@@ -5665,6 +5786,8 @@
           localTranspositionEntries: context.localSearch?.transpositionEntries ?? null,
           localTranspositionGeneration: context.localSearch?.transpositionGeneration ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
+          overrideGuardElapsedMs: overrideGuard?.analysis?.elapsedMs ?? null,
+          overrideGuardVetoed: Boolean(overrideGuard?.vetoed),
           threatElapsedMs: threatAnalysis?.elapsedMs ?? null,
           threatSpeculativeElapsedMs: coverage.speculative?.elapsedMs ?? null,
           threatSupplementalElapsedMs: coverage.supplemental?.elapsedMs ?? null,
