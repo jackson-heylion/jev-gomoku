@@ -55,6 +55,25 @@ for (const sample of cases) {
   }));
 }
 
+const coverageDeep = positionFromSequence([
+  'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
+  'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12','E14','E13'
+]);
+engine.setPosition(coverageDeep.board, coverageDeep.moves, 'jev-latest');
+const coverageDeepResult = await engine.deepAnalyze(['J5','F5'], 'max');
+console.log('COVERAGE_DEEP_PAIR', JSON.stringify({
+  status: coverageDeepResult?.status,
+  depthReached: coverageDeepResult?.depthReached,
+  timedOut: coverageDeepResult?.timedOut,
+  elapsedMs: coverageDeepResult?.elapsedMs,
+  scores: (coverageDeepResult?.scores || []).map(row => ({
+    move: row.move,
+    score: row.score,
+    forcedResult: row.forcedResult || null,
+    pv: row.principalVariation
+  }))
+}));
+
 const coverage = positionFromSequence([
   'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
   'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12','E14','E13'
