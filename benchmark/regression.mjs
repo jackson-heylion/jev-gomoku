@@ -2164,6 +2164,173 @@ async function testHistoricalDoubleOpenThreeForkDefense() {
   }));
 }
 
+/**
+ * Historical straight-five continuation after the first repair.
+ * At ply 9, G10 looked semantically plausible but a deeper deterministic search
+ * drives it into a mate-loss sentinel while F7 remains outside the mate band.
+ * Jev must not be allowed to restore that avoidable Deep mate loss.
+ */
+async function testDeepMateSeparationVeto() {
+  let requests = 0;
+  const captured = [];
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      captured.push(payload);
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Deep-mate-veto mock question has no choices: ' + id);
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'G10' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.includes('G10') ? 'G10' : keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-deep-mate-veto',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G7','H7','G8','H6','H9','H5','H4','G6'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const deep = await engine.deepAnalyze(['F7','G10'], 'max');
+  const byMove = new Map((deep?.scores || []).map(row => [row.move, row]));
+  const f7 = byMove.get('F7');
+  const g10 = byMove.get('G10');
+  if (!g10?.forcedResult?.forced || g10.forcedResult.result !== 'loss') {
+    throw new Error('Historical G10 must enter the Deep mate-loss band: ' + JSON.stringify(g10 || null));
+  }
+  if (f7?.forcedResult?.forced && f7.forcedResult.result === 'loss') {
+    throw new Error('Historical F7 must remain outside the avoidable Deep mate-loss band');
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (result.finalChoice === 'G10') {
+    throw new Error('Jev restored historical G10 despite an avoidable Deep mate-loss sentinel');
+  }
+  for (const payload of captured) {
+    const facts = payload?.state?.candidate_facts || {};
+    if (Object.prototype.hasOwnProperty.call(facts, 'G10')) {
+      throw new Error('Deep mate-loss G10 reached Jev candidate_facts');
+    }
+    for (const question of Object.values(payload?.questions || {})) {
+      if (Object.prototype.hasOwnProperty.call(question?.criteria || {}, 'G10')) {
+        throw new Error('Deep mate-loss G10 reached Jev semantic voting');
+      }
+    }
+  }
+  if (requests > 2) throw new Error('Deep mate veto changed Jev request cap: ' + requests);
+}
+
+/**
+ * Historical 37-ply coverage loss: after White J5, Black I3 creates a
+ * DOUBLE_OPEN_THREE and the following position collapses. The phase-independent
+ * critical-junction veto must prefer an available candidate that does not leave
+ * that double-open-three, even though the game is already well past ply 16.
+ */
+async function testLateDoubleOpenThreeVeto() {
+  const captured = [];
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      captured.push(payload);
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Late-double-three mock question has no choices: ' + id);
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'J5' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.includes('J5') ? 'J5' : keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-late-double-open-three',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
+    'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12','E14','E13'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const threat = await engine.threatAnalyze(['J5','F5'], 'max', {
+    timeBudgetMs: 1450,
+    maxThreatTurns: 6,
+    branch: 9
+  });
+  const rows = new Map((threat?.analyses || []).map(row => [row.move, row]));
+  const j5 = rows.get('J5');
+  const f5 = rows.get('F5');
+  const j5DoubleThree = j5?.counterThreat?.risk === 'CRITICAL'
+    && (j5?.counterThreat?.networkMoves || []).some(row =>
+      row.move === 'I3' && row.kind === 'DOUBLE_OPEN_THREE'
+    );
+  if (!j5DoubleThree) {
+    throw new Error('Historical J5 must expose CRITICAL I3 DOUBLE_OPEN_THREE: ' + JSON.stringify(j5 || null));
+  }
+  const f5DoubleThree = f5?.counterThreat?.risk === 'CRITICAL'
+    && (f5?.counterThreat?.networkMoves || []).some(row => row.kind === 'DOUBLE_OPEN_THREE');
+  if (f5DoubleThree) {
+    throw new Error('Historical F5 should be the available non-double-three alternative: ' + JSON.stringify(f5));
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  if (result.finalChoice === 'J5') {
+    throw new Error('Jev selected late-game J5 that leaves CRITICAL I3 double-open-three');
+  }
+  for (const payload of captured) {
+    const facts = payload?.state?.candidate_facts || {};
+    if (Object.prototype.hasOwnProperty.call(facts, 'J5')) {
+      throw new Error('Late-game critical J5 reached Jev candidate_facts');
+    }
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2187,6 +2354,8 @@ await testRealGameMove44AllMainLossTriggersRescueSweep();
 await testRealGameMove42ProofBoundary();
 await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
+await testDeepMateSeparationVeto();
+await testLateDoubleOpenThreeVeto();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
