@@ -204,7 +204,7 @@ function injectBenchmarkHook(source) {
     "    deepAnalyze(keys, mode, overrides) {",
     "      const candidates = (keys || []).map(key => { const point = parseCoord(key); return point ? { ...point, key } : null; }).filter(Boolean);",
     "      return runDeepWorkerVerification(candidates, mode || 'grandmaster', 'regression_position', overrides || {});",
-    "    },"
+    "    },",
     "    threatAnalyze(keys, mode, overrides) {",
     "      const candidates = (keys || []).map(key => { const point = parseCoord(key); return point ? { ...point, key } : null; }).filter(Boolean);",
     "      return runThreatWorkerAnalysis(candidates, mode || 'max', 'regression_position', overrides || {});",
