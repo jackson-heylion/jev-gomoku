@@ -13,6 +13,7 @@ The current architecture is deliberately hybrid:
 - deterministic code handles legality, Renju rules, immediate wins, mandatory defenses and proven tactical lines;
 - Alpha-Beta, Pattern, VCF/VCT, Deep Search and Threat-space produce candidates and evidence;
 - **Jev** independently evaluates unresolved candidates and arbitrates disagreements;
+- an **Opponent Likelihood Model** separates the theoretically strongest reply from the reply this human is more likely to play: Local / Deep provide up to four already-searched replies and Jev estimates human likelihood inside the existing Fan-Out request;
 - critical semantic overrides are checked again before the final move.
 
 In one sentence:
@@ -127,7 +128,22 @@ Jev Max does not rely on one prompt-shaped question. The first request can evalu
 
 If these views converge, one Jev request is enough. Difficult disagreements can use a second request.
 
-### 4. Bounded wildcard discovery
+### 4. Predicting the human's likely reply
+
+Jev Max now separates two different questions:
+
+- **Best Reply** — the opponent's theoretically strongest response, owned by Alpha-Beta / Deep / Threat;
+- **Likely Reply** — the move this particular human is more likely to choose, estimated by Jev from the current board, recent move tendencies and the bounded reply set already searched by Local / Deep.
+
+The Deep Worker does not run another search for this feature. It simply retains up to four already-evaluated opponent replies instead of two. Jev also does not add a separate HTTP round trip: the existing speculative Fan-Out includes at most four bounded `predict_reply_*` questions.
+
+This signal is advisory and is only a tie-break among otherwise safe close candidates:
+
+> **Survive the strongest reply first; only then exploit the likely human reply.**
+
+It cannot override legality, immediate tactics, VCF / Threat-space proof, forced-loss evidence or the Semantic Override Guard.
+
+### 5. Bounded wildcard discovery
 
 Jev may signal that the main set is incomplete, but it cannot freely invent an unchecked move.
 
