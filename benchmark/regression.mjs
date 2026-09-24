@@ -2244,11 +2244,17 @@ async function testHistoricalDeepDominanceGuard() {
   ]);
   engine.setPosition(position.board, position.moves, 'jev-latest');
   context = engine.candidates('max');
-  const recentLocalLeader = [...context.candidates]
+  const actualRecentLocal = context.candidates[0]?.key || null;
+  const recentRawScoreLeader = [...context.candidates]
     .filter(move => Number.isFinite(move.searchScore))
     .sort((a, b) => b.searchScore - a.searchScore)[0]?.key;
-  if (recentLocalLeader !== 'I6' || !context.candidates.some(move => move.key === 'H9')) {
-    throw new Error('Historical recent-long alpha-beta leader changed: ' + recentLocalLeader);
+  if (
+    actualRecentLocal !== 'J9'
+    || recentRawScoreLeader !== 'I6'
+    || !context.candidates.some(move => move.key === 'H9')
+  ) {
+    throw new Error('Historical recent-long leader split changed: '
+      + JSON.stringify({ actualRecentLocal, recentRawScoreLeader }));
   }
   guard = engine.maxDeepDominance('max', {
     status: 'completed',
@@ -2259,17 +2265,19 @@ async function testHistoricalDeepDominanceGuard() {
       { move: 'H9', score: -37177, forcedResult: null }
     ]
   });
-  if (!guard.applied || guard.candidates.includes('H9') || !guard.candidates.includes('I6')) {
-    throw new Error('Deep dominance guard failed to reject historical H9: ' + JSON.stringify(guard));
+  if (guard.applied || !guard.candidates.includes('H9') || !guard.candidates.includes('I6')) {
+    throw new Error('Deep dominance must stay advisory when actual Local #1 J9 disagrees with Deep #1 I6: '
+      + JSON.stringify(guard));
   }
 
-  // It must remain advisory: depth below the reliability floor cannot reject.
+  // It must also remain advisory below the reliability floor even when actual
+  // Local #1 and Deep #1 do agree.
   engine.setPosition(position.board, position.moves, 'jev-latest');
   guard = engine.maxDeepDominance('max', {
     status: 'completed',
     depthReached: 4,
     scores: [
-      { move: 'I6', score: 83, forcedResult: null },
+      { move: 'J9', score: 83, forcedResult: null },
       { move: 'H9', score: -50000, forcedResult: null }
     ]
   });
