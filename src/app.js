@@ -3821,7 +3821,7 @@
         : 1500);
     const timeBudgetMs = Math.max(
       250,
-      Math.min(6500, Number(overrides.timeBudgetMs) || defaultTimeBudgetMs)
+      Math.min(10000, Number(overrides.timeBudgetMs) || defaultTimeBudgetMs)
     );
     const maxDepth = Math.max(
       3,
@@ -4369,64 +4369,21 @@
     };
   }
 
-  async function runMaxFocusedPairDeep(localMove, semanticMove) {
-    const options = {
-      timeBudgetMs: 5000,
-      maxDepth: 8,
-      branch: 8,
-      allowSingle: true,
-      focusedExactDepth: true
-    };
-    const started = performance.now();
-
-    // Use both persistent heavy-worker slots: each root gets an independent
-    // search budget instead of competing inside one two-root task. This is a
-    // rare final-override check, so it improves tactical certainty without
-    // changing normal Max search depth/branch or Jev request count.
-    const [localAnalysis, semanticAnalysis] = await Promise.all([
-      runDeepWorkerVerification(
-        [localMove],
-        'max',
-        'jev_max_semantic_override_local',
-        options
-      ),
-      runDeepWorkerVerification(
-        [semanticMove],
-        'max',
-        'jev_max_semantic_override_semantic',
-        options
-      )
-    ]);
-
-    const analyses = [localAnalysis, semanticAnalysis];
-    const rows = analyses.flatMap(item => Array.isArray(item?.scores) ? item.scores : []);
-    const uniqueRows = [];
-    const seen = new Set();
-    for (const row of rows) {
-      if (!row?.move || seen.has(row.move)) continue;
-      uniqueRows.push(row);
-      seen.add(row.move);
-    }
-    uniqueRows.sort((a, b) => Number(b?.score ?? -Infinity) - Number(a?.score ?? -Infinity));
-
-    const completed = analyses.every(item => item?.status === 'completed');
-    const depths = analyses.map(item => Number(item?.depthReached || 0)).filter(Number.isFinite);
-    return {
-      status: completed ? 'completed' : 'partial',
-      source: 'focused_parallel_pair',
-      depthReached: depths.length ? Math.min(...depths) : 0,
-      timedOut: analyses.some(item => Boolean(item?.timedOut)),
-      elapsedMs: Math.round(performance.now() - started),
-      budgetMs: options.timeBudgetMs,
-      scores: uniqueRows,
-      subAnalyses: analyses.map(item => ({
-        status: item?.status || null,
-        depthReached: item?.depthReached ?? null,
-        timedOut: Boolean(item?.timedOut),
-        elapsedMs: item?.elapsedMs ?? null,
-        candidates: (item?.scores || []).map(row => row.move)
-      }))
-    };
+  async function runMaxExactPairDeep(localMove, semanticMove) {
+    return runDeepWorkerVerification(
+      [localMove, semanticMove],
+      'max',
+      'jev_max_semantic_override_exact_guard',
+      {
+        // Second-stage only. Jump straight to exact depth 8 in a Worker after
+        // the normal two-root iterative pass was inconclusive. This matches the
+        // deeper historical audit without blocking the browser main thread.
+        timeBudgetMs: 9000,
+        maxDepth: 8,
+        branch: 8,
+        focusedExactDepth: true
+      }
+    );
   }
 
   async function runMaxSemanticOverrideGuard(context, candidates, semanticMove, initialDeepAnalysis) {
@@ -4488,14 +4445,48 @@
     }
 
     if (!verdict.vetoed && verdict.reason === 'insufficient_pair_deep_evidence') {
-      updateApiState('busy', 'Jev Max：Jev 改写 Alpha-Beta #1，双 Worker 并行复核两点…');
-      analysis = await runMaxFocusedPairDeep(localMove, semanticMove);
+      updateApiState('busy', 'Jev Max：Jev 改写 Alpha-Beta #1，执行两点 Deep 复核…');
+      analysis = await runDeepWorkerVerification(
+        [localMove, semanticMove],
+        'max',
+        'jev_max_semantic_override_guard',
+        {
+          timeBudgetMs: 3200,
+          maxDepth: 8,
+          branch: 9
+        }
+      );
       verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
       supplemental = true;
       if (!verdict.vetoed && localVerdict.vetoed) {
         verdict = {
           ...localVerdict,
           deepReason: verdict.reason
+        };
+      }
+    }
+
+    if (
+      !verdict.vetoed
+      && !localVerdict.vetoed
+      && ['pair_deep_not_decisive', 'insufficient_pair_deep_evidence'].includes(verdict.reason)
+    ) {
+      updateApiState('busy', 'Jev Max：两点仍接近，执行 exact depth-8 最终复核…');
+      const exactAnalysis = await runMaxExactPairDeep(localMove, semanticMove);
+      const exactVerdict = maxDeepOverrideVerdict(localKey, semanticKey, exactAnalysis);
+      if (exactAnalysis) analysis = exactAnalysis;
+      supplemental = true;
+      if (exactVerdict.vetoed) {
+        verdict = {
+          ...exactVerdict,
+          secondStage: true
+        };
+      } else {
+        verdict = {
+          ...verdict,
+          exactReason: exactVerdict.reason,
+          exactDepth: exactVerdict.depth ?? null,
+          secondStage: true
         };
       }
     }
