@@ -20,4 +20,6 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Run deterministic historical loss audit
-        run: node benchmark/historical-loss-audit.mjs
+        run: |
+          node benchmark/historical-loss-audit.mjs
+          node benchmark/deep-separation-audit.mjs
