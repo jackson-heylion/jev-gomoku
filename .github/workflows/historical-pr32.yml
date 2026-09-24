@@ -1,0 +1,44 @@
+name: PR32 Historical Real Replay
+
+on:
+  push:
+    branches:
+      - fix/semantic-override-guard
+    paths:
+      - '.github/workflows/historical-pr32.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  historical-real:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22.13.0'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Verify benchmark harness
+        run: |
+          node --check benchmark/historical-real.mjs
+          npm run benchmark:smoke
+      - name: Replay all historical game families with real Jev
+        env:
+          JEV_API_KEY: ${{ secrets.JEV_API_KEY }}
+          BENCHMARK_CONFIRM: '1'
+          HISTORICAL_MAX_ADDITIONAL_PLIES: '30'
+          JEV_MODEL: 'jev-latest'
+        run: |
+          test -n "$JEV_API_KEY" || (echo "Missing repository secret JEV_API_KEY" && exit 1)
+          npm run benchmark:historical:real
+      - name: Upload historical replay report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr32-historical-real-${{ github.run_id }}
+          path: benchmark/results/historical-real/
+          if-no-files-found: warn
+          retention-days: 30
