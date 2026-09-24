@@ -4306,7 +4306,39 @@
       };
     }
 
-    updateApiState('busy', 'Jev Max：Jev 改写 Local #1，后台窄化 Deep 复核两点…');
+    // Do not spend another 5s Worker budget on every strategic disagreement.
+    // Narrow re-checks are reserved for overrides already looking suspicious in
+    // the first parallel Deep pass: Local is Deep #1 and Jev's move is either a
+    // Deep loss sentinel or materially behind in the completed numeric layer.
+    const semanticInitialLoss = semanticMove.deepEvidence?.forced_result?.result === 'loss';
+    const localInitialLoss = localMove.deepEvidence?.forced_result?.result === 'loss';
+    const localDeepScore = Number(localMove.deepSearchScore);
+    const semanticDeepScore = Number(semanticMove.deepSearchScore);
+    const initialGap = localDeepScore - semanticDeepScore;
+    const suspiciousInitialDeep = (
+      semanticInitialLoss && !localInitialLoss
+    ) || (
+      localMove.deepSearchRank === 1
+      && Number.isFinite(semanticMove.deepSearchRank)
+      && semanticMove.deepSearchRank > 1
+      && Number.isFinite(localDeepScore)
+      && Number.isFinite(semanticDeepScore)
+      && initialGap >= 800
+    );
+
+    if (!suspiciousInitialDeep) {
+      return {
+        vetoed: false,
+        reason: 'initial_deep_not_suspicious',
+        choice: semanticMove.key,
+        localMove: localMove.key,
+        semanticMove: semanticMove.key,
+        initialGap: Number.isFinite(initialGap) ? initialGap : null,
+        analysis: null
+      };
+    }
+
+    updateApiState('busy', 'Jev Max：Jev 改写 Local #1 且初始 Deep 告警，后台窄化复核两点…');
     const analysis = await runDeepWorkerVerification(
       [localMove, semanticMove],
       'max',
