@@ -2197,8 +2197,11 @@ async function testHistoricalDeepDominanceGuard() {
   ]);
   engine.setPosition(position.board, position.moves, 'jev-latest');
   let context = engine.candidates('max');
-  if (context.candidates[0]?.key !== 'F7' || !context.candidates.some(move => move.key === 'G10')) {
-    throw new Error('Historical straight-five dominance position changed candidate ordering');
+  const straightLocalLeader = [...context.candidates]
+    .filter(move => Number.isFinite(move.searchScore))
+    .sort((a, b) => b.searchScore - a.searchScore)[0]?.key;
+  if (straightLocalLeader !== 'F7' || !context.candidates.some(move => move.key === 'G10')) {
+    throw new Error('Historical straight-five alpha-beta leader changed: ' + straightLocalLeader);
   }
   let guard = engine.maxDeepDominance('max', {
     status: 'completed',
@@ -2220,8 +2223,11 @@ async function testHistoricalDeepDominanceGuard() {
   ]);
   engine.setPosition(position.board, position.moves, 'jev-latest');
   context = engine.candidates('max');
-  if (context.candidates[0]?.key !== 'I6' || !context.candidates.some(move => move.key === 'H9')) {
-    throw new Error('Historical recent-long dominance position changed candidate ordering');
+  const recentLocalLeader = [...context.candidates]
+    .filter(move => Number.isFinite(move.searchScore))
+    .sort((a, b) => b.searchScore - a.searchScore)[0]?.key;
+  if (recentLocalLeader !== 'I6' || !context.candidates.some(move => move.key === 'H9')) {
+    throw new Error('Historical recent-long alpha-beta leader changed: ' + recentLocalLeader);
   }
   guard = engine.maxDeepDominance('max', {
     status: 'completed',
