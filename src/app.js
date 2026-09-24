@@ -4314,7 +4314,7 @@
     const overrides = {
       timeBudgetMs: 5200,
       maxDepth: 8,
-      branch: 8,
+      branch: 6,
       allowSingleRoot: true
     };
     const [localAnalysis, semanticAnalysis] = await Promise.all([
