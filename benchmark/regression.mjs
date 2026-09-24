@@ -1083,9 +1083,10 @@ async function testJevMaxPipelineAndWildcard() {
 }
 
 /**
- * Real position from the recent Jev/Local game: Local preferred D5 while the
- * completed deeper search preferred I6. Keep both moves in the candidate recall
- * so Jev Max can actually override instead of losing the alternative upstream.
+ * Real root from the recent Jev/Local game. I6 must remain in heterogeneous
+ * recall so Jev can evaluate it, but current deeper evidence prefers the actual
+ * production Local #1 E6. Force semantic I6 and verify the final safety guard
+ * can veto that override without deleting I6 upstream.
  */
 async function testRecentGameLocalDeepDisagreementRecall() {
   let requestCount = 0;
@@ -1156,8 +1157,16 @@ async function testRecentGameLocalDeepDisagreementRecall() {
   if (!result.candidates.some(candidate => candidate.key === 'I6')) {
     throw new Error('I6 disappeared before Jev Max final selection');
   }
-  if (result.finalChoice !== 'I6') {
-    throw new Error('Jev Max could not exercise final authority for the real-game I6 alternative: ' + result.finalChoice);
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (result.jevSuggested !== 'I6') {
+    throw new Error('Regression mock must retain Jev semantic I6 suggestion, got ' + result.jevSuggested);
+  }
+  if (result.finalChoice !== result.localChoice || result.finalChoice !== 'E6') {
+    throw new Error('Focused safety guard should retain current Local #1 E6 over semantic I6, got '
+      + JSON.stringify({ final: result.finalChoice, local: result.localChoice }));
+  }
+  if (!guard?.vetoed || guard.localMove !== 'E6' || guard.semanticMove !== 'I6') {
+    throw new Error('Root semantic I6 override was not vetoed by current safety evidence: ' + JSON.stringify(guard));
   }
   if (requestCount < 1 || requestCount > 2) {
     throw new Error('Real-game Jev Max override must stay within the 1–2 request budget, got ' + requestCount);
