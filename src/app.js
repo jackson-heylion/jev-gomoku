@@ -3793,7 +3793,8 @@
     const uniqueMoves = [...new Map(
       (candidateMoves || []).filter(Boolean).map(move => [move.key, move])
     ).values()];
-    if (uniqueMoves.length < 2) return null;
+    const allowSingle = overrides.allowSingle === true;
+    if (uniqueMoves.length < (allowSingle ? 1 : 2)) return null;
 
     if (typeof Worker === 'undefined') {
       const cfg = challengerVerificationConfig(mode);
@@ -3833,7 +3834,7 @@
 
     return submitHeavyWorkerTask({
       id,
-      task: 'search',
+      task: overrides.focusedExactDepth === true ? 'focused_search' : 'search',
       board: board.map(row => row.slice()),
       side: aiColor(),
       rules: workerRuleConfig(),
@@ -4370,9 +4371,11 @@
 
   async function runMaxFocusedPairDeep(localMove, semanticMove) {
     const options = {
-      timeBudgetMs: 3600,
-      maxDepth: 9,
-      branch: 10
+      timeBudgetMs: 5000,
+      maxDepth: 8,
+      branch: 8,
+      allowSingle: true,
+      focusedExactDepth: true
     };
     const started = performance.now();
 
