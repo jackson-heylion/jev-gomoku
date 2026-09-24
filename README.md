@@ -157,7 +157,7 @@ Jev Max 现在明确区分两件事：
 - **Best Reply**：对手理论上的最强回复，由 Alpha-Beta / Deep / Threat 负责；
 - **Likely Reply**：这个真实玩家更可能选择的回复，由 JEV 根据当前局面、最近落子习惯和 Local 已搜索的回复候选做概率判断。
 
-Deep Worker 不会为此多搜一遍，只把已经搜索过的对手回复从 Top 2 扩到最多 Top 4。JEV 也不会新增独立 HTTP 请求，而是在原有首轮 Speculative Fan-Out 中最多增加 4 个 `predict_reply_*` 问题。
+Deep Worker 不会为此多搜一遍，只把已经搜索过的对手回复从 Top 2 扩到最多 Top 4。只有当前对局已经观察到至少 **3 个玩家落子** 时才启用行为预测；样本不足就直接跳过。JEV 也不会新增独立 HTTP 请求，而是在原有首轮 Speculative Fan-Out 中最多增加 4 个 `predict_reply_*` 问题。
 
 这层证据只能用于**安全候选之间的 tie-break**：
 
