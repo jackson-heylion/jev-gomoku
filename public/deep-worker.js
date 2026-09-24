@@ -942,6 +942,80 @@ function runSearch(message) {
   };
 }
 
+function runFocusedSearch(message) {
+  board = message.board.map(row => row.slice());
+  rootSide = message.side === BLACK ? BLACK : WHITE;
+  applyRuleConfig(message.rules);
+  opponentSide = otherColor(rootSide);
+  nodes = 0;
+  initializeHash();
+
+  const candidates = (message.candidates || [])
+    .map(coordToPoint)
+    .filter(Boolean)
+    .filter(move => board[move.r]?.[move.c] === EMPTY)
+    .filter(move => isLegalMoveForColor(move.r, move.c, rootSide));
+  if (!candidates.length) throw new Error('No legal focused-search candidates');
+
+  const started = performance.now();
+  const budgetMs = Math.max(500, Math.min(10000, Number(message.timeBudgetMs) || 5000));
+  deadline = started + budgetMs;
+  const depth = Math.max(5, Math.min(8, Number(message.maxDepth) || 8));
+  const branch = Math.max(6, Math.min(9, Number(message.branch) || 8));
+  const radius = 2;
+  ttBranch = branch;
+  ttRadius = radius;
+  ttGeneration++;
+  prunePersistentSearchCache();
+  const cache = persistentSearchCache;
+
+  const scores = [];
+  try {
+    // Final semantic override already has shallow/iterative evidence. Jump
+    // directly to the requested exact depth so the rare focused check does not
+    // spend most of its budget repeating depth 3..7.
+    for (const move of candidates) {
+      scores.push(evaluateRootCandidate(move, depth, branch, radius, cache));
+    }
+  } catch (error) {
+    if (error === TIMEOUT) {
+      return {
+        status: 'no_completed_depth',
+        source: 'focused-web-worker',
+        winner: candidates[0].key,
+        depthReached: 0,
+        rankingOnly: true,
+        scores: [],
+        timedOut: true,
+        nodes,
+        elapsedMs: Math.round(performance.now() - started),
+        budgetMs,
+        branch,
+        transpositionEntries: cache.size,
+        quiescenceDepth: 2
+      };
+    }
+    throw error;
+  }
+
+  scores.sort((a, b) => b.score - a.score);
+  return {
+    status: 'completed',
+    source: 'focused-web-worker',
+    winner: scores[0]?.move || candidates[0].key,
+    depthReached: depth,
+    rankingOnly: false,
+    scores,
+    timedOut: false,
+    nodes,
+    elapsedMs: Math.round(performance.now() - started),
+    budgetMs,
+    branch,
+    transpositionEntries: cache.size,
+    quiescenceDepth: 2
+  };
+}
+
 function threatNetworkMoves(color, limit = 6, radius = 2) {
   const out = [];
   const width = Math.max(8, Math.min(16, limit * 2));
@@ -1413,7 +1487,11 @@ self.onmessage = event => {
   const message = event.data || {};
   const id = message.id;
   try {
-    const result = message.task === 'threat' ? runThreatSearch(message) : runSearch(message);
+    const result = message.task === 'threat'
+      ? runThreatSearch(message)
+      : message.task === 'focused_search'
+        ? runFocusedSearch(message)
+        : runSearch(message);
     self.postMessage({ id, ok: true, result });
   } catch (error) {
     self.postMessage({
