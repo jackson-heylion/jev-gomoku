@@ -186,6 +186,11 @@ function summarizeDecision(result, latencyMs) {
     deepDominanceApplied: Boolean(shape.deepDominanceApplied),
     deepDominanceLeader: shape.deepDominanceLeader || null,
     deepDominanceRejected: Array.isArray(shape.deepDominanceRejected) ? shape.deepDominanceRejected : [],
+    overrideGuardVetoed: Boolean(shape.overrideGuardVetoed),
+    overrideGuardElapsedMs: Number(shape.overrideGuardElapsedMs) || 0,
+    overrideGuardReason: shape.overrideGuardReason || null,
+    overrideGuardLocalMove: shape.overrideGuardLocalMove || null,
+    overrideGuardSemanticMove: shape.overrideGuardSemanticMove || null,
     inputTokens: Number(result?.usage?.input_tokens) || 0,
     outputTokens: Number(result?.usage?.output_tokens) || 0,
     candidateCount: Number(shape.candidateCount ?? result?.candidates?.length ?? 0) || 0,
@@ -272,6 +277,10 @@ async function playHistoricalFamily(engine, sample, index, total) {
       oneRequestTurns: decisions.filter(d => d.logicalRequests === 1).length,
       twoRequestTurns: decisions.filter(d => d.logicalRequests === 2).length,
       logicalRequests: decisions.reduce((sum, d) => sum + d.logicalRequests, 0),
+      overrideGuardVetoes: decisions.filter(d => d.overrideGuardVetoed).length,
+      overrideGuardChecks: decisions.filter(d => d.overrideGuardSemanticMove && d.overrideGuardLocalMove
+        && d.overrideGuardSemanticMove !== d.overrideGuardLocalMove).length,
+      overrideGuardElapsedMs: decisions.reduce((sum, d) => sum + d.overrideGuardElapsedMs, 0),
       httpRequests: decisions.reduce((sum, d) => sum + d.httpRequests, 0),
       inputTokens: decisions.reduce((sum, d) => sum + d.inputTokens, 0),
       outputTokens: decisions.reduce((sum, d) => sum + d.outputTokens, 0),
@@ -290,6 +299,7 @@ function markdownReport(report) {
     + game.additionalPlies + ' | ' + game.metrics.jevTurns + ' | '
     + game.metrics.logicalRequests + ' | '
     + game.metrics.oneRequestTurns + '/' + game.metrics.twoRequestTurns + ' | '
+    + game.metrics.overrideGuardVetoes + '/' + game.metrics.overrideGuardChecks + ' | '
     + game.metrics.inputTokens + '/' + game.metrics.outputTokens + ' | '
     + game.metrics.avgLatencyMs + ' |'
   ).join('\n');
@@ -310,10 +320,11 @@ function markdownReport(report) {
     '- 1-request 回合：' + report.summary.oneRequestTurns + '/' + report.summary.jevTurns,
     '- 2-request 回合：' + report.summary.twoRequestTurns + '/' + report.summary.jevTurns,
     '- 总逻辑请求：' + report.summary.logicalRequests,
+    '- Override Deep guard：' + report.summary.overrideGuardVetoes + ' veto / ' + report.summary.overrideGuardChecks + ' checks，额外 Worker ' + report.summary.overrideGuardElapsedMs + ' ms',
     '- Token：' + report.summary.inputTokens + ' input / ' + report.summary.outputTokens + ' output',
     '',
-    '| 历史棋谱族 | 起始手数 | W/L/D | 续弈手数 | Jev回合 | 逻辑请求 | 1req/2req | in/out token | 平均决策ms |',
-    '|---|---:|:---:|---:|---:|---:|---:|---:|---:|',
+    '| 历史棋谱族 | 起始手数 | W/L/D | 续弈手数 | Jev回合 | 逻辑请求 | 1req/2req | Guard veto/check | in/out token | 平均决策ms |',
+    '|---|---:|:---:|---:|---:|---:|---:|---:|---:|---:|',
     rows,
     ''
   ].join('\n');
@@ -352,6 +363,9 @@ async function main() {
     oneRequestTurns: games.reduce((sum, g) => sum + g.metrics.oneRequestTurns, 0),
     twoRequestTurns: games.reduce((sum, g) => sum + g.metrics.twoRequestTurns, 0),
     logicalRequests: games.reduce((sum, g) => sum + g.metrics.logicalRequests, 0),
+    overrideGuardVetoes: games.reduce((sum, g) => sum + g.metrics.overrideGuardVetoes, 0),
+    overrideGuardChecks: games.reduce((sum, g) => sum + g.metrics.overrideGuardChecks, 0),
+    overrideGuardElapsedMs: games.reduce((sum, g) => sum + g.metrics.overrideGuardElapsedMs, 0),
     httpRequests: games.reduce((sum, g) => sum + g.metrics.httpRequests, 0),
     upstreamRequests,
     inputTokens: games.reduce((sum, g) => sum + g.metrics.inputTokens, 0),
