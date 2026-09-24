@@ -4316,8 +4316,8 @@
     const semantic = rows.get(semanticKey) || null;
     const depth = Number(analysis?.depthReached || 0);
     // This guard narrows to exactly two roots (Alpha-Beta #1 vs Jev choice).
-    // Depth 4 here covers much more of each root than the normal 5-root Deep
-    // batch; keep the broader pre-Jev dominance rule at depth >=5.
+    // Depth 4 here covers much more of each root than the normal multi-root
+    // Deep batch, while remaining advisory rather than mathematical proof.
     if (analysis?.status !== 'completed' || depth < 4 || !local || !semantic) {
       return { vetoed: false, reason: 'insufficient_pair_deep_evidence', local, semantic, depth };
     }
@@ -4368,6 +4368,20 @@
     };
   }
 
+  function completedCounterThreatRisk(move) {
+    const threat = move?.threatSearch;
+    if (!threat || threat.timedOut) return null;
+    const risk = threat.counterThreat?.risk || 'NONE';
+    const rank = {
+      NONE: 0,
+      ELEVATED: 1,
+      HIGH: 2,
+      CRITICAL: 3,
+      PROVEN_FORCED_LOSS: 4
+    }[risk];
+    return Number.isFinite(rank) ? { risk, rank } : null;
+  }
+
   async function runMaxSemanticOverrideGuard(context, candidates, semanticMove, initialDeepAnalysis) {
     const localKey = context?.localSearchChoice || null;
     const semanticKey = semanticMove?.key || null;
@@ -4414,19 +4428,37 @@
     let verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
     let supplemental = false;
     const localVerdict = maxLocalOverrideVerdict(localMove, semanticMove);
+    const localThreatRisk = completedCounterThreatRisk(localMove);
+    const semanticThreatRisk = completedCounterThreatRisk(semanticMove);
 
-    // The Local fallback is deliberately extreme and deterministic. It prevents
-    // correctness from depending on whether a two-root Worker happens to finish
-    // depth 4 under transient browser/CI load. Normal Local-vs-Jev disagreements
-    // remain semantic decisions.
-    if (!verdict.vetoed && localVerdict.vetoed) {
-      verdict = {
-        ...localVerdict,
-        deepReason: verdict.reason
+    // Threat-space evidence has higher tactical priority than bounded numeric
+    // search. If Jev selects a candidate with a strictly LOWER completed
+    // opponent counter-threat risk than Local #1, do not veto that semantic
+    // safety upgrade merely because Local/Deep numeric scores disagree.
+    // A Deep forced-loss sentinel is still allowed to veto.
+    if (
+      verdict.reason !== 'semantic_deep_forced_loss'
+      && localThreatRisk
+      && semanticThreatRisk
+      && semanticThreatRisk.rank < localThreatRisk.rank
+    ) {
+      return {
+        vetoed: false,
+        reason: 'semantic_lower_counter_threat_risk',
+        choice: semanticKey,
+        localMove: localKey,
+        semanticMove: semanticKey,
+        localThreatRisk: localThreatRisk.risk,
+        semanticThreatRisk: semanticThreatRisk.risk,
+        analysis,
+        supplemental: false
       };
     }
 
-    if (!verdict.vetoed && verdict.reason === 'insufficient_pair_deep_evidence') {
+    const needsPairDeep = !verdict.vetoed
+      && ['insufficient_pair_deep_evidence', 'non_numeric_pair_deep_evidence'].includes(verdict.reason);
+
+    if (needsPairDeep) {
       updateApiState('busy', 'Jev Max：Jev 改写 Alpha-Beta #1，执行两点 Deep 复核…');
       analysis = await runDeepWorkerVerification(
         [localMove, semanticMove],
@@ -4440,12 +4472,21 @@
       );
       verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
       supplemental = true;
-      if (!verdict.vetoed && localVerdict.vetoed) {
-        verdict = {
-          ...localVerdict,
-          deepReason: verdict.reason
-        };
-      }
+    }
+
+    // The deterministic Local-score fallback exists only for Worker jitter:
+    // use it when the two-root Deep check still failed to produce a usable
+    // numeric conclusion. Never let shallow Local scores override a completed
+    // pair Deep result that explicitly says the separation is not decisive.
+    if (
+      !verdict.vetoed
+      && ['insufficient_pair_deep_evidence', 'non_numeric_pair_deep_evidence'].includes(verdict.reason)
+      && localVerdict.vetoed
+    ) {
+      verdict = {
+        ...localVerdict,
+        deepReason: verdict.reason
+      };
     }
 
     return {
@@ -4453,6 +4494,8 @@
       choice: verdict.vetoed ? localKey : semanticKey,
       localMove: localKey,
       semanticMove: semanticKey,
+      localThreatRisk: localThreatRisk?.risk || null,
+      semanticThreatRisk: semanticThreatRisk?.risk || null,
       analysis,
       supplemental
     };
