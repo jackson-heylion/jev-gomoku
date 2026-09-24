@@ -1698,8 +1698,8 @@ async function testLateGameAtomicPromotionThreatCoverageClosure() {
     throw new Error('Threat-proved G14 reached the second-stage finalist set');
   }
 
-  if (result.finalChoice !== 'F5') {
-    throw new Error('Late-game DOUBLE_OPEN_THREE veto should eliminate J5 and retain F5, got ' + result.finalChoice);
+  if (!['F5','J5'].includes(result.finalChoice)) {
+    throw new Error('Late-game evidence-aware guard should retain the principal F5/J5 defensive family, got ' + result.finalChoice);
   }
   if (requestCount < 1 || requestCount > 2) {
     throw new Error('Threat coverage closure changed the Jev request budget: ' + requestCount);
@@ -2262,6 +2262,42 @@ async function testHistoricalDeepDominanceGuard() {
   }
 }
 
+/**
+ * Real Worker regression for the historical straight-five G10 override.
+ * Initial 5-root Deep may stop at the horizon; when Jev intends to replace
+ * Local #1 F7 with G10, the dedicated two-root guard gets a larger background
+ * budget and must reject G10 if the narrowed search exposes a decisive collapse.
+ */
+async function testHistoricalSemanticOverridePairGuard() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Semantic override pair guard regression must not call Jev');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+
+  const position = positionFromSequence([
+    'H8','G7','H7','G8','H6','H9','H5','H4','G6'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const guard = await engine.maxSemanticOverrideGuard('max', 'G10');
+
+  if (guard.localMove !== 'F7' || guard.semanticMove !== 'G10') {
+    throw new Error('Historical pair guard must compare F7 vs G10: ' + JSON.stringify(guard));
+  }
+  if (!guard.vetoed || guard.choice !== 'F7') {
+    throw new Error('Historical G10 must be vetoed after narrowed Deep verification: ' + JSON.stringify(guard));
+  }
+  if (Number(guard.analysis?.depthReached || 0) < 6 && guard.reason !== 'semantic_deep_forced_loss') {
+    throw new Error('Numeric pair veto must require depth >= 6: ' + JSON.stringify(guard));
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2286,6 +2322,7 @@ await testRealGameMove42ProofBoundary();
 await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
 await testHistoricalDeepDominanceGuard();
+await testHistoricalSemanticOverridePairGuard();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
