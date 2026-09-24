@@ -259,4 +259,6 @@ BENCHMARK_CONFIRM=1 JEV_API_KEY=... npm run benchmark:historical:real
 - 49 手长局；
 - H9 双活三导致的第三局斜五星败局。
 
-同一来源棋谱的多个回归快照只算一个棋谱族，避免重复计胜负。每个样本从最早有意义的关键快照开始，Jev Max 执白、生产 Ref Local 执黑，默认最多续弈 30 手。报告写入 `benchmark/results/historical-real/latest.json` 和 `latest.md`，包含 W/L/D、0/1/2-request 分布、真实 token、延迟与 fallback 数量；API Key 不写入报告。
+同一来源棋谱的多个回归快照只算一个棋谱族，避免重复计胜负。每个样本从最早有意义、仍有决策空间的关键快照开始；例如 37 手 Threat coverage 棋谱从 ply 29（E14 之前）开始，而 ply 31 的已坍缩位置继续保留在 deterministic regression 中做 proof boundary。Jev Max 执白、生产 Ref Local 执黑，默认最多续弈 30 手。报告写入 `benchmark/results/historical-real/latest.json` 和 `latest.md`，包含 W/L/D、0/1/2-request 分布、真实 token、延迟、semantic override guard 与 fallback 数量；API Key 不写入报告。
+
+真实 Jev 不是确定性棋力引擎：相同代码和相同起始局面，不同 run 可能走出明显不同的续弈。因此单次 W/L/D 只能用于发现具体败着，不能作为稳定胜率。做版本对比时应至少重复多轮，并同时看 deterministic regression / Threat proof / Deep guard 是否改善，不要为了某一轮随机胜负过拟合规则。
