@@ -1,515 +1,430 @@
 # Jev Gomoku
 
-> **让传统棋类搜索负责“算”，让 Jev 负责“判”。**
+**中文** | [English](README.en.md)
 
-Jev Gomoku 是一个运行在浏览器中的 15×15 五子棋实验项目。
+> **算法负责“算”，JEV 负责“判”，Proof 拥有最终事实权。**
 
-它并不是简单地“让一个 AI 看棋盘然后直接下一步棋”，而是尝试一种混合决策架构：
+Jev Gomoku 是一个运行在浏览器中的 15×15 五子棋实验项目，用来研究 **传统搜索算法 + JEV / TypeSafe System One** 应该怎样组合。
 
-- **Alpha-Beta / Pattern / VCF / VCT / Threat-space / Deep Search** 负责搜索、证明、生成候选和战术证据。
-- **Jev** 负责理解局面、独立评价候选、比较不同计划，并在多个搜索器意见不一致时做最终裁决。
-- **确定性规则与战术证明** 拥有最高优先级，Jev 不能覆盖非法落子、禁手、立即胜负和已经证明的 forced result。
+它不是：
 
-项目的核心问题不是“Jev 能不能替代五子棋引擎”，而是：
+> “把棋盘扔给 AI，让 AI 凭感觉下一步。”
 
-> **当浏览器里的传统搜索无法无限加深时，Jev 能否作为一个独立判断层，把多个有限搜索器的结果组合成更好的最终决策？**
+现在的核心架构是：
 
----
+- **确定性代码**负责合法性、禁手、立即胜负、唯一防守和已经证明的战术结论；
+- **Alpha-Beta / Pattern / VCF / VCT / Deep Search / Threat-space** 负责搜索、召回候选和产生证据；
+- **JEV** 只在“几个候选都还活着、传统算法意见又不一致”的区域做独立判断和最终裁决；
+- JEV 真正推翻强 Local 基线时，还会再经过一层窄化深搜校验。
 
-## Jev 是什么？
+一句话：
 
-[Jev](https://docs.typesafe.ai/introduction) 是 TypeSafe 的旗舰模型，也是其第一个 **System One model**。
+> **能算清楚的不要交给 JEV；算不死、但必须选一个的，再让 JEV 判断。**
 
-与主要面向文本生成的传统 LLM 使用方式不同，Jev 的接口直接接收：
+## 这个项目真正想验证什么
 
-- **state**：当前状态；
-- **typed questions**：结构化问题；
+重点不是：
 
-并直接返回：
+> “JEV 能不能替代五子棋引擎？”
 
-- choice；
-- probabilities；
-- confidence；
-- score / noul 等结构化结果。
+而是：
 
-也就是说，在这个项目里我们并不要求 Jev 输出一大段“棋局分析作文”，再从自然语言里解析一个坐标。
+> **一个软件问题里，如果同时存在“可确定计算的部分”和“很难写死规则的判断部分”，能不能让代码负责事实、JEV 负责最后的模糊决策？**
 
-我们把棋盘、规则和本地搜索得到的证据组织成结构化状态，然后直接问：
+五子棋很适合做这个实验，因为输赢和错误都很直观：
 
-> 在这些合法候选中，哪一步更值得下？
+- 非法就是非法；
+- 一步成五可以证明；
+- 很多强制杀可以搜索；
+- 但几个“都没被证明输”的候选，战略价值可能很难靠固定权重排清；
+- 浏览器算力有限，又不可能无限深搜。
 
-Jev 返回可以直接被程序消费的概率和选择结果。
+这正好把 JEV 的边界暴露出来。
 
-官方文档：
-
-- [TypeSafe / Jev Introduction](https://docs.typesafe.ai/introduction)
-- [Quick Start](https://docs.typesafe.ai/introduction/quickstart)
-- [Agent Skill](https://docs.typesafe.ai/agent-skill)
-
----
-
-# Jev 在这个项目里做什么？
-
-## 1. Jev 不是搜索器，而是决策层
-
-传统五子棋引擎擅长：
-
-- 枚举变化；
-- Alpha-Beta 剪枝；
-- 找立即胜；
-- 找唯一防守；
-- VCF / VCT；
-- Threat-space forcing sequence；
-- 判断禁手和合法性。
-
-这些任务具有明确的组合搜索结构，非常适合确定性算法。
-
-但浏览器环境里的搜索深度、分支数和运行时间都是有限的。
-
-当几个候选都没有被证明为必胜或必败时，经常会出现：
-
-- Local #1 和 Deep #1 不一致；
-- Pattern 更喜欢进攻，但 Threat Search 认为防守更重要；
-- 两步棋数值差异很小，但战略含义完全不同；
-- 搜索 horizon 之外存在对手反击；
-- 候选召回本身可能漏掉一手非典型好棋。
-
-这正是 Jev 的位置。
-
-**本地算法提供事实和候选，Jev 负责在“不确定但必须做决定”的区域进行判断。**
-
----
-
-## 2. Jev 是 Local Engine 的独立 Challenger
-
-如果直接告诉 Jev：
-
-> Local Engine 认为 G8 排名第一，H7 排名第二。
-
-那么 Jev 很容易被已有排名锚定。
-
-因此 Jev Max 会刻意隐藏：
-
-- local_rank；
-- local_engine_grade。
-
-Jev 只能看到：
-
-- 当前棋盘；
-- 规则；
-- 候选坐标；
-- 每个候选的战术事实；
-- Deep / Threat / VCF / Pattern 等结构化证据。
-
-然后重新独立判断。
-
-因此 Jev 的价值不是“复述 Local Engine”，而是充当一个真正的 **challenger / second opinion**。
-
----
-
-## 3. Jev 负责处理搜索器之间的分歧
-
-一个候选可能同时具有：
-
-- 更好的 Alpha-Beta score；
-- 更差的 opponent best reply；
-- 更强的局部进攻；
-- 更高的 counter-threat 风险。
-
-这些信息很难压缩成一个永远正确的手工权重公式。
-
-Jev Max 会把这些异构证据组织成一个统一状态，让 Jev 判断：
-
-- 哪一步真正更强；
-- 哪一步只是数值看起来漂亮；
-- 哪一步会把主动权过早花掉；
-- 哪一步在对手最强回复之后仍然成立。
-
-这里 Jev 更像一个**裁判层**，而不是另一个暴力搜索器。
-
----
-
-## 4. Jev 负责寻找候选集中的盲点
-
-主候选通常来自：
-
-- Alpha-Beta；
-- deeper-search seeds；
-- Pattern Expert；
-- defensive / counter-threat hotspots；
-- VCF / VCT；
-- Threat-space；
-- strategic wildcard seed。
-
-但任何 bounded search 都可能漏招。
-
-所以 Jev 的 Atomic 阶段允许返回 **OTHER**。
-
-这不是允许 Jev随意生成坐标，而是触发一个 bounded wildcard 流程：
-
-1. 本地再召回 10–16 个额外合理合法点；
-2. Jev 从中提出一个 wildcard；
-3. wildcard 再经过合法性、禁手、立即败着、Threat proof 等校验；
-4. 通过后才允许进入最终候选。
-
-因此 Jev 可以帮助发现搜索盲点，但**不能绕过确定性安全边界**。
-
----
-
-# 整体架构
+## 当前架构
 
 ~~~mermaid
 flowchart TD
-    A[15×15 Board] --> B[Rules / Legality]
-    B --> C[Local Candidate Recall]
+    A[15×15 棋盘] --> B[规则 / 合法性]
+    B --> C[本地候选召回]
 
-    C --> C1[Alpha-Beta<br/>Zobrist + bounded TT + PV ordering]
-    C --> C2[Pattern Expert]
+    C --> C1[Alpha-Beta]
+    C --> C2[Pattern]
     C --> C3[VCF / VCT]
-    C --> C4[Persistent Deep Worker]
-    C --> C5[Persistent Threat Worker]
-    C --> C6[Defensive / Counter-threat Recall]
+    C --> C4[Deep Worker]
+    C --> C5[Threat-space]
+    C --> C6[防守 / Wildcard 召回]
 
-    C1 --> D[6–8 Candidate Universe]
+    C1 --> D[6–8 个候选]
     C2 --> D
     C3 --> D
     C4 --> D
     C5 --> D
     C6 --> D
 
-    D --> E[Deterministic Proof Filter]
-    E -->|forced / illegal| F[Hard Decision]
-    E -->|unresolved| G[Request 1: Speculative Fan-Out]
+    D --> E[确定性 Proof 过滤]
+    E -->|已有唯一答案| F[最终落子]
+    E -->|仍未决| G[JEV Speculative Fan-Out]
 
-    G --> G1[Atomic: all main candidates]
-    G --> G2[Pairwise: likely Top ≤6]
-    G --> G3[Critic: likely Top ≤6]
+    G --> G1[Atomic]
+    G --> G2[Pairwise]
+    G --> G3[Critic]
     G --> G4[Global Best]
-    G --> G5[Recall / Wildcard proposal]
+    G --> G5[Recall Check]
 
-    G1 --> H[Apply Atomic Top4 + Threat coverage]
+    G1 --> H[收敛 / 决赛候选]
     G2 --> H
     G3 --> H
     G4 --> H
     G5 --> H
 
-    H --> I{High-confidence convergence?}
-    I -->|Yes| J[Final Move]
-    I -->|No / finalist pool changed| K[Request 2: Final or Resolution Fan-Out]
+    H --> I{是否高置信一致?}
+    I -->|是| J[JEV 语义选择]
+    I -->|否| K[Final / Resolution Request]
     K --> J
 
-    C4 -. first idle slot .-> T[Speculative tail Threat validation]
-    C5 -. first idle slot .-> T
-    T --> H
+    J --> L[Semantic Override Guard]
+    L --> F
 ~~~
 
-可以把它理解成三层：
+### 三层职责
 
-| 层 | 负责什么 | 是否可被 Jev 覆盖 |
+| 层 | 负责什么 | JEV 能否覆盖 |
 |---|---|---|
-| **规则 / Proof 层** | 合法性、禁手、立即胜负、严格 VCF / Threat proof | **不可覆盖** |
-| **搜索 / Evidence 层** | Alpha-Beta、Deep、Pattern、Threat、PV、opponent reply | 提供证据 |
-| **Jev Decision 层** | Atomic、Pairwise、Critic、独立 Global Best、必要时最终裁决 | 只处理未被证明的区域 |
+| **规则 / Proof 层** | 合法性、禁手、立即胜、唯一防守、已证明 VCF / Threat 结果 | **不能** |
+| **搜索 / Evidence 层** | Alpha-Beta、Pattern、Deep、PV、对手最佳回复、Threat | 只提供证据 |
+| **JEV Decision 层** | Atomic、Pairwise、Critic、Global Best、最终未决裁决 | 只在安全候选集内决定 |
 
----
+## JEV 在这里到底做什么
 
-# Jev Max
+### 1. 独立 Challenger
 
-**Jev Max** 是当前默认、也是最完整的混合决策模式。
+JEV Max 会刻意区分：
 
-核心目标不是减少搜索深度，而是减少**重复计算和串行等待**：相同的棋力证据尽量并行产生，同一批 Jev 独立问题尽量在一次 System One 请求中 fan-out。
+- **候选召回顺序**；
+- 真正的 **Alpha-Beta Local #1**。
 
-## Stage 0：确定性搜索与 Proof
+Atomic 阶段不会简单告诉 JEV：
 
-在调用 Jev 前，本地引擎继续完成：
+> “Local 觉得 A 第一。”
 
-- 合法点过滤与黑棋禁手；
-- immediate win / mandatory defense；
-- VCF / VCT；
-- direct open-four / double-winning-point proof；
-- Threat-space search；
-- Deep iterative search；
-- opponent best replies；
-- heterogeneous candidate recall。
+而是尽量给它棋盘和结构化证据，让它形成真正的 second opinion。
 
-严格 proof 已经给出唯一答案时直接落子，仍然是 **0 次 Jev 请求**。
+否则 JEV 很容易只是跟着 Local 排名走，失去独立判断价值。
 
-### Alpha-Beta 性能层
+### 2. 候选裁决器
 
-主线程 Alpha-Beta 现在使用：
-
-- 双 32-bit Zobrist incremental hash；
-- EXACT / LOWER / UPPER transposition-table entry；
-- 同一次 iterative deepening 跨 depth 复用 TT；
-- 上一层 root/PV 排序；
-- TT bestMove 优先搜索；
-- bounded TT 跨回合复用，保留最近 generation，优先淘汰浅层和旧条目。
-
-这些优化不降低搜索 depth、branch 或战术候选范围，目标是让相同预算搜索更多有效节点。
-
-Deep Worker 侧同样保留 Zobrist TT，并在长驻 Worker 生命周期内跨任务复用 bounded TT。
-
-### 历史败局安全守卫
-
-真实历史棋谱回放额外暴露了两类“未达到数学 hard proof、但继续交给 Jev 风险过高”的局面：
-
-- **DOUBLE_OPEN_THREE 分阶段防守**：前 16 手以内，如果 Threat evidence 标记为 `CRITICAL + DOUBLE_OPEN_THREE` 且存在能消除该结构的替代点，就先剔除主动放任它的候选；更晚的中盘/残局把同类形状保留为高优先级 advisory evidence，因为此时可能存在反向先手与对攻节奏。
-- **Recall 与 Local #1 分离**：Max 的候选顺序承担“别漏掉防守点/Pattern/Threat/搜索种子”的 recall 职责，不再冒充 Alpha-Beta 排名。真正的本地搜索第一名单独记录为 `localSearchChoice`。
-- **Semantic override 两点 Deep guard**：Deep 不再提前修改 Jev 的候选池。只有 Jev 最终要推翻实际 `localSearchChoice` 时，才比较“Alpha-Beta #1 vs Jev 最终点”；优先复用已有 Deep evidence，证据不足时补一次仅两点的窄化 Worker 深搜。为避免浏览器/CI 负载抖动让明显自杀点偶发漏网，还保留一个非常保守的确定性兜底：Local #1 未被 hard proof 判死，且 Jev 点相对 Local 低至少 25k、同时跌入明显危险区时才 veto。普通几千分分歧仍完全交给 Jev，且不会增加 Jev API 请求。
-- **不复活已过滤 Local**：`localSearchChoice` 必须仍存在于经过 legality / local hard proof / Threat hard proof 后的当前候选池，final guard 才能回退到它；如果 Local #1 已被 deterministic proof 淘汰，Jev 的安全候选不会被 guard 反向覆盖。
-
-这些 guard 不把 bounded search 冒充 hard proof；VCF / Threat forced result 始终拥有更高优先级。
-
----
-
-## Stage 0.5：两个长驻 Heavy Worker
-
-浏览器不再每个阶段反复创建和销毁 Worker。
-
-整局维持最多 **2 个**长驻 Worker slot：
-
-- Deep Search；
-- Threat-space Search；
-- supplemental Threat；
-- wildcard / rescue Threat。
-
-任务进入统一队列；正常完成后 Worker 保留，timeout / crash 才销毁对应 slot 并按需重建。
-
-Jev Max 启动 Deep + Threat 后，会把最多 2 个未被首轮 Threat 覆盖的 tail candidate 提前排进队列。只要 Deep 或 Threat 任一先结束，空闲 slot 就开始计算 tail Threat。Atomic 后若 #7/#8 晋级，通常可以直接复用已经完成的结果，而不是再串行等待一次 supplemental Worker。
-
----
-
-## Stage 1：Speculative Fan-Out
-
-普通 Max 不再先发 Atomic、等响应、再发 Pairwise/Critic。
-
-**Request 1** 同时包含：
-
-- Atomic：全部主候选，最多 8；
-- Pairwise：最可能进入决赛的前 ≤6 个候选，双向比较；
-- Critic：同一 speculative pool；
-- global_best：独立全局最佳判断；
-- recall_check；
-- bounded wildcard proposal。
-
-共享的棋盘、candidate facts、Pairwise policy、Critic policy 只发送一次；各问题只引用共享 state，减少重复 payload。
-
-收到响应后，程序才根据 Atomic + deterministic Threat coverage 确定实际 Top4。只有仍然合法、未被 hard proof 排除的 Pairwise/Critic 回答会被消费，其余 speculative answer 直接丢弃。
-
-这属于**多算少等**：不减少判断维度，而是消除 API round-trip barrier。
-
----
-
-## Stage 2：本地收敛或第 2 次裁决
-
-如果实际 Atomic Top4 落在 speculative pool 内，则直接复用 Request 1 已返回的双向 Pairwise 与 Critic。
-
-当以下信号形成高置信一致时，可以在 **1 次 Jev 请求**后直接落子：
-
-- Pairwise Top1；
-- Atomic 强度；
-- Critic 生存概率；
-- 独立 global_best；
-- deterministic Deep / Threat evidence。
-
-如果存在明显分歧、validated wildcard 进入 finalist，或 Atomic 将决赛池改写到 speculative pool 之外，才使用 **Request 2**：
-
-- 普通分歧：Final Judge；
-- 决赛池被改写：Resolution Fan-Out，在同一请求中补齐实际 Top4 的 Pairwise/Critic，并附带最终 best_move。
-
-因此正常 Jev Max 回合现在是：
+JEV 最适合面对的是这种局面：
 
 ~~~text
-严格确定性局面：0 请求
-普通未决局面：1 请求
-困难 / 分歧局面：2 请求
+A：Local 分高，但 Deep PV 一般
+B：Local 略低，但 Threat 结构更主动
+C：Pattern 很漂亮，但对手最佳回复后风险偏高
+D：几个算法意见完全分裂
 ~~~
 
-**硬上限从原来的 3 次降为 2 次。**
+而这些候选都已经：
 
-Wildcard、rescue、VCF、Threat proof 的安全边界保持不变。
+- 合法；
+- 没有被 hard proof 判输；
+- 做过相对一致的 Threat / Deep 检查。
 
----
+这时再让 JEV 判断：
 
-# Jev 不能做什么？
+> 综合这些证据，到底下哪一个？
 
-为了避免“语义判断覆盖数学事实”，项目明确设置了硬边界。
+这比让它从 225 个格子里自由“想一步”靠谱得多。
 
-Jev 不能覆盖：
+### 3. 多视角裁决，而不是只问一句
+
+JEV Max 的第一次请求可以并行问多个角度：
+
+- **Atomic**：单独看每个候选强不强；
+- **Pairwise**：A 和 B 正面对比谁更好；
+- **Critic**：专门挑毛病，看对手最佳回复后还能不能活；
+- **Global Best**：独立再选一次最佳；
+- **Recall Check**：主候选是不是可能漏招。
+
+如果几个视角收敛，1 次请求就落子。
+
+如果出现明显分歧，才进入第 2 次 Final / Resolution 裁决。
+
+### 4. 可以提醒“可能漏招”，但不能乱编
+
+JEV 可以通过 \`OTHER\` 提醒：
+
+> 主候选集可能漏了好棋。
+
+但程序不会让它随便生成一个坐标直接下。
+
+流程是：
+
+1. 本地再召回一个有数量上限的 wildcard pool；
+2. JEV 只能从池里挑；
+3. 再过合法性、禁手、一手败着、Threat proof；
+4. 通过后才能进入最终候选。
+
+所以它更像：
+
+> **召回补充触发器 + reranker**
+
+而不是自由生成器。
+
+## JEV 不能推翻什么
+
+JEV 没有权力覆盖：
 
 1. 非法落子；
-2. 已启用的黑棋禁手；
+2. 已开启的黑棋禁手；
 3. 当前立即取胜；
-4. 对方下一手立即取胜时的唯一合法防守；
+4. 对方下一手立即赢时的唯一合法防守；
 5. 已严格证明的 VCF / Threat-space forced result；
-6. 已证明 forced-loss 的候选；
-7. wildcard 的安全校验。
+6. 已被证明 forced-loss 的候选；
+7. wildcard 的确定性安全校验。
 
-一个很重要的设计原则是：
+项目里一个很重要的原则是：
 
-> **Search 没有证明输，不等于证明安全。**
+> **没有搜到证明，不等于已经证明安全。**
 
-因此项目使用类似 **THREAT_SEARCH_NO_PROOF** 的语义，而不会把“搜索没找到问题”伪装成 SAFE。
+所以 timeout、搜索未完成、\`NO_PROOF\` 都不会被偷换成 \`SAFE\`。
 
----
+## Semantic Override Guard
 
-# 为什么不是纯 Local？
+历史真实棋谱重放暴露过一个典型问题：
 
-纯本地搜索当然可以下五子棋，而且项目内部仍然保留完整 Local Engine。
+> JEV 有时会把 Local #1 推翻成一手“战略上说得通”，但更深搜索明显更差的棋。
 
-问题在于浏览器不是围棋服务器或专用棋类引擎环境：
+现在的处理非常克制：
 
-- CPU 核数有限；
-- JavaScript 主线程不能长时间阻塞；
-- Worker 数量需要控制；
-- 搜索树指数爆炸；
-- 更深搜索意味着明显更长等待时间；
-- horizon problem 不会因为简单增加一点 depth 就彻底消失。
+- JEV 仍然能看到完整安全候选集；
+- Local #1 不会提前绑架 JEV；
+- 只有 **JEV 最终真的要推翻实际 Alpha-Beta Local #1** 时才触发 guard；
+- 优先复用已有 Deep evidence；
+- 证据仍不够时，只对“Local #1 vs JEV 最终点”做两点窄化 Worker 深搜；
+- 最新策略在仍模糊时可以直接跳到 **exact depth 8**；
+- 已经被 deterministic proof 淘汰的 Local 绝对不会被“复活”；
+- 只有巨大、明显灾难性的深搜分差才 veto，普通分歧仍交给 JEV。
 
-Jev Gomoku 的实验方向不是无限堆搜索深度，而是：
+也就是说：
 
-> **用 bounded deterministic search 找到“事实”，再让 Jev 在事实之上处理剩余的不确定性。**
+> **JEV 可以挑战 Local，但挑战也要接受事实校验。**
 
----
+## Jev Max 请求上限
 
-# 为什么不是纯 Jev？
+当前目标：
 
-因为五子棋包含大量非常适合算法处理的确定性问题。
+~~~text
+确定性唯一解：0 次 JEV 请求
+普通未决局面：1 次
+困难 / 分歧局面：2 次
+~~~
 
-例如：
+Jev Max 每回合逻辑请求硬上限是 **2**。
 
-- 这一手是不是禁手？
-- 有没有立即成五？
-- 对手有没有一步杀？
-- 这条 VCF 是否严格成立？
-- 某个点是不是 forced loss？
+浏览器重型 Worker 并发同样限制在 **2**。
 
-这些事情不应该依赖语义模型“感觉”。
+## 对局模式
 
-因此 Jev Gomoku 也不是一个纯神经模型棋手。
-
-更准确地说，它是：
-
-> **Search Engine + Tactical Proof System + Jev Decision Layer**
-
----
-
-# 对局模式
-
-| 模式 | Jev 的角色 |
+| 模式 | JEV 的角色 |
 |---|---|
-| **Jev Max** | 多算法异构召回 → Atomic → Pairwise → Critic → 必要时 Final Judge |
-| **Jev 宗师** | Deep / Threat 与本地搜索并行；证据一致时直接落子，分歧时 Jev 裁决 |
-| **Jev 大师** | 深本地搜索生成高质量候选，由 Jev 做最终选择 |
-| **Jev 直觉** | 更直接地让 Jev 从合法点判断，主要作为实验基线 |
+| **Jev Max** | 异构召回 → Deep/Threat → Atomic/Pairwise/Critic → 必要时 Final |
+| **Jev 宗师** | 战术/深搜先提供证据，出现分歧时 JEV 裁决 |
+| **Jev 大师** | 高强度本地搜索生成候选，由 JEV 做最终语义选择 |
+| **Jev 直觉** | 更直接让 JEV 从合法点选择，主要作为实验基线 |
 
-纯 Local 不作为用户模式展示，但 Local Engine 始终存在：
+纯 Local 不再作为普通用户模式展示，但一直存在于内部：
 
-- 负责候选和战术证据；
-- 负责 hard proof；
-- Jev 网络失败时自动接管当前回合。
+- 搜索；
+- hard proof；
+- JEV 不可用时降级接管；
+- benchmark 对照组。
 
----
+## 五子棋 / Renju 配置
 
-# 浏览器性能设计
-
-Jev Max 必须在普通浏览器中运行，因此所有昂贵步骤都有边界。
-
-主要策略：
-
-- 主线程只负责 UI、轻量计算、调度和结果整合；
-- Heavy Worker 最多同时运行 **2 个**，并使用整局长驻 Worker Pool；
-- 主线程 Alpha-Beta 使用 incremental Zobrist + bounded persistent TT + PV/TT best-move ordering；
-- Deep Worker 的 bounded TT 在 Worker 生命周期内跨回合复用；
-- 主候选通常限制在 **6–8 个**；
-- Deep 只深入分析头部候选；
-- Threat Search 使用 bounded budget，并利用空闲 Worker 对 tail candidate 做 speculative validation；
-- Request 1 对 likely Top ≤6 预计算 Pairwise/Critic，但实际只消费最终 Top4 对应结果；
-- shared board / candidate facts / policy 只发送一次，避免每个问题重复长说明；
-- wildcard pool 有数量上限；
-- Worker timeout 后不会回主线程同步补跑重型搜索；
-- Jev Max 每回合最多 **2 次**逻辑请求；确定性唯一解为 0 次；
-- Jev 请求和缓存都有数量、TTL 和容量限制；
-- Jev 不可用时 Local Engine 自动降级接管。
-
-目标不是“搜索尽可能久”，而是让有限计算预算产生尽可能高的信息密度。
-
----
-
-# 透明的 Jev 决策日志
-
-每一局都可以复制完整棋谱。
-
-除了普通落子记录，还会保存 Jev 的决策过程，包括：
-
-- 候选来源；
-- Local / Deep / Pattern / Threat 证据；
-- Atomic label 与 probability；
-- Pairwise 双向比较；
-- Critic / refutation；
-- Deep PV；
-- opponent best replies；
-- wildcard requested / proposed / accepted；
-- Final choice / confidence；
-- Jev 请求次数；
-- token 使用量；
-- Local / Deep / Threat / total think time；
-- Worker timeout；
-- payload token estimate；
-- browser long-task。
-
-这些日志可以直接用于：
-
-- regression position；
-- benchmark；
-- 错误局面复盘；
-- Jev vs Local 对比；
-- 后续算法迭代。
-
----
-
-# 五子棋规则
-
-支持开局前配置：
+开局前可以配置：
 
 - 玩家执黑 / 执白；
 - 黑棋长连禁手；
 - 黑棋四四禁手；
 - 黑棋三三禁手。
 
-当长连禁手开启时：
+长连禁手开启时：
 
 - 黑棋必须**恰好五连**获胜；
 - 白棋五连及以上获胜。
 
-关闭长连禁手后，黑棋也可以五连及以上获胜。
+## 浏览器性能设计
 
----
+这个项目明确接受一个现实：
 
-# Jev 请求架构
+> 浏览器不是专用棋类服务器。
 
-浏览器不会直接访问 TypeSafe API。
+所以所有重活都有边界：
+
+- Deep / Threat 放到 Web Worker；
+- 重型 Worker 最多 2 个；
+- Worker 整局长驻复用，不每阶段反复创建；
+- Alpha-Beta 使用 incremental Zobrist；
+- bounded TT 跨 iterative depth / 最近 generation 复用；
+- 主候选维持小集合；
+- Deep / Threat 只分析候选前沿；
+- JEV 多问题共享同一份 board / facts / policy；
+- timeout 后 fail-closed，不回主线程同步补跑重型搜索。
+
+目标不是“搜得越久越强”，而是：
+
+> **让有限浏览器预算产生尽量高的信息密度。**
+
+## 完整决策日志
+
+复制棋谱时可以带上：
+
+- 候选来源；
+- Local / Deep / Pattern / Threat 证据；
+- Atomic；
+- Pairwise；
+- Critic；
+- Deep PV；
+- 对手最佳回复；
+- wildcard 请求 / 提议 / 校验；
+- JEV 最终建议；
+- Semantic Override Guard；
+- JEV 请求次数和 token；
+- Local / Deep / Threat / 总耗时；
+- Worker timeout；
+- payload telemetry。
+
+这些真实棋谱会继续反过来变成 regression case。
+
+## Benchmark
+
+仓库保留多条对照链：
+
+| Arm | 作用 |
+|---|---|
+| \`local\` | 确定性基线 / fallback |
+| \`jev-final\` | Local/Deep 提供证据 → JEV 做一次最终裁决 |
+| \`jev-max\` | 当前完整有界多阶段架构 |
+| \`jev-blind\` | JEV 直接面对较宽合法集的诊断基线 |
+
+离线检查：
+
+~~~bash
+npm run benchmark:smoke
+npm run benchmark:regression
+npm run benchmark:mock
+~~~
+
+真实 JEV benchmark 会产生费用，需要显式确认：
+
+~~~bash
+export JEV_API_KEY='...'
+npm run benchmark -- --seeds 6 --confirm-cost
+~~~
+
+历史真实棋谱重放：
+
+~~~bash
+BENCHMARK_CONFIRM=1 JEV_API_KEY='...' npm run benchmark:historical:real
+~~~
+
+完整契约和历史棋谱族说明见：
+
+**[benchmark/README.md](benchmark/README.md)**
+
+## 目前对 JEV × 五子棋的结论
+
+### JEV 直接替代棋类搜索：不适合
+
+五子棋里太多问题是组合搜索和严格 proof。
+
+合法性、强制线、禁手、立即杀都应该让算法做。
+
+### JEV 做候选最终裁决：适合
+
+当程序已经把棋盘压缩成少量：
+
+- 合法；
+- 没有被证明输；
+- 带结构化证据；
+
+的候选时，JEV 的 choice / score / probability 形态非常匹配。
+
+### JEV 做“混合智能架构”实验：很适合
+
+真正可迁移的不是某一套五子棋棋型，而是：
+
+~~~text
+Hard Rules
++ Bounded Search
++ Multiple Evidence Producers
++ JEV Arbitration
++ Post-decision Verification
+~~~
+
+## 从五子棋往其他场景看
+
+比较值得继续观察的 JEV 场景，通常都有一个共同点：
+
+> **事实已经被程序整理好了，但最后那几个选项很难靠固定 if/else 排清。**
+
+例如：
+
+- 工单分类、优先级和路由；
+- Agent 执行结果审查 / 升级人工；
+- 多模型、多算法结果裁决；
+- 推荐 / 搜索 rerank；
+- 对账异常、业务异常的原因分流；
+- 有确定性 policy 兜底的风险审核；
+- 候选集有限的低延迟实时控制。
+
+相反，这些事情不应该优先交给 JEV：
+
+- 长文本生成；
+- 精确金额计算；
+- 权限判断；
+- 会计规则；
+- 可以简单用代码确定的条件；
+- 需要很深顺序搜索但又没有外部验证的任务。
+
+完整复盘、**开始整理时全部 146 条提交记录**、适配分析和其他应用观察见：
+
+**[JEV × 五子棋：完整实验复盘](docs/JEV-RETROSPECTIVE.md)**
+
+## JEV / TypeSafe
+
+JEV 是 TypeSafe 的 System One Model。
+
+它的使用方式不是让模型自由输出一大段文字，而是：
+
+- 输入 \`state\`；
+- 同时输入多个 typed questions；
+- 使用 Choice / Score / Noul；
+- 返回结构化答案、概率和置信信息。
+
+官方资料：
+
+- [TypeSafe Quick Start](https://docs.typesafe.ai/introduction/quickstart)
+- [TypeSafe Agent Skill](https://docs.typesafe.ai/agent-skill)
+- [Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+
+厂商公开的性能、成本和 demo 适合作为方向参考；真正用于业务前，仍然应该用自己的数据、网络环境和错误成本重新测。
+
+## 请求与密钥架构
+
+浏览器不会直接访问 TypeSafe：
 
 ~~~text
 Browser
-   │
    │ POST /api/jev
    ▼
 Same-origin Server
-   │
    │ Authorization: Bearer JEV_API_KEY
    ▼
-TypeSafe System One
-https://api.typesafe.ai/v1/systemone
+TypeSafe /v1/systemone
 ~~~
 
-API Key 只存在服务端环境变量：
-
-~~~bash
-JEV_API_KEY=...
-~~~
-
-不会写入：
+\`JEV_API_KEY\` 只存在服务端环境变量，不会进入：
 
 - 浏览器 JS；
 - HTML；
@@ -517,11 +432,7 @@ JEV_API_KEY=...
 - 棋谱；
 - 前端日志。
 
-服务端同时负责 429 / 529 的 Retry-After 与指数退避。
-
----
-
-# 本地运行
+## 本地运行
 
 要求 Node.js >= 22.13。
 
@@ -537,96 +448,21 @@ npm run dev
 npm run check
 ~~~
 
-包括：
+包括语法检查、benchmark smoke/regression/mock 和 production build。
 
-- JavaScript syntax check；
-- benchmark smoke；
-- regression；
-- Jev mock benchmark；
-- production build。
+## 仓库入口
 
----
-
-# Benchmark
-
-项目保留多个 benchmark arm，用于区分：
-
-- Local baseline；
-- Jev final decision；
-- Jev Max。
-
-常用命令：
-
-~~~bash
-npm run benchmark:smoke
-npm run benchmark:regression
-npm run benchmark:mock
-~~~
-
-真实 Jev benchmark：
-
-~~~bash
-export JEV_API_KEY='...'
-npm run benchmark -- --seeds 6 --confirm-cost
-~~~
-
-重点观察：
-
-- W / L / D；
-- Jev override Local #1；
-- deeper-search hindsight；
-- Atomic / Pairwise consistency；
-- Final 与 Local / Deep 的一致率；
-- wildcard 效果；
-- VCF / Threat hard filter；
-- Jev 请求数与 token；
-- Local / Deep / Threat 分阶段耗时；
-- Worker timeout；
-- tactical error；
-- contract violation。
-
-详见 [benchmark/README.md](benchmark/README.md)。
-
----
-
-# 项目目标
-
-Jev Gomoku 并不试图证明“Jev 比传统棋类引擎更强”。
-
-它更关注一个通用的软件架构问题：
-
-> **当一个问题同时包含“可计算的确定性部分”和“难以用固定规则表达的判断部分”时，应该如何把传统算法与结构化 AI 决策模型组合起来？**
-
-在这个项目里：
-
-- Alpha-Beta 是搜索器；
-- VCF / VCT / Threat-space 是战术证明器；
-- Pattern / Deep Worker 是证据生成器；
-- Jev 是独立判断者与分歧裁决者；
-- deterministic proof 是最终安全边界。
-
-五子棋只是这个架构最直观的实验场。
-
-如果这种模式有效，它同样可以迁移到：
-
-- Agent tool routing；
-- 多模型候选裁决；
-- 风险判断；
-- 推荐系统 rerank；
-- 规则系统 + AI 混合决策；
-- 多算法 ensemble。
+- 主程序：\`src/app.js\`
+- JEV Client：\`src/jev-client.js\`
+- Deep Worker：\`public/deep-worker.js\`
+- Benchmark：\`benchmark/\`
+- 完整实验复盘：\`docs/JEV-RETROSPECTIVE.md\`
 
 ---
 
 ## 核心思想
 
-~~~text
-不要让 Jev 替代算法。
-
-让算法负责它能证明的部分，
-让 Jev 负责算法无法可靠排序的部分。
-
-Search for facts.
-Jev for judgment.
-Proof wins.
-~~~
+> 不要让 JEV 替代算法。  
+> 算法负责它能证明的部分。  
+> JEV 负责几个合理答案之间难写死规则的判断。  
+> 最终事实边界仍然掌握在确定性代码手里。
