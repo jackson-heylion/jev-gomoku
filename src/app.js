@@ -4270,13 +4270,13 @@
       Number.isFinite(localScore)
       && Number.isFinite(semanticScore)
       && Number(pairAnalysis?.depthReached || 0) >= 6
-      && semanticScore <= -30000
-      && localScore >= -15000
-      && margin >= 30000
+      && localScore >= -5000
+      && semanticScore <= -1500
+      && margin >= 1200
     ) {
       return {
         vetoed: true,
-        reason: 'semantic_catastrophic_pair_deep_separation',
+        reason: 'local_deep_consensus_over_semantic_override',
         local,
         semantic,
         margin
