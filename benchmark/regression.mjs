@@ -2362,6 +2362,86 @@ async function testRecentDepthZeroSemanticOverrideGuard() {
   }
 }
 
+
+/**
+ * One move after the depth0 D8 regression, production Alpha-Beta prefers D9,
+ * but Threat search hard-proves D9 losing. The semantic guard must never
+ * resurrect that filtered Local #1 when Jev selects a surviving move.
+ */
+async function testSemanticOverrideNeverResurrectsHardLostLocal() {
+  let requests = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Hard-lost-local mock has no choices: ' + id);
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'H6' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.includes('H6') ? 'H6' : keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-hard-lost-local',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G9','H9','H10','F8','G8','I11','G10','G7','G11','G12','F10','I10','D10','E10',
+    'I9','F12','J8','K7','H12','I13','D8','E9'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  if (context.localSearchChoice !== 'D9') {
+    throw new Error('Expected historical Alpha-Beta #1 D9, got ' + context.localSearchChoice);
+  }
+
+  const threat = await engine.threatAnalyze(['D9','H6'], 'max', {
+    timeBudgetMs: 1450,
+    maxThreatTurns: 8,
+    branch: 9
+  });
+  const d9 = (threat?.analyses || []).find(row => row.move === 'D9');
+  if (!d9?.forced) {
+    throw new Error('Historical D9 must be hard-proved losing before semantic guard: ' + JSON.stringify(d9 || null));
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (result.finalChoice === 'D9') {
+    throw new Error('Semantic guard resurrected hard-lost Local #1 D9');
+  }
+  if (guard?.vetoed && guard.choice === 'D9') {
+    throw new Error('Semantic guard vetoed back to filtered D9: ' + JSON.stringify(guard));
+  }
+  if (requests < 1 || requests > 2) {
+    throw new Error('Hard-lost-local regression changed Jev request cap: ' + requests);
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2387,6 +2467,7 @@ await testDiagonalOpenThreeDirectDoubleWinVeto();
 await testHistoricalDoubleOpenThreeForkDefense();
 await testHistoricalDeepDominanceGuard();
 await testRecentDepthZeroSemanticOverrideGuard();
+await testSemanticOverrideNeverResurrectsHardLostLocal();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();
