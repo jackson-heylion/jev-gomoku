@@ -183,9 +183,16 @@ function summarizeDecision(result, latencyMs) {
     logicalRequests: Number(shape.logicalRequests ?? result?.client?.logicalRequests ?? 0) || 0,
     httpRequests: Number(shape.httpRequests ?? result?.client?.attempts ?? 0) || 0,
     decisionAuthority: shape.decisionAuthority || null,
+    localSearchChoice: shape.localSearchChoice || result?.localChoice || null,
+    recallPriorityChoice: shape.recallPriorityChoice || null,
     deepDominanceApplied: Boolean(shape.deepDominanceApplied),
     deepDominanceLeader: shape.deepDominanceLeader || null,
     deepDominanceRejected: Array.isArray(shape.deepDominanceRejected) ? shape.deepDominanceRejected : [],
+    overrideGuardVetoed: Boolean(shape.overrideGuardVetoed),
+    overrideGuardSupplemental: Boolean(shape.overrideGuardSupplemental),
+    overrideGuardElapsedMs: shape.overrideGuardElapsedMs ?? null,
+    overrideGuardReason: result?.decisionTrace?.semanticOverrideGuard?.reason || null,
+    jevSuggested: result?.jevSuggested || null,
     inputTokens: Number(result?.usage?.input_tokens) || 0,
     outputTokens: Number(result?.usage?.output_tokens) || 0,
     candidateCount: Number(shape.candidateCount ?? result?.candidates?.length ?? 0) || 0,
@@ -279,7 +286,9 @@ async function playHistoricalFamily(engine, sample, index, total) {
         ? Math.round(decisions.reduce((sum, d) => sum + d.latencyMs, 0) / decisions.length)
         : 0,
       maxLatencyMs: decisions.length ? Math.max(...decisions.map(d => d.latencyMs)) : 0,
-      fallbacks: decisions.filter(d => d.fallback).length
+      fallbacks: decisions.filter(d => d.fallback).length,
+      overrideGuardVetoTurns: decisions.filter(d => d.overrideGuardVetoed).length,
+      overrideGuardSupplementalTurns: decisions.filter(d => d.overrideGuardSupplemental).length
     }
   };
 }
@@ -311,6 +320,8 @@ function markdownReport(report) {
     '- 2-request 回合：' + report.summary.twoRequestTurns + '/' + report.summary.jevTurns,
     '- 总逻辑请求：' + report.summary.logicalRequests,
     '- Token：' + report.summary.inputTokens + ' input / ' + report.summary.outputTokens + ' output',
+    '- Semantic Deep guard：' + report.summary.overrideGuardVetoTurns + ' 次 veto / '
+      + report.summary.overrideGuardSupplementalTurns + ' 次补跑',
     '',
     '| 历史棋谱族 | 起始手数 | W/L/D | 续弈手数 | Jev回合 | 逻辑请求 | 1req/2req | in/out token | 平均决策ms |',
     '|---|---:|:---:|---:|---:|---:|---:|---:|---:|',
@@ -356,7 +367,9 @@ async function main() {
     upstreamRequests,
     inputTokens: games.reduce((sum, g) => sum + g.metrics.inputTokens, 0),
     outputTokens: games.reduce((sum, g) => sum + g.metrics.outputTokens, 0),
-    fallbacks: games.reduce((sum, g) => sum + g.metrics.fallbacks, 0)
+    fallbacks: games.reduce((sum, g) => sum + g.metrics.fallbacks, 0),
+    overrideGuardVetoTurns: games.reduce((sum, g) => sum + g.metrics.overrideGuardVetoTurns, 0),
+    overrideGuardSupplementalTurns: games.reduce((sum, g) => sum + g.metrics.overrideGuardSupplementalTurns, 0)
   };
 
   const report = {
