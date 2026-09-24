@@ -2442,6 +2442,151 @@ async function testSemanticOverrideNeverResurrectsHardLostLocal() {
   }
 }
 
+
+/**
+ * Recent-long root: Local E6 keeps a CRITICAL opponent J9 double-open-three
+ * network, while semantic J9 lowers completed Threat counter-risk to ELEVATED.
+ * Numeric Local/Deep guard must not veto a genuine Threat-safety upgrade.
+ */
+async function testSemanticLowerThreatRiskOutranksNumericGuard() {
+  let requests = 0;
+  const engine = await loadProductionEngine({
+    request: async ({ payload }) => {
+      requests++;
+      const answers = {};
+      for (const [id, question] of Object.entries(payload?.questions || {})) {
+        const keys = Object.keys(question?.criteria || {});
+        if (!keys.length) throw new Error('Threat-first guard mock has no choices: ' + id);
+        let choice = keys[0];
+        if (id === 'recall_check') {
+          choice = keys.includes('MAIN_SET') ? 'MAIN_SET' : keys[0];
+        } else if (id.startsWith('judge_')) {
+          const move = id.slice('judge_'.length);
+          choice = move === 'J9' && keys.includes('EXCELLENT')
+            ? 'EXCELLENT'
+            : keys.includes('GOOD') ? 'GOOD' : keys[0];
+        } else if (id.startsWith('critic_')) {
+          choice = keys.includes('SURVIVES_BEST_REPLY') ? 'SURVIVES_BEST_REPLY' : keys[0];
+        } else if (id.startsWith('duel_') || id === 'global_best' || id === 'best_move') {
+          choice = keys.includes('J9') ? 'J9' : keys[0];
+        }
+        answers[id] = oneHotChoice(choice, keys);
+      }
+      return {
+        model: 'mock-threat-first-guard',
+        answers,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        __client: { attempts: 1, cached: false, transport: 'regression-mock' }
+      };
+    }
+  });
+
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: false,
+    threeThree: false
+  });
+  const position = positionFromSequence([
+    'H8','G9','I8','G8','J8','G7','K8','L8','G6','G10','G11','H7','I10','I7','J7','F7','E7'
+  ]);
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+
+  const context = engine.candidates('max');
+  if (context.localSearchChoice !== 'E6') {
+    throw new Error('Recent-long Local #1 must be E6, got ' + context.localSearchChoice);
+  }
+  if (!context.candidates.some(move => move.key === 'J9')) {
+    throw new Error('Recent-long J9 must remain in semantic recall');
+  }
+
+  engine.setPosition(position.board, position.moves, 'jev-latest');
+  const result = await engine.jevMax();
+  const guard = result.decisionTrace?.semanticOverrideGuard || null;
+  if (result.jevSuggested !== 'J9') {
+    throw new Error('Regression mock must semantically prefer J9, got ' + result.jevSuggested);
+  }
+  if (result.finalChoice !== 'J9') {
+    throw new Error('Lower Threat-risk J9 must survive numeric override guard, got ' + result.finalChoice);
+  }
+  if (guard?.vetoed || guard?.reason !== 'semantic_lower_counter_threat_risk') {
+    throw new Error('Threat-risk precedence missing: ' + JSON.stringify(guard));
+  }
+  if (guard.localThreatRisk !== 'CRITICAL' || guard.semanticThreatRisk !== 'ELEVATED') {
+    throw new Error('Unexpected recent-long Threat risk ordering: ' + JSON.stringify(guard));
+  }
+  if (requests < 1 || requests > 2) {
+    throw new Error('Threat-first guard changed Jev request cap: ' + requests);
+  }
+}
+
+
+/**
+ * Coverage history at ply 29: J5/F5 are the semantic/local front pair but both
+ * retain CRITICAL opponent counter-pressure. Completed depth-5 Deep ranks E13
+ * first and E13 is not hard-lost. The final must be widened to let Jev compare
+ * E13 instead of forcing a binary J5/F5 choice.
+ */
+function testCoverageDeepSafetyFinalistInjection() {
+  const request = async () => {
+    throw new Error('Deep safety finalist selector test must not call Jev');
+  };
+  return loadProductionEngine({ request }).then(engine => {
+    engine.setGameConfig({
+      playerColor: 'black',
+      overline: true,
+      fourFour: false,
+      threeThree: false
+    });
+    const position = positionFromSequence([
+      'H8','G7','H7','H6','H9','H10','G6','G9','F8','G8','G10','I8','F11','E12','F7','F9',
+      'H5','E8','I4','J3','F6','F4','G5','E10','I5','E11','E9','D11','C12'
+    ]);
+    engine.setPosition(position.board, position.moves, 'jev-latest');
+
+    const deepAnalysis = {
+      status: 'completed',
+      depthReached: 5,
+      timedOut: true,
+      scores: [
+        { move: 'E13', score: -1205, forcedResult: null },
+        { move: 'J5', score: -2280, forcedResult: null },
+        { move: 'F5', score: -2302, forcedResult: null }
+      ]
+    };
+    const critical = move => ({
+      move,
+      forced: false,
+      timedOut: false,
+      reason: 'not_proven',
+      counterThreat: {
+        risk: 'CRITICAL',
+        reason: 'latent_threat_network',
+        forcedDefenseMove: null,
+        networkMoves: []
+      }
+    });
+    const threatAnalysis = {
+      status: 'completed',
+      timedOut: false,
+      analyses: [critical('J5'), critical('F5'), critical('E13')]
+    };
+
+    const selected = engine.maxDeepSafetyFinalist(
+      'max',
+      ['J5','F5'],
+      deepAnalysis,
+      threatAnalysis
+    );
+    if (selected.choice !== 'E13') {
+      throw new Error('Coverage dangerous final must inject Deep #1 E13: ' + JSON.stringify(selected));
+    }
+    if (selected.selectedRisk !== 'CRITICAL') {
+      throw new Error('Coverage E13 selector must preserve completed Threat risk: ' + JSON.stringify(selected));
+    }
+  });
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2468,6 +2613,8 @@ await testHistoricalDoubleOpenThreeForkDefense();
 await testHistoricalDeepDominanceGuard();
 await testRecentDepthZeroSemanticOverrideGuard();
 await testSemanticOverrideNeverResurrectsHardLostLocal();
+await testSemanticLowerThreatRiskOutranksNumericGuard();
+await testCoverageDeepSafetyFinalistInjection();
 await testLateGameAtomicPromotionThreatCoverageClosure();
 await testStraightFiveWildcardCannotBypassThreatProof();
 await testDoubleImmediateWinShortCircuitsJev();

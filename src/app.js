@@ -4316,8 +4316,8 @@
     const semantic = rows.get(semanticKey) || null;
     const depth = Number(analysis?.depthReached || 0);
     // This guard narrows to exactly two roots (Alpha-Beta #1 vs Jev choice).
-    // Depth 4 here covers much more of each root than the normal 5-root Deep
-    // batch; keep the broader pre-Jev dominance rule at depth >=5.
+    // Depth 4 here covers much more of each root than the normal multi-root
+    // Deep batch, while remaining advisory rather than mathematical proof.
     if (analysis?.status !== 'completed' || depth < 4 || !local || !semantic) {
       return { vetoed: false, reason: 'insufficient_pair_deep_evidence', local, semantic, depth };
     }
@@ -4368,6 +4368,56 @@
     };
   }
 
+  function completedCounterThreatRisk(move) {
+    const threat = move?.threatSearch;
+    if (!threat || threat.timedOut) return null;
+    const risk = threat.counterThreat?.risk || 'NONE';
+    const rank = {
+      NONE: 0,
+      ELEVATED: 1,
+      HIGH: 2,
+      CRITICAL: 3,
+      PROVEN_FORCED_LOSS: 4
+    }[risk];
+    return Number.isFinite(rank) ? { risk, rank } : null;
+  }
+
+  function selectMaxDeepSafetyFinalist(candidates, finalists, deepAnalysis) {
+    const rows = Array.isArray(deepAnalysis?.scores) ? deepAnalysis.scores : [];
+    if (
+      deepAnalysis?.status !== 'completed'
+      || Number(deepAnalysis?.depthReached || 0) < 5
+      || rows.length < 1
+      || !Array.isArray(finalists)
+      || finalists.length < 2
+    ) return null;
+
+    const leaderRow = rows[0];
+    if (
+      !leaderRow?.move
+      || (leaderRow.forcedResult?.forced === true && leaderRow.forcedResult.result === 'loss')
+    ) return null;
+
+    const leader = candidates.find(move => move.key === leaderRow.move) || null;
+    if (!leader || maxHardProvenLoss(leader) || finalists.some(move => move.key === leader.key)) {
+      return null;
+    }
+
+    const finalistRisks = finalists.map(completedCounterThreatRisk);
+    if (finalistRisks.some(item => !item)) return null;
+
+    // Only widen a tactically dangerous final: all current finalists must still
+    // leave at least HIGH opponent counter-pressure. The Deep leader must have
+    // completed Threat evidence and be no worse than the safest current finalist.
+    const safestFinalistRank = Math.min(...finalistRisks.map(item => item.rank));
+    if (safestFinalistRank < 2) return null;
+
+    const leaderRisk = completedCounterThreatRisk(leader);
+    if (!leaderRisk || leaderRisk.rank > safestFinalistRank) return null;
+
+    return leader;
+  }
+
   async function runMaxSemanticOverrideGuard(context, candidates, semanticMove, initialDeepAnalysis) {
     const localKey = context?.localSearchChoice || null;
     const semanticKey = semanticMove?.key || null;
@@ -4414,19 +4464,37 @@
     let verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
     let supplemental = false;
     const localVerdict = maxLocalOverrideVerdict(localMove, semanticMove);
+    const localThreatRisk = completedCounterThreatRisk(localMove);
+    const semanticThreatRisk = completedCounterThreatRisk(semanticMove);
 
-    // The Local fallback is deliberately extreme and deterministic. It prevents
-    // correctness from depending on whether a two-root Worker happens to finish
-    // depth 4 under transient browser/CI load. Normal Local-vs-Jev disagreements
-    // remain semantic decisions.
-    if (!verdict.vetoed && localVerdict.vetoed) {
-      verdict = {
-        ...localVerdict,
-        deepReason: verdict.reason
+    // Threat-space evidence has higher tactical priority than bounded numeric
+    // search. If Jev selects a candidate with a strictly LOWER completed
+    // opponent counter-threat risk than Local #1, do not veto that semantic
+    // safety upgrade merely because Local/Deep numeric scores disagree.
+    // A Deep forced-loss sentinel is still allowed to veto.
+    if (
+      verdict.reason !== 'semantic_deep_forced_loss'
+      && localThreatRisk
+      && semanticThreatRisk
+      && semanticThreatRisk.rank < localThreatRisk.rank
+    ) {
+      return {
+        vetoed: false,
+        reason: 'semantic_lower_counter_threat_risk',
+        choice: semanticKey,
+        localMove: localKey,
+        semanticMove: semanticKey,
+        localThreatRisk: localThreatRisk.risk,
+        semanticThreatRisk: semanticThreatRisk.risk,
+        analysis,
+        supplemental: false
       };
     }
 
-    if (!verdict.vetoed && verdict.reason === 'insufficient_pair_deep_evidence') {
+    const needsPairDeep = !verdict.vetoed
+      && ['insufficient_pair_deep_evidence', 'non_numeric_pair_deep_evidence'].includes(verdict.reason);
+
+    if (needsPairDeep) {
       updateApiState('busy', 'Jev Max：Jev 改写 Alpha-Beta #1，执行两点 Deep 复核…');
       analysis = await runDeepWorkerVerification(
         [localMove, semanticMove],
@@ -4440,12 +4508,21 @@
       );
       verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
       supplemental = true;
-      if (!verdict.vetoed && localVerdict.vetoed) {
-        verdict = {
-          ...localVerdict,
-          deepReason: verdict.reason
-        };
-      }
+    }
+
+    // The deterministic Local-score fallback exists only for Worker jitter:
+    // use it when the two-root Deep check still failed to produce a usable
+    // numeric conclusion. Never let shallow Local scores override a completed
+    // pair Deep result that explicitly says the separation is not decisive.
+    if (
+      !verdict.vetoed
+      && ['insufficient_pair_deep_evidence', 'non_numeric_pair_deep_evidence'].includes(verdict.reason)
+      && localVerdict.vetoed
+    ) {
+      verdict = {
+        ...localVerdict,
+        deepReason: verdict.reason
+      };
     }
 
     return {
@@ -4453,6 +4530,8 @@
       choice: verdict.vetoed ? localKey : semanticKey,
       localMove: localKey,
       semanticMove: semanticKey,
+      localThreatRisk: localThreatRisk?.risk || null,
+      semanticThreatRisk: semanticThreatRisk?.risk || null,
       analysis,
       supplemental
     };
@@ -5737,6 +5816,7 @@
     let critic = [];
     let ranked = [];
     let finalists = [];
+    let deepSafetyFinalist = null;
     let answer = null;
     let finalChoice = null;
     let secondData = null;
@@ -5749,11 +5829,21 @@
       critic = maxCriticTrace(atomicTop4, fanoutData?.answers || {});
       ranked = pairwiseRank(atomicTop4);
       finalists = ranked.slice(0, Math.min(2, ranked.length));
-      if (wildcard && !finalists.some(move => move.key === wildcard.key)) {
+
+      deepSafetyFinalist = selectMaxDeepSafetyFinalist(candidates, finalists, deepAnalysis);
+      if (deepSafetyFinalist && !finalists.some(move => move.key === deepSafetyFinalist.key)) {
+        finalists = [...finalists, deepSafetyFinalist].slice(0, 3);
+      }
+      if (wildcard && !finalists.some(move => move.key === wildcard.key) && finalists.length < 3) {
         finalists = [...finalists, wildcard].slice(0, 3);
       }
 
-      const converged = !wildcard && highConfidenceMaxConvergence(ranked, globalBest);
+      // If deterministic Deep/Threat evidence widened the final for safety, a
+      // second Final Judge is required so the extra candidate actually gets a
+      // semantic comparison instead of being ignored by one-request convergence.
+      const converged = !wildcard
+        && !deepSafetyFinalist
+        && highConfidenceMaxConvergence(ranked, globalBest);
       if (converged) {
         answer = pairwiseAnswer(ranked);
         finalChoice = answer.choice;
@@ -5942,6 +6032,14 @@
           elapsedMs: coverage.supplemental?.elapsedMs ?? null
         },
         finalDecision: secondData ? compactAnswer(answer) : null,
+        deepSafetyFinalist: deepSafetyFinalist ? {
+          move: deepSafetyFinalist.key,
+          deepRank: deepSafetyFinalist.deepSearchRank ?? null,
+          deepScore: Number.isFinite(deepSafetyFinalist.deepSearchScore)
+            ? deepSafetyFinalist.deepSearchScore
+            : null,
+          counterThreatRisk: deepSafetyFinalist.threatSearch?.counterThreat?.risk || null
+        } : null,
         semanticOverrideGuard: {
           vetoed: Boolean(overrideGuard?.vetoed),
           reason: overrideGuard?.reason || null,
@@ -5986,6 +6084,7 @@
           localTranspositionEntries: context.localSearch?.transpositionEntries ?? null,
           localTranspositionGeneration: context.localSearch?.transpositionGeneration ?? null,
           deepElapsedMs: deepAnalysis?.elapsedMs ?? null,
+          deepSafetyFinalist: deepSafetyFinalist?.key || null,
           deepDominanceApplied: Boolean(deepDominance?.applied),
           deepDominanceLeader: deepDominance?.leader || null,
           deepDominanceLocalLeader: deepDominance?.localLeader || context.localSearchChoice || null,
