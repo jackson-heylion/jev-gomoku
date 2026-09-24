@@ -249,10 +249,10 @@ The repository keeps several benchmark arms:
 
 | Arm | Purpose |
 |---|---|
-| \`local\` | deterministic baseline / fallback |
-| \`jev-final\` | Local/Deep evidence followed by one Jev final decision |
-| \`jev-max\` | full bounded multi-stage pipeline |
-| \`jev-blind\` | diagnostic baseline where Jev faces the broad legal set |
+| `local` | deterministic baseline / fallback |
+| `jev-final` | Local/Deep evidence followed by one Jev final decision |
+| `jev-max` | full bounded multi-stage pipeline |
+| `jev-blind` | diagnostic baseline where Jev faces the broad legal set |
 
 Useful commands:
 
@@ -345,7 +345,7 @@ Same-origin server
 TypeSafe /v1/systemone
 ~~~
 
-\`JEV_API_KEY\` remains server-side and is not written into browser JS, HTML, localStorage or copied game records.
+`JEV_API_KEY` remains server-side and is not written into browser JS, HTML, localStorage or copied game records.
 
 ## Local development
 
@@ -367,11 +367,11 @@ This covers syntax checks, benchmark smoke/regression/mock runs and the producti
 
 ## Repository notes
 
-- Main application: \`src/app.js\`
-- Jev client: \`src/jev-client.js\`
-- Deep Worker: \`public/deep-worker.js\`
-- Benchmark suite: \`benchmark/\`
-- Full Jev experiment retrospective: \`docs/JEV-RETROSPECTIVE.md\`
+- Main application: `src/app.js`
+- Jev client: `src/jev-client.js`
+- Deep Worker: `public/deep-worker.js`
+- Benchmark suite: `benchmark/`
+- Full Jev experiment retrospective: `docs/JEV-RETROSPECTIVE.md`
 
 ---
 
