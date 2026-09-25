@@ -2648,7 +2648,20 @@ async function testGame11DiagonalForkRegression() {
   ];
   const before36 = positionFromSequence(opening.slice(0, 35));
   engine.setPosition(before36.board, before36.moves, 'jev-latest');
+  const d9Exposure = engine.forcedDefenseForkRisk('D9');
+  console.log('game11 white36 forced-defense diagnostic:', JSON.stringify(d9Exposure));
+  if (d9Exposure?.risk !== 'INDEPENDENT_DOUBLE_FORKS'
+    || d9Exposure.forcedReply !== 'C9'
+    || !d9Exposure.creators.some(m => m.move === 'D8')
+    || !d9Exposure.creators.some(m => m.move === 'G11')) {
+    throw new Error('Game 11 D9 -> forced C9 must expose TWO independent black forks: '
+      + JSON.stringify(d9Exposure));
+  }
   const before36Context = engine.candidates('max');
+  const d9 = before36Context.candidates.find(m => m.key === 'D9');
+  if (d9 && d9.analysis?.facts?.forced_defense_fork_risk !== 'INDEPENDENT_DOUBLE_FORKS') {
+    throw new Error('Game 11 White D9 must expose forced-response fork risk to JEV');
+  }
   console.log('game11 white36 local diagnostic:', JSON.stringify({
     forced: before36Context.forced,
     local: before36Context.localSearchChoice,
