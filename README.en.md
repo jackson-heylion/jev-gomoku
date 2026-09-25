@@ -190,6 +190,7 @@ Historical Game 11 (black overlines and four-fours forbidden; three-threes permi
 **Forced-defense Fork Exposure** now simulates the opponent's only legal block when our candidate creates exactly one immediate winning point, then checks whether two independent double-ended forks remain:
 
 - Expose the reply and fork-creator evidence to Jev and the decision trace.
+- Apply the same validation to Jev wildcard proposals; alternate recall cannot bypass tactical safeguards.
 - When alternatives without this specific risk exist, retain them before advisory Jev arbitration.
 - Treat the motif as a strong tactical risk, **not as an unconditional forced-loss proof**; Threat / Deep verification remains authoritative, and the filter never discards every candidate on this signal alone.
 
