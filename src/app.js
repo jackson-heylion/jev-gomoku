@@ -2437,6 +2437,43 @@
     };
   }
 
+  // A forcing attack may be poisoned by the opponent's mandatory defensive
+  // reply. After our single immediate threat, simulate that exact reply and
+  // look for two independent one-ply double-winning creators. This is a
+  // tactical warning, NOT a general forced-loss proof: a separate counter-
+  // forcing defense might still exist and is left to Threat/Deep verification.
+  function forcedDefenseForkExposure(side, opponent, ownWinningPoints, radius = 2) {
+    if (!Array.isArray(ownWinningPoints) || ownWinningPoints.length !== 1) return null;
+    const reply = ownWinningPoints[0];
+    if (!isLegalMoveForColor(reply.r, reply.c, opponent)) return null;
+    board[reply.r][reply.c] = opponent;
+    try {
+      if (isWin(reply.r, reply.c, opponent)) {
+        return { risk: 'COUNTER_WIN', forcedReply: reply.key, creators: [] };
+      }
+      // If our threat still has a winning continuation, don't incorrectly
+      // treat the opponent's next attacking tempo as immediately available.
+      if (immediateWins(side, radius).length) return null;
+      const creators = directDoubleWinCreators(opponent, radius, 3).moves;
+      const independent = creators.some((a, i) => creators.slice(i + 1).some(b =>
+        a.key !== b.key
+        && !a.winningPoints.includes(b.key)
+        && !b.winningPoints.includes(a.key)
+        && !a.winningPoints.some(point => b.winningPoints.includes(point))
+      ));
+      return creators.length ? {
+        risk: independent ? 'INDEPENDENT_DOUBLE_FORKS' : 'FORK_WARNING',
+        forcedReply: reply.key,
+        creators: creators.map(m => ({
+          move: m.key,
+          winningPoints: m.winningPoints.slice(0, 4)
+        }))
+      } : null;
+    } finally {
+      board[reply.r][reply.c] = EMPTY;
+    }
+  }
+
   function directDoubleOpenThreeCreators(color, radius = 2, maxCount = Infinity) {
     const movesFound = [];
     for (const move of nearbyMoves(radius)) {
@@ -2690,8 +2727,12 @@
     board[move.r][move.c] = side;
     const ownPattern = threatPatternProfilePlaced(move.r, move.c, side);
     const winsNow = isWin(move.r, move.c, side);
-    const ownImmediate = winsNow ? 2 : immediateWins(side, cfg.radius).length;
+    const ownWinningPoints = winsNow ? [] : immediateWins(side, cfg.radius);
+    const ownImmediate = winsNow ? 2 : ownWinningPoints.length;
     const oppImmediate = winsNow ? 0 : immediateWins(opponent, cfg.radius).length;
+    const forcedDefenseForks = mode === 'max' && !winsNow && ownImmediate === 1
+      ? forcedDefenseForkExposure(side, opponent, ownWinningPoints, cfg.radius)
+      : null;
     const forks = winsNow ? {count: 0, points: [], moves: []} : countForkCreators(side, 10, cfg.radius, 3);
     const opponentDirectDoubleWins = (!winsNow && ownImmediate === 0 && oppImmediate === 0)
       ? directDoubleWinCreators(opponent, cfg.radius, 2)
@@ -2715,6 +2756,8 @@
     else if (oppImmediate === 1) safety = 'UNSAFE';
     else if (opponentDirectDoubleWins.count >= 1) safety = 'LOSING';
     else if (opponentForks.count >= 1) safety = 'LOSING';
+    else if (forcedDefenseForks?.risk === 'COUNTER_WIN') safety = 'LOSING';
+    else if (forcedDefenseForks?.risk === 'INDEPENDENT_DOUBLE_FORKS') safety = 'TACTICALLY_RISKY';
     else if (opponentCounterVCF || opponentCounterVCT) safety = 'TACTICALLY_RISKY';
 
     const forcedRole = winsNow ? 'WIN_NOW'
@@ -2752,6 +2795,11 @@
         opponent_direct_double_win_creators_after_move: countLabel(opponentDirectDoubleWins.count),
         opponent_direct_double_win_creator_points: opponentDirectDoubleWins.moves.length
           ? opponentDirectDoubleWins.moves.map(item => item.key + '->' + item.winningPoints.join('/')).join(',')
+          : 'NONE',
+        forced_defense_reply: forcedDefenseForks?.forcedReply || null,
+        forced_defense_fork_risk: forcedDefenseForks?.risk || 'NONE',
+        forced_defense_fork_creators: forcedDefenseForks?.creators?.length
+          ? forcedDefenseForks.creators.map(row => row.move + '->' + row.winningPoints.join('/')).join(',')
           : 'NONE',
         opponent_fork_creators_after_move: countLabel(opponentForks.count),
         opponent_fork_creator_points: opponentForks.points.length ? opponentForks.points.join(',') : 'NONE',
@@ -4262,6 +4310,17 @@
     const safeFromThreatProof = filtered.filter(move => move.threatSearch?.forced !== true);
     if (safeFromThreatProof.length) filtered = safeFromThreatProof;
 
+    // Game 11: a candidate may look forcing (White D9 -> Black C9), yet
+    // the mandatory block activates TWO unrelated open-four creators
+    // (Black D8 and G11). Avoid this optional speculative risk whenever a
+    // candidate without that exact exposed motif survives the same filters.
+    // This is a dominance veto, not a forced-loss proof: never collapse the
+    // entire pool if every candidate has the risk.
+    const noDoubleForkFromForcedReply = filtered.filter(move =>
+      move.analysis?.facts?.forced_defense_fork_risk !== 'INDEPENDENT_DOUBLE_FORKS'
+    );
+    if (noDoubleForkFromForcedReply.length) filtered = noDoubleForkFromForcedReply;
+
     // A DOUBLE_OPEN_THREE is one tempo earlier than an open-four fork. It is
     // not always a mathematical forced loss because the defender may have a
     // counter-forcing resource, so do not label it LOSING globally. But when
@@ -4724,13 +4783,17 @@
     const opponentForks = (!winsNow && opponentWins.length === 0)
       ? countForkCreators(opponent, 10, 2, 1)
       : { count: 0, points: [], moves: [] };
+    const forcedDefenseForks = (!winsNow && ownWins.length === 1)
+      ? forcedDefenseForkExposure(side, opponent, ownWins, 2)
+      : null;
     const conn = localConnectivity(move.r, move.c, side);
     board[move.r][move.c] = EMPTY;
 
     // A Jev-proposed wildcard may enter the final comparison only if it passes
     // deterministic local safety first: no immediate opponent win and no legal
     // opponent fork-creator that yields multiple immediate winning points.
-    if (!winsNow && (opponentWins.length || opponentForks.count >= 1)) return null;
+    if (!winsNow && (opponentWins.length || opponentForks.count >= 1
+      || ['COUNTER_WIN', 'INDEPENDENT_DOUBLE_FORKS'].includes(forcedDefenseForks?.risk))) return null;
 
     return {
       ...move,
@@ -4757,6 +4820,11 @@
           own_immediate_winning_points_after_move: countLabel(ownWins.length),
           opponent_immediate_winning_points_after_move: 'NONE',
           opponent_fork_creators_after_move: 'NONE',
+          forced_defense_reply: forcedDefenseForks?.forcedReply || null,
+          forced_defense_fork_risk: forcedDefenseForks?.risk || 'NONE',
+          forced_defense_fork_creators: forcedDefenseForks?.creators?.length
+            ? forcedDefenseForks.creators.map(row => row.move + '->' + row.winningPoints.join('/')).join(',')
+            : 'NONE',
           vcf_status: 'NOT_RUN_WILDCARD',
           vct_status: 'NOT_RUN_WILDCARD',
           opponent_counter_vcf: 'NOT_RUN_WILDCARD',
@@ -5006,6 +5074,9 @@
       tactical_safety: facts.tactical_safety || null,
       opponent_direct_double_win_creators_after_move: facts.opponent_direct_double_win_creators_after_move || null,
       opponent_direct_double_win_creator_points: facts.opponent_direct_double_win_creator_points || null,
+      forced_defense_reply: facts.forced_defense_reply || null,
+      forced_defense_fork_risk: facts.forced_defense_fork_risk || null,
+      forced_defense_fork_creators: facts.forced_defense_fork_creators || null,
       local_tactical_verification: facts.tactical_verification || null,
       threat_verification: facts.threat_verification || (move.threatSearch ? (move.threatSearch.timedOut ? 'TIMEOUT' : 'COMPLETED') : 'NOT_RUN'),
       vcf_status: facts.vcf_status || null,
