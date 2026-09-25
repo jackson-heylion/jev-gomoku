@@ -183,6 +183,19 @@ The current policy is intentionally narrow:
 
 Normal disagreements remain Jev decisions.
 
+## Game 11: forced defense activating two independent forks
+
+Historical Game 11 (black overlines and four-fours forbidden; three-threes permitted) exposed a tactical blind spot. White's move 36 `D9` creates one immediate winning threat, but Black's mandatory block `C9` unlocks **two independent open-four creators**: `D8 → G5 / B10` and `G11 → E11 / J11`. By move 38, blocking `D8` alone cannot eliminate `G11`.
+
+**Forced-defense Fork Exposure** now simulates the opponent's only legal block when our candidate creates exactly one immediate winning point, then checks whether two independent double-ended forks remain:
+
+- Expose the reply and fork-creator evidence to Jev and the decision trace.
+- Apply the same validation to Jev wildcard proposals; alternate recall cannot bypass tactical safeguards.
+- When alternatives without this specific risk exist, retain them before advisory Jev arbitration.
+- Treat the motif as a strong tactical risk, **not as an unconditional forced-loss proof**; Threat / Deep verification remains authoritative, and the filter never discards every candidate on this signal alone.
+
+Historical regression covers moves 36, 38 and 40; actual strength improvements still require separate paid real-Jev A/B replay.
+
 ## Jev Max request budget
 
 Current bounded target:
