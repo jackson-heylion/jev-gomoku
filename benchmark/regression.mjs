@@ -2646,6 +2646,19 @@ async function testGame11DiagonalForkRegression() {
     'F6','G9','I11','G10','G8','I10','J10','J9','H11',
     'F10','E10','F9','F11','L7','M6','D9','C9'
   ];
+  const before36 = positionFromSequence(opening.slice(0, 35));
+  engine.setPosition(before36.board, before36.moves, 'jev-latest');
+  const before36Context = engine.candidates('max');
+  console.log('game11 white36 local diagnostic:', JSON.stringify({
+    forced: before36Context.forced,
+    local: before36Context.localSearchChoice,
+    candidates: before36Context.candidates.map(m => ({
+      move: m.key, safety: m.analysis?.facts?.tactical_safety,
+      vcf: m.analysis?.vcf, ownImmediate: m.analysis?.ownImmediate,
+      sources: m.recallSources
+    }))
+  }));
+
   const before38 = positionFromSequence(opening);
   engine.setPosition(before38.board, before38.moves, 'jev-latest');
   const context = engine.candidates('max');
@@ -2662,12 +2675,16 @@ async function testGame11DiagonalForkRegression() {
   }));
   const d8 = context.candidates.find(move => move.key === 'D8');
   if (!d8) throw new Error('Game 11 white38 must recall D8 to block the diagonal creator');
-  if (d8.analysis?.facts?.tactical_safety === 'LOSING') {
-    throw new Error('Game 11 D8 incorrectly classified as a direct forced loss');
+  const g11 = context.candidates.find(move => move.key === 'G11');
+  if (!g11) throw new Error('Game 11 white38 must recall G11 as an independent open-four creator');
+  // Both potential blocks are already losing: covering D8 leaves G11, and
+  // covering G11 leaves D8. The fix belongs before White 36, not White 38.
+  if (d8.analysis?.facts?.tactical_safety !== 'LOSING' || g11.analysis?.facts?.tactical_safety !== 'LOSING') {
+    throw new Error('Game 11 white38 must detect BOTH independent black fork creators');
   }
   const e8 = context.candidates.find(move => move.key === 'E8');
   if (e8 && e8.analysis?.facts?.tactical_safety !== 'LOSING') {
-    throw new Error('Game 11 E8 must expose the black D8 double-ended winning fork');
+    throw new Error('Game 11 E8 must expose the two black double-ended forks');
   }
 
   const before40 = positionFromSequence([...opening, 'E8','D8']);
