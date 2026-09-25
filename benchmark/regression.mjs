@@ -2622,6 +2622,66 @@ async function testRecentLongSemanticOverrideGuard() {
   }
 }
 
+/**
+ * Game 11 (black human, overline + four-four bans, three-three enabled):
+ * after C9 the black D8 fork is one ply away. White must retain D8 and
+ * cannot mistake E8's unrelated positional development for safety.
+ * The final position after D8 already has two legal black winning endpoints.
+ */
+async function testGame11DiagonalForkRegression() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Game 11 tactical diagnosis must not spend Jev requests');
+    }
+  });
+  engine.setGameConfig({
+    playerColor: 'black',
+    overline: true,
+    fourFour: true,
+    threeThree: false
+  });
+  const opening = [
+    'H8','G7','I9','H6','I8','F8','I5','E9','D10','I7',
+    'J8','K8','H9','H7','J7','F7','E7','K6','K7','H10',
+    'F6','G9','I11','G10','G8','I10','J10','J9','H11',
+    'F10','E10','F9','F11','L7','M6','D9','C9'
+  ];
+  const before38 = positionFromSequence(opening);
+  engine.setPosition(before38.board, before38.moves, 'jev-latest');
+  const context = engine.candidates('max');
+  console.log('game11 white38 local diagnostic:', JSON.stringify({
+    forced: context.forced,
+    local: context.localSearchChoice,
+    candidates: context.candidates.map(m => ({
+      move: m.key,
+      sources: m.recallSources,
+      safety: m.analysis?.facts?.tactical_safety,
+      doubleWinCreators: m.analysis?.facts?.opponent_direct_double_win_creator_points,
+      ownImmediate: m.analysis?.ownImmediate
+    }))
+  }));
+  const d8 = context.candidates.find(move => move.key === 'D8');
+  if (!d8) throw new Error('Game 11 white38 must recall D8 to block the diagonal creator');
+  if (d8.analysis?.facts?.tactical_safety === 'LOSING') {
+    throw new Error('Game 11 D8 incorrectly classified as a direct forced loss');
+  }
+  const e8 = context.candidates.find(move => move.key === 'E8');
+  if (e8 && e8.analysis?.facts?.tactical_safety !== 'LOSING') {
+    throw new Error('Game 11 E8 must expose the black D8 double-ended winning fork');
+  }
+
+  const before40 = positionFromSequence([...opening, 'E8','D8']);
+  engine.setPosition(before40.board, before40.moves, 'jev-latest');
+  const endpoints = engine.immediateWinsFor('black');
+  if (!endpoints.includes('B10') || !endpoints.includes('G5')) {
+    throw new Error('Game 11 white40 must recognize both black winning endpoints: ' + endpoints);
+  }
+  const terminal = engine.candidates('max');
+  if (terminal.forced !== 'forced_loss_double_win') {
+    throw new Error('Game 11 white40 is already lost to two endpoints: ' + terminal.forced);
+  }
+}
+
 /** The referee must derive its coordinates and board from the shared helpers. */
 function testCoordinateHelpers() {
   for (let r = 0; r < SIZE; r++) {
@@ -2638,6 +2698,7 @@ function testCoordinateHelpers() {
   }
 }
 
+await testGame11DiagonalForkRegression();
 await testRealGameMove44M7WorkerAudit();
 await testRealGameMove44ProductionRescueAudit();
 await testRealGameMove36CounterfactualThreatAudit();
