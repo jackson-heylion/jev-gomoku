@@ -2658,6 +2658,17 @@ async function testGame11DiagonalForkRegression() {
       + JSON.stringify(d9Exposure));
   }
   const before36Context = engine.candidates('max');
+  const safeG11 = before36Context.candidates.find(m => m.key === 'G11');
+  if (!safeG11 || safeG11.analysis?.facts?.tactical_safety === 'LOSING') {
+    throw new Error('Game 11 white36 must recall the earlier G11 defense without an immediate loss');
+  }
+  // D9 was not in the baseline 8-main-candidate set; a Jev wildcard must
+  // never smuggle it around the new forced-defense counter-fork check.
+  engine.setPosition(before36.board, before36.moves, 'jev-latest');
+  const wildcardD9 = engine.maxWildcardEligibility('D9');
+  if (wildcardD9) {
+    throw new Error('Game 11 D9 must not enter through the Jev wildcard back door');
+  }
   const d9 = before36Context.candidates.find(m => m.key === 'D9');
   if (d9 && d9.analysis?.facts?.forced_defense_fork_risk !== 'INDEPENDENT_DOUBLE_FORKS') {
     throw new Error('Game 11 White D9 must expose forced-response fork risk to JEV');
