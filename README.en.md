@@ -179,9 +179,23 @@ The current policy is intentionally narrow:
 - previously computed Deep evidence is reused first;
 - if still ambiguous, a focused two-root Worker search can jump to exact depth 8;
 - a Local move removed by deterministic proof can never be resurrected;
-- only large, clearly dangerous separations veto the semantic override.
+- conventional positions still require very large, dangerous separations; narrowly corroborated early-search consensus is an additional opening-only safety check.
 
 Normal disagreements remain Jev decisions.
+
+## Game 12: corroborating an early search disagreement
+
+In the 19-ply 2026-09-28 game, Jev selected `G8` as White's fourth move despite both Local and completed depth-4 Deep preferring `H10` (Deep approximately `-316` vs `-783`; final Jev confidence around 21%). By White's 14th move, the logged principal candidates were already `FORCED_LOSS`, so the fix belongs at the earliest independently supported disagreement.
+
+**Early Search Consensus Guard** is deliberately conservative:
+
+- It acts only in the first 12 plies when Jev actually overrides the real Local #1.
+- The original completed, depth-4-or-deeper multi-root Deep search and Local must both prefer the same candidate by substantial margins.
+- A *second focused two-root search*, reaching at least depth 5 and agreeing with that conclusion, is mandatory before vetoing Jev.
+- Close comparisons (such as this game's `G11/G12` on White's tenth move), incomplete/reversed verification, proven tactics and later phases remain under the existing rules and Jev's arbitration.
+- No extra Jev request, no premature candidate pruning: reuse the existing post-decision focused Worker verification.
+
+Regression covers the actual opening board and independent confirmation/missing-evidence cases. A confirmed preference is not proof of a forced win or measured real-Jev win-rate improvement.
 
 ## Game 11: forced defense activating two independent forks
 
