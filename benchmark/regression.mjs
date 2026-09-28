@@ -2721,6 +2721,50 @@ async function testGame19CorroboratedEarlySearchGuard() {
   );
   if (close.vetoed) throw new Error('Move-10-like close Deep scores must leave Jev unconstrained');
 
+  // White move 10: G11 was BOTH Local and completed Deep #1 but a ~0.005
+  // Atomic scoring difference kept it out of the original Pairwise Top 4.
+  // Protect access to comparison, not final selection.
+  const before10 = positionFromSequence(['H8','G9','H9','G8','H7','H6','I8','G10','G7']);
+  engine.setPosition(before10.board,before10.moves,'jev-latest');
+  const realMid = engine.candidates('max');
+  console.log('game19 move10 search leader:', JSON.stringify({
+    local:realMid.localSearchChoice,
+    candidates:realMid.candidates.map(m=>m.key)
+  }));
+  const atomicRows = [
+    ['H10',0.296],['H11',0.284],['G12',0.240],['I7',0.239],
+    ['G6',0.239],['G11',0.234]
+  ].map(([key,score],index)=>({
+    key,atomicScore:score,localRank:index+1,
+    analysis:{facts:{tactical_safety:'SAFE'},vcf:false}
+  }));
+  const midDeep = {
+    status:'completed',depthReached:4,rankingOnly:false,
+    scores:[{move:'G11',score:666.4},{move:'G12',score:634.8}]
+  };
+  const protectedTop = engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,midDeep
+  );
+  if (!protectedTop.changed || protectedTop.protectedKey !== 'G11'
+    || !protectedTop.finalists.includes('G11') || protectedTop.finalists.length !== 4) {
+    throw new Error('Game 19 move10 must retain the agreed Local/Deep leader for Pairwise: '
+      + JSON.stringify(protectedTop));
+  }
+  const disagreement=engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,
+    {...midDeep,scores:[{move:'G12',score:666.4},{move:'G11',score:634.8}]}
+  );
+  if (disagreement.changed) throw new Error('Search disagreement must not reserve an Atomic slot');
+  const shallowCoverage=engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,{...midDeep,depthReached:3}
+  );
+  if (shallowCoverage.changed) throw new Error('A shallow Deep ranking must not reserve an Atomic slot');
+  const blocked=atomicRows.map(m=>m.key==='G11'
+    ? {...m,analysis:{facts:{tactical_safety:'LOSING'},vcf:false}} : m);
+  if (engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},blocked,midDeep
+  ).changed) throw new Error('A proven-lost search leader cannot reenter Pairwise');
+
   // The same evidence cannot acquire authority later in the game.
   const later = positionFromSequence([
     'H8','G9','H9','G8','H7','H6','I8','G10','G7','G12','G11','H11','I9'
