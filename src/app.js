@@ -4444,6 +4444,85 @@
     };
   }
 
+  // A narrow opening/mid-opening guard for games where independently-run
+  // Alpha-Beta AND a completed multi-root Deep search agree, but Jev chooses
+  // a substantially weaker searched move. The initial multi-root result alone
+  // is NEVER enough: an independently rerun focused two-root search must also
+  // agree before the guard can veto Jev. This is not a forced-loss proof.
+  function earlySearchGapSnapshot(context, candidates, localKey, semanticKey, analysis) {
+    if (moves.length < 2 || moves.length > 12
+      || analysis?.status !== 'completed'
+      || Number(analysis.depthReached || 0) < 4
+      || analysis.rankingOnly
+      || analysis.scores?.[0]?.move !== localKey
+      || context?.localSearchChoice !== localKey) return null;
+    const local = (candidates || []).find(move => move.key === localKey);
+    const semantic = (candidates || []).find(move => move.key === semanticKey);
+    if (!local || !semantic || maxHardProvenLoss(local) || semantic.analysis?.vcf) return null;
+    const rows = new Map((analysis.scores || []).map(row => [row.move, row]));
+    const a = rows.get(localKey);
+    const b = rows.get(semanticKey);
+    if (!a || !b || !Number.isFinite(a.score) || !Number.isFinite(b.score)
+      || isSentinelSearchScore(a.score) || isSentinelSearchScore(b.score)
+      || a.forcedResult?.forced || b.forcedResult?.forced) return null;
+    const localMargin = Number(local.searchScore) - Number(semantic.searchScore);
+    return Number.isFinite(localMargin)
+      ? { firstMargin: a.score - b.score, localMargin }
+      : null;
+  }
+
+  function earlySearchConsensusVerdict(context, candidates, localKey, semanticKey, initial, verified) {
+    const fail = reason => ({ vetoed: false, reason });
+    if (moves.length < 2 || moves.length > 12) return fail('outside_early_consensus_window');
+    if (!localKey || !semanticKey || localKey === semanticKey) return fail('no_early_override');
+    const local = (candidates || []).find(move => move.key === localKey);
+    const semantic = (candidates || []).find(move => move.key === semanticKey);
+    if (!local || !semantic || maxHardProvenLoss(local) || semantic.analysis?.vcf) {
+      return fail('early_consensus_candidate_not_eligible');
+    }
+    const usable = (result, minDepth) =>
+      result?.status === 'completed'
+      && Number(result.depthReached || 0) >= minDepth
+      && !result.rankingOnly
+      && Array.isArray(result.scores)
+      && result.scores.length >= 2
+      && result.scores[0].move === localKey;
+    if (!usable(initial, 4) || !usable(verified, 5)) {
+      return fail('early_consensus_unconfirmed_search');
+    }
+    const scoreMargin = result => {
+      const rows = new Map(result.scores.map(row => [row.move, row]));
+      const a = rows.get(localKey);
+      const b = rows.get(semanticKey);
+      if (!a || !b || !Number.isFinite(a.score) || !Number.isFinite(b.score)
+        || isSentinelSearchScore(a.score) || isSentinelSearchScore(b.score)
+        || a.forcedResult?.forced || b.forcedResult?.forced) return null;
+      return a.score - b.score;
+    };
+    const firstMargin = scoreMargin(initial);
+    const verifiedMargin = scoreMargin(verified);
+    const localMargin = Number(local.searchScore) - Number(semantic.searchScore);
+    // A strong relative difference at both depths, corroborated by a
+    // separately-run Local ranking, is required. At close scores (e.g. this
+    // game's G11 vs G12) Jev remains free to choose either move.
+    if (firstMargin === null || firstMargin < 400
+      || verifiedMargin === null || verifiedMargin < 250
+      || !Number.isFinite(localMargin) || localMargin < 250) {
+      return fail('early_consensus_margin_not_confirmed');
+    }
+    return {
+      vetoed: true,
+      reason: 'early_search_consensus_confirmed',
+      firstMargin,
+      verifiedMargin,
+      localMargin,
+      firstDepth: initial.depthReached,
+      verifiedDepth: verified.depthReached,
+      local: localKey,
+      semantic: semanticKey
+    };
+  }
+
   async function runMaxExactPairDeep(localMove, semanticMove) {
     return runDeepWorkerVerification(
       [localMove, semanticMove],
@@ -4507,6 +4586,9 @@
     let verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
     let supplemental = false;
     const localVerdict = maxLocalOverrideVerdict(localMove, semanticMove);
+    const earlyGap = earlySearchGapSnapshot(
+      context, candidates, localKey, semanticKey, initialDeepAnalysis
+    );
 
     // The Local fallback is deliberately extreme and deterministic. It prevents
     // correctness from depending on whether a two-root Worker happens to finish
@@ -4516,6 +4598,54 @@
       verdict = {
         ...localVerdict,
         deepReason: verdict.reason
+      };
+    }
+
+    // On the 19-ply opening, exact depth-8 returned no completed depth after
+    // 9s. Use a cheaper ITERATIVE two-root rerun for the rare early position
+    // with strong independent Local+Deep agreement. A second completed depth
+    // of at least 5 is mandatory: timeout or reversal retains Jev's choice.
+    if (!verdict.vetoed && !localVerdict.vetoed
+      && earlyGap?.firstMargin >= 400 && earlyGap.localMargin >= 250) {
+      updateApiState('busy', 'Jev Max：早期 Local / Deep 分歧复核，两点迭代搜索…');
+      const iterative = await runDeepWorkerVerification(
+        [localMove, semanticMove],
+        'max',
+        'jev_max_early_consensus_iterative_guard',
+        { timeBudgetMs: 4800, maxDepth: 6, branch: 8 }
+      );
+      const iterativeVerdict = maxDeepOverrideVerdict(localKey, semanticKey, iterative);
+      const confirmed = earlySearchConsensusVerdict(
+        context, candidates, localKey, semanticKey, initialDeepAnalysis, iterative
+      );
+      const chosen = iterativeVerdict.vetoed ? iterativeVerdict : confirmed;
+      return {
+        ...chosen,
+        choice: chosen.vetoed ? localKey : semanticKey,
+        reason: chosen.vetoed ? chosen.reason : 'early_iterative_unconfirmed',
+        localMove: localKey,
+        semanticMove: semanticKey,
+        analysis: iterative,
+        supplemental: true,
+        earlyConfirmationReason: confirmed.reason,
+        earlyVerificationDepth: iterative?.depthReached ?? null
+      };
+    }
+
+    // A second 9s exact search is wasted when both completed engines see
+    // an ordinary near tie. Keep Jev's decision and spend no extra Worker time.
+    if (!verdict.vetoed && !localVerdict.vetoed
+      && earlyGap && earlyGap.firstMargin >= 0 && earlyGap.firstMargin <= 100
+      && earlyGap.localMargin >= 0 && earlyGap.localMargin <= 100) {
+      return {
+        ...verdict,
+        vetoed: false,
+        reason: 'early_correlated_search_near_tie',
+        choice: semanticKey,
+        localMove: localKey,
+        semanticMove: semanticKey,
+        analysis: initialDeepAnalysis,
+        supplemental: false
       };
     }
 
@@ -4549,6 +4679,12 @@
       updateApiState('busy', 'Jev Max：两点仍接近，执行 exact depth-8 最终复核…');
       const exactAnalysis = await runMaxExactPairDeep(localMove, semanticMove);
       const exactVerdict = maxDeepOverrideVerdict(localKey, semanticKey, exactAnalysis);
+      // Keep the original independent five-root snapshot. Confirm the
+      // opening consensus using a second focused search, never by reading
+      // the same heuristic result twice.
+      const openingVerdict = earlySearchConsensusVerdict(
+        context, candidates, localKey, semanticKey, initialDeepAnalysis, exactAnalysis
+      );
       if (exactAnalysis) analysis = exactAnalysis;
       supplemental = true;
       if (exactVerdict.vetoed) {
@@ -4556,10 +4692,16 @@
           ...exactVerdict,
           secondStage: true
         };
+      } else if (openingVerdict.vetoed) {
+        verdict = {
+          ...openingVerdict,
+          secondStage: true
+        };
       } else {
         verdict = {
           ...verdict,
           exactReason: exactVerdict.reason,
+          earlyConsensusReason: openingVerdict.reason,
           exactDepth: exactVerdict.depth ?? null,
           secondStage: true
         };
@@ -5782,6 +5924,60 @@
     };
   }
 
+  // Atomic answers are independent Jev judgments, but a tiny Atomic score
+  // difference must not silently eliminate a candidate that the real
+  // Alpha-Beta leader AND a completed, non-sentinel Deep search both identify.
+  // This reserves visibility in Pairwise/Final only: it never forces the
+  // search leader to win, nor reintroduces a proof-filtered candidate.
+  function maxAtomicFinalistsWithSearchCoverage(context, candidates, deepAnalysis, limit = 4) {
+    const sorted = [...(candidates || [])].sort((a,b) =>
+      (b.atomicScore || 0) - (a.atomicScore || 0)
+      || (a.localRank || 999) - (b.localRank || 999)
+    );
+    const finalists = sorted.slice(0, Math.min(limit, sorted.length));
+    const bestDeep = deepAnalysis?.scores?.[0] || null;
+    const eligible = moves.length >= 2 && moves.length <= 12
+      && deepAnalysis?.status === 'completed'
+      && Number(deepAnalysis.depthReached || 0) >= 4
+      && !deepAnalysis.rankingOnly
+      && bestDeep?.move === context?.localSearchChoice
+      && Number.isFinite(bestDeep.score)
+      && !isSentinelSearchScore(bestDeep.score)
+      && !bestDeep.forcedResult?.forced;
+    const leader = eligible
+      ? (candidates || []).find(move =>
+          move.key === bestDeep.move && !maxHardProvenLoss(move)
+        ) || null
+      : null;
+    if (!leader) {
+      return { finalists, protectedKey: null, changed: false };
+    }
+    if (finalists.some(move => move.key === leader.key)) {
+      return { finalists, protectedKey: leader.key, changed: false };
+    }
+    // A proven VCF finalist is never evicted for a bounded search ranking.
+    const replaceable = finalists
+      .filter(move => move.analysis?.vcf !== true)
+      .sort((a,b) => (a.atomicScore || 0) - (b.atomicScore || 0)
+        || (b.localRank || 999) - (a.localRank || 999));
+    if (!replaceable.length) {
+      return { finalists, protectedKey: null, changed: false };
+    }
+    const evicted = replaceable[0];
+    const updated = finalists.filter(move => move.key !== evicted.key);
+    updated.push(leader);
+    updated.sort((a,b) =>
+      (b.atomicScore || 0) - (a.atomicScore || 0)
+      || (a.localRank || 999) - (b.localRank || 999)
+    );
+    return {
+      finalists: updated,
+      protectedKey: leader.key,
+      changed: true,
+      evictedKey: evicted.key
+    };
+  }
+
   async function jevMaxDecision() {
     const context = buildAdvancedCandidates('max');
     let candidates = context.candidates;
@@ -5927,10 +6123,10 @@
     const recallChoice = String(fanoutData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
     const globalBest = compactAnswer(fanoutData?.answers?.global_best);
 
-    let atomicTop4 = [...candidates]
-      .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
-        || (a.localRank || 999) - (b.localRank || 999))
-      .slice(0, Math.min(4, candidates.length));
+    let searchFinalistCoverage = maxAtomicFinalistsWithSearchCoverage(
+      context, candidates, deepAnalysis
+    );
+    let atomicTop4 = searchFinalistCoverage.finalists;
 
     const preCoverageCandidates = [...candidates];
     const coverage = await closeMaxThreatCoverage(
@@ -5941,10 +6137,10 @@
     );
     candidates = coverage.candidates;
     threatAnalysis = coverage.threatAnalysis;
-    atomicTop4 = [...candidates]
-      .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
-        || (a.localRank || 999) - (b.localRank || 999))
-      .slice(0, Math.min(4, candidates.length));
+    searchFinalistCoverage = maxAtomicFinalistsWithSearchCoverage(
+      context, candidates, deepAnalysis
+    );
+    atomicTop4 = searchFinalistCoverage.finalists;
 
     if (!candidates.length || allMaxCandidatesHardLost(candidates)) {
       const rescueBaseline = candidates.length ? candidates : preCoverageCandidates;
@@ -6268,6 +6464,8 @@
           maxWorkers: HEAVY_WORKER_POOL_SIZE,
           workerPoolPersistent: true,
           fanoutSpeculativePool: fanout.speculativePool,
+          protectedSearchFinalist: searchFinalistCoverage.protectedKey || null,
+          searchFinalistAddedToAtomicTop4: Boolean(searchFinalistCoverage.changed),
           fanoutPairwiseCount: fanout.pairs.length * 2,
           fanoutCriticCount: fanout.speculativePool.length,
           opponentPredictionCount: fanout.opponentPredictionCandidates?.length || 0,

@@ -2623,6 +2623,173 @@ async function testRecentLongSemanticOverrideGuard() {
 }
 
 /**
+ * 2026-09-28 human win at 19 plies. White move 4 G8 diverged from
+ * independently-agreeing Local H10 and the completed five-root Deep H10.
+ * Unlike historical 25K mate-delta cases, this is a substantial ordinary
+ * evaluation gap, so only a SECOND independently-run, deeper two-root
+ * result may veto Jev. Close scores (White move 10 G11 / G12), missing
+ * verification, and all later tactical phases must remain unchanged.
+ */
+async function testGame19CorroboratedEarlySearchGuard() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Game 19 pure search-consensus regression must not spend Jev requests');
+    }
+  });
+  engine.setGameConfig({ playerColor:'black', overline:true, fourFour:false, threeThree:false });
+  const opening = positionFromSequence(['H8', 'G9', 'H9']);
+  engine.setPosition(opening.board, opening.moves, 'jev-latest');
+  const ctx = engine.candidates('max');
+  if (!ctx.candidates.some(move => move.key === 'H10')
+      || !ctx.candidates.some(move => move.key === 'G8')) {
+    throw new Error('Game 19 opening must retain both H10 and G8 for semantic comparison');
+  }
+  console.log('game19 opening candidate audit:', JSON.stringify({
+    local: ctx.localSearchChoice,
+    options: ctx.candidates.map(move => ({
+      move: move.key,
+      score: move.searchScore,
+      safety: move.analysis?.facts?.tactical_safety
+    }))
+  }));
+
+  if (ctx.localSearchChoice !== 'H10') {
+    throw new Error('Game 19 production Local opening #1 changed: ' + ctx.localSearchChoice);
+  }
+  // Exercise the actual production focused Worker against this real opening.
+  // The original completed multi-root scores below were recorded in the
+  // supplied game's decision trace. A shallow/reversing focused rerun MUST
+  // leave Jev's move untouched; the strict synthetic tests pin the threshold.
+  const originalDeep = {
+    status:'completed',depthReached:4,rankingOnly:false,
+    scores:[
+      {move:'H10',score:-316.1},{move:'H7',score:-708.3},
+      {move:'G8',score:-782.7},{move:'I9',score:-904.6},
+      {move:'G7',score:-919.9}
+    ]
+  };
+  const realGuard = await engine.game19SemanticGuard('G8',originalDeep);
+  console.log('game19 independent focused verification:', JSON.stringify({
+    choice:realGuard.choice,
+    reason:realGuard.reason,
+    vetoed:realGuard.vetoed,
+    depth:realGuard.analysis?.depthReached,
+    status:realGuard.analysis?.status,
+    best:realGuard.analysis?.scores?.map(row=>({move:row.move,score:row.score}))
+  }));
+  if (realGuard.vetoed && realGuard.choice !== 'H10') {
+    throw new Error('Game 19 opening guard must never pick a third unrelated move');
+  }
+  if (!realGuard.vetoed && realGuard.choice !== 'G8') {
+    throw new Error('Game 19 unconfirmed opening search must preserve Jev choice');
+  }
+
+  const alternatives = [
+    { key:'H10', searchScore:410.5, analysis:{ facts:{tactical_safety:'SAFE'} } },
+    { key:'G8', searchScore:-265.9, analysis:{ facts:{tactical_safety:'SAFE'} } }
+  ];
+  const confirmed = {
+    status:'completed',depthReached:4,rankingOnly:false,
+    scores:[{move:'H10',score:-316.1},{move:'G8',score:-782.7}]
+  };
+  const independent = {
+    status:'completed',depthReached:6,rankingOnly:false,
+    scores:[{move:'H10',score:-120},{move:'G8',score:-470}]
+  };
+  const judge = (a,b,c=alternatives) => engine.earlyConsensusForTest(
+    {localSearchChoice:'H10'},c,'H10','G8',a,b
+  );
+  const vetted = judge(confirmed,independent);
+  if (!vetted.vetoed || vetted.reason !== 'early_search_consensus_confirmed') {
+    throw new Error('Game 19 opening: corroborated Local/Deep consensus should veto G8: '
+      + JSON.stringify(vetted));
+  }
+  const unverified = judge(confirmed,null);
+  if (unverified.vetoed) throw new Error('Uncorroborated opening Deep must NEVER veto Jev');
+  const shallow = judge(confirmed,{...independent,depthReached:4});
+  if (shallow.vetoed) throw new Error('Depth-4 same-depth rerun cannot validate opening consensus');
+  const reversal = judge(confirmed,{...independent,scores:[{move:'G8',score:-100},{move:'H10',score:-120}]});
+  if (reversal.vetoed) throw new Error('Deep rerun reversal must preserve Jev authority');
+  const vcf = judge(confirmed,independent,[
+    alternatives[0],
+    {...alternatives[1],analysis:{vcf:true,facts:{tactical_safety:'SAFE'}}}
+  ]);
+  if (vcf.vetoed) throw new Error('Proven Jev tactical win must outrank score consensus');
+  const close = judge(
+    {...confirmed,scores:[{move:'H10',score:666.4},{move:'G8',score:634.8}]},
+    independent
+  );
+  if (close.vetoed) throw new Error('Move-10-like close Deep scores must leave Jev unconstrained');
+
+  // White move 10: G11 was BOTH Local and completed Deep #1 but a ~0.005
+  // Atomic scoring difference kept it out of the original Pairwise Top 4.
+  // Protect access to comparison, not final selection.
+  const before10 = positionFromSequence(['H8','G9','H9','G8','H7','H6','I8','G10','G7']);
+  engine.setPosition(before10.board,before10.moves,'jev-latest');
+  const realMid = engine.candidates('max');
+  console.log('game19 move10 search leader:', JSON.stringify({
+    local:realMid.localSearchChoice,
+    candidates:realMid.candidates.map(m=>m.key)
+  }));
+  const atomicRows = [
+    ['H10',0.296],['H11',0.284],['G12',0.240],['I7',0.239],
+    ['G6',0.239],['G11',0.234]
+  ].map(([key,score],index)=>({
+    key,atomicScore:score,localRank:index+1,
+    analysis:{facts:{tactical_safety:'SAFE'},vcf:false}
+  }));
+  const midDeep = {
+    status:'completed',depthReached:4,rankingOnly:false,
+    scores:[{move:'G11',score:666.4},{move:'G12',score:634.8}]
+  };
+  const closeMidCandidates = [
+    {key:'G11',searchScore:-1003.1,analysis:{facts:{tactical_safety:'SAFE'}}},
+    {key:'G12',searchScore:-1029.5,analysis:{facts:{tactical_safety:'SAFE'}}}
+  ];
+  const midTie = await engine.semanticGuardForTest(
+    {localSearchChoice:'G11'},closeMidCandidates,'G12',midDeep
+  );
+  if (midTie.vetoed || midTie.choice !== 'G12' || midTie.supplemental
+    || midTie.reason !== 'early_correlated_search_near_tie') {
+    throw new Error('Game 19 White 10 G11/G12 near-tie must preserve Jev without costly re-search: '
+      + JSON.stringify(midTie));
+  }
+  const protectedTop = engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,midDeep
+  );
+  if (!protectedTop.changed || protectedTop.protectedKey !== 'G11'
+    || !protectedTop.finalists.includes('G11') || protectedTop.finalists.length !== 4) {
+    throw new Error('Game 19 move10 must retain the agreed Local/Deep leader for Pairwise: '
+      + JSON.stringify(protectedTop));
+  }
+  const disagreement=engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,
+    {...midDeep,scores:[{move:'G12',score:666.4},{move:'G11',score:634.8}]}
+  );
+  if (disagreement.changed) throw new Error('Search disagreement must not reserve an Atomic slot');
+  const shallowCoverage=engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,{...midDeep,depthReached:3}
+  );
+  if (shallowCoverage.changed) throw new Error('A shallow Deep ranking must not reserve an Atomic slot');
+  const blocked=atomicRows.map(m=>m.key==='G11'
+    ? {...m,analysis:{facts:{tactical_safety:'LOSING'},vcf:false}} : m);
+  if (engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},blocked,midDeep
+  ).changed) throw new Error('A proven-lost search leader cannot reenter Pairwise');
+
+  // The same evidence cannot acquire authority later in the game.
+  const later = positionFromSequence([
+    'H8','G9','H9','G8','H7','H6','I8','G10','G7','G12','G11','H11','I9'
+  ]);
+  engine.setPosition(later.board,later.moves,'jev-latest');
+  const lateVerdict=judge(confirmed,independent);
+  if (lateVerdict.vetoed) throw new Error('Opening consensus must never override late tactics');
+  if (engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,midDeep
+  ).changed) throw new Error('Atomic search-finalist protection must end after the opening window');
+}
+
+/**
  * Game 11 (black human, overline + four-four bans, three-three enabled):
  * after C9 the black D8 fork is one ply away. White must retain D8 and
  * cannot mistake E8's unrelated positional development for safety.
@@ -2739,6 +2906,7 @@ function testCoordinateHelpers() {
   }
 }
 
+await testGame19CorroboratedEarlySearchGuard();
 await testGame11DiagonalForkRegression();
 await testRealGameMove44M7WorkerAudit();
 await testRealGameMove44ProductionRescueAudit();
