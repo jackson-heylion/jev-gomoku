@@ -2623,6 +2623,83 @@ async function testRecentLongSemanticOverrideGuard() {
 }
 
 /**
+ * 2026-09-28 human win at 19 plies. White move 4 G8 diverged from
+ * independently-agreeing Local H10 and the completed five-root Deep H10.
+ * Unlike historical 25K mate-delta cases, this is a substantial ordinary
+ * evaluation gap, so only a SECOND independently-run, deeper two-root
+ * result may veto Jev. Close scores (White move 10 G11 / G12), missing
+ * verification, and all later tactical phases must remain unchanged.
+ */
+async function testGame19CorroboratedEarlySearchGuard() {
+  const engine = await loadProductionEngine({
+    request: async () => {
+      throw new Error('Game 19 pure search-consensus regression must not spend Jev requests');
+    }
+  });
+  engine.setGameConfig({ playerColor:'black', overline:true, fourFour:false, threeThree:false });
+  const opening = positionFromSequence(['H8', 'G9', 'H9']);
+  engine.setPosition(opening.board, opening.moves, 'jev-latest');
+  const ctx = engine.candidates('max');
+  if (!ctx.candidates.some(move => move.key === 'H10')
+      || !ctx.candidates.some(move => move.key === 'G8')) {
+    throw new Error('Game 19 opening must retain both H10 and G8 for semantic comparison');
+  }
+  console.log('game19 opening candidate audit:', JSON.stringify({
+    local: ctx.localSearchChoice,
+    options: ctx.candidates.map(move => ({
+      move: move.key,
+      score: move.searchScore,
+      safety: move.analysis?.facts?.tactical_safety
+    }))
+  }));
+
+  const alternatives = [
+    { key:'H10', searchScore:410.5, analysis:{ facts:{tactical_safety:'SAFE'} } },
+    { key:'G8', searchScore:-265.9, analysis:{ facts:{tactical_safety:'SAFE'} } }
+  ];
+  const confirmed = {
+    status:'completed',depthReached:4,rankingOnly:false,
+    scores:[{move:'H10',score:-316.1},{move:'G8',score:-782.7}]
+  };
+  const independent = {
+    status:'completed',depthReached:6,rankingOnly:false,
+    scores:[{move:'H10',score:-120},{move:'G8',score:-470}]
+  };
+  const judge = (a,b,c=alternatives) => engine.earlyConsensusForTest(
+    {localSearchChoice:'H10'},c,'H10','G8',a,b
+  );
+  const vetted = judge(confirmed,independent);
+  if (!vetted.vetoed || vetted.reason !== 'early_search_consensus_confirmed') {
+    throw new Error('Game 19 opening: corroborated Local/Deep consensus should veto G8: '
+      + JSON.stringify(vetted));
+  }
+  const unverified = judge(confirmed,null);
+  if (unverified.vetoed) throw new Error('Uncorroborated opening Deep must NEVER veto Jev');
+  const shallow = judge(confirmed,{...independent,depthReached:4});
+  if (shallow.vetoed) throw new Error('Depth-4 same-depth rerun cannot validate opening consensus');
+  const reversal = judge(confirmed,{...independent,scores:[{move:'G8',score:-100},{move:'H10',score:-120}]});
+  if (reversal.vetoed) throw new Error('Deep rerun reversal must preserve Jev authority');
+  const vcf = judge(confirmed,independent,[
+    alternatives[0],
+    {...alternatives[1],analysis:{vcf:true,facts:{tactical_safety:'SAFE'}}}
+  ]);
+  if (vcf.vetoed) throw new Error('Proven Jev tactical win must outrank score consensus');
+  const close = judge(
+    {...confirmed,scores:[{move:'H10',score:666.4},{move:'G8',score:634.8}]},
+    independent
+  );
+  if (close.vetoed) throw new Error('Move-10-like close Deep scores must leave Jev unconstrained');
+
+  // The same evidence cannot acquire authority later in the game.
+  const later = positionFromSequence([
+    'H8','G9','H9','G8','H7','H6','I8','G10','G7','G12','G11','H11','I9'
+  ]);
+  engine.setPosition(later.board,later.moves,'jev-latest');
+  const lateVerdict=judge(confirmed,independent);
+  if (lateVerdict.vetoed) throw new Error('Opening consensus must never override late tactics');
+}
+
+/**
  * Game 11 (black human, overline + four-four bans, three-three enabled):
  * after C9 the black D8 fork is one ply away. White must retain D8 and
  * cannot mistake E8's unrelated positional development for safety.
@@ -2739,6 +2816,7 @@ function testCoordinateHelpers() {
   }
 }
 
+await testGame19CorroboratedEarlySearchGuard();
 await testGame11DiagonalForkRegression();
 await testRealGameMove44M7WorkerAudit();
 await testRealGameMove44ProductionRescueAudit();
