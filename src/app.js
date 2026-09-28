@@ -4449,6 +4449,28 @@
   // a substantially weaker searched move. The initial multi-root result alone
   // is NEVER enough: an independently rerun focused two-root search must also
   // agree before the guard can veto Jev. This is not a forced-loss proof.
+  function earlySearchGapSnapshot(context, candidates, localKey, semanticKey, analysis) {
+    if (moves.length < 2 || moves.length > 12
+      || analysis?.status !== 'completed'
+      || Number(analysis.depthReached || 0) < 4
+      || analysis.rankingOnly
+      || analysis.scores?.[0]?.move !== localKey
+      || context?.localSearchChoice !== localKey) return null;
+    const local = (candidates || []).find(move => move.key === localKey);
+    const semantic = (candidates || []).find(move => move.key === semanticKey);
+    if (!local || !semantic || maxHardProvenLoss(local) || semantic.analysis?.vcf) return null;
+    const rows = new Map((analysis.scores || []).map(row => [row.move, row]));
+    const a = rows.get(localKey);
+    const b = rows.get(semanticKey);
+    if (!a || !b || !Number.isFinite(a.score) || !Number.isFinite(b.score)
+      || isSentinelSearchScore(a.score) || isSentinelSearchScore(b.score)
+      || a.forcedResult?.forced || b.forcedResult?.forced) return null;
+    const localMargin = Number(local.searchScore) - Number(semantic.searchScore);
+    return Number.isFinite(localMargin)
+      ? { firstMargin: a.score - b.score, localMargin }
+      : null;
+  }
+
   function earlySearchConsensusVerdict(context, candidates, localKey, semanticKey, initial, verified) {
     const fail = reason => ({ vetoed: false, reason });
     if (moves.length < 2 || moves.length > 12) return fail('outside_early_consensus_window');
@@ -4564,6 +4586,9 @@
     let verdict = maxDeepOverrideVerdict(localKey, semanticKey, analysis);
     let supplemental = false;
     const localVerdict = maxLocalOverrideVerdict(localMove, semanticMove);
+    const earlyGap = earlySearchGapSnapshot(
+      context, candidates, localKey, semanticKey, initialDeepAnalysis
+    );
 
     // The Local fallback is deliberately extreme and deterministic. It prevents
     // correctness from depending on whether a two-root Worker happens to finish
@@ -4573,6 +4598,54 @@
       verdict = {
         ...localVerdict,
         deepReason: verdict.reason
+      };
+    }
+
+    // On the 19-ply opening, exact depth-8 returned no completed depth after
+    // 9s. Use a cheaper ITERATIVE two-root rerun for the rare early position
+    // with strong independent Local+Deep agreement. A second completed depth
+    // of at least 5 is mandatory: timeout or reversal retains Jev's choice.
+    if (!verdict.vetoed && !localVerdict.vetoed
+      && earlyGap?.firstMargin >= 400 && earlyGap.localMargin >= 250) {
+      updateApiState('busy', 'Jev Max：早期 Local / Deep 分歧复核，两点迭代搜索…');
+      const iterative = await runDeepWorkerVerification(
+        [localMove, semanticMove],
+        'max',
+        'jev_max_early_consensus_iterative_guard',
+        { timeBudgetMs: 4800, maxDepth: 6, branch: 8 }
+      );
+      const iterativeVerdict = maxDeepOverrideVerdict(localKey, semanticKey, iterative);
+      const confirmed = earlySearchConsensusVerdict(
+        context, candidates, localKey, semanticKey, initialDeepAnalysis, iterative
+      );
+      const chosen = iterativeVerdict.vetoed ? iterativeVerdict : confirmed;
+      return {
+        ...chosen,
+        choice: chosen.vetoed ? localKey : semanticKey,
+        reason: chosen.vetoed ? chosen.reason : 'early_iterative_unconfirmed',
+        localMove: localKey,
+        semanticMove: semanticKey,
+        analysis: iterative,
+        supplemental: true,
+        earlyConfirmationReason: confirmed.reason,
+        earlyVerificationDepth: iterative?.depthReached ?? null
+      };
+    }
+
+    // A second 9s exact search is wasted when both completed engines see
+    // an ordinary near tie. Keep Jev's decision and spend no extra Worker time.
+    if (!verdict.vetoed && !localVerdict.vetoed
+      && earlyGap && earlyGap.firstMargin >= 0 && earlyGap.firstMargin <= 100
+      && earlyGap.localMargin >= 0 && earlyGap.localMargin <= 100) {
+      return {
+        ...verdict,
+        vetoed: false,
+        reason: 'early_correlated_search_near_tie',
+        choice: semanticKey,
+        localMove: localKey,
+        semanticMove: semanticKey,
+        analysis: initialDeepAnalysis,
+        supplemental: false
       };
     }
 
