@@ -5851,6 +5851,59 @@
     };
   }
 
+  // Atomic answers are independent Jev judgments, but a tiny Atomic score
+  // difference must not silently eliminate a candidate that the real
+  // Alpha-Beta leader AND a completed, non-sentinel Deep search both identify.
+  // This reserves visibility in Pairwise/Final only: it never forces the
+  // search leader to win, nor reintroduces a proof-filtered candidate.
+  function maxAtomicFinalistsWithSearchCoverage(context, candidates, deepAnalysis, limit = 4) {
+    const sorted = [...(candidates || [])].sort((a,b) =>
+      (b.atomicScore || 0) - (a.atomicScore || 0)
+      || (a.localRank || 999) - (b.localRank || 999)
+    );
+    const finalists = sorted.slice(0, Math.min(limit, sorted.length));
+    const bestDeep = deepAnalysis?.scores?.[0] || null;
+    const eligible = deepAnalysis?.status === 'completed'
+      && Number(deepAnalysis.depthReached || 0) >= 4
+      && !deepAnalysis.rankingOnly
+      && bestDeep?.move === context?.localSearchChoice
+      && Number.isFinite(bestDeep.score)
+      && !isSentinelSearchScore(bestDeep.score)
+      && !bestDeep.forcedResult?.forced;
+    const leader = eligible
+      ? (candidates || []).find(move =>
+          move.key === bestDeep.move && !maxHardProvenLoss(move)
+        ) || null
+      : null;
+    if (!leader) {
+      return { finalists, protectedKey: null, changed: false };
+    }
+    if (finalists.some(move => move.key === leader.key)) {
+      return { finalists, protectedKey: leader.key, changed: false };
+    }
+    // A proven VCF finalist is never evicted for a bounded search ranking.
+    const replaceable = finalists
+      .filter(move => move.analysis?.vcf !== true)
+      .sort((a,b) => (a.atomicScore || 0) - (b.atomicScore || 0)
+        || (b.localRank || 999) - (a.localRank || 999));
+    if (!replaceable.length) {
+      return { finalists, protectedKey: null, changed: false };
+    }
+    const evicted = replaceable[0];
+    const updated = finalists.filter(move => move.key !== evicted.key);
+    updated.push(leader);
+    updated.sort((a,b) =>
+      (b.atomicScore || 0) - (a.atomicScore || 0)
+      || (a.localRank || 999) - (b.localRank || 999)
+    );
+    return {
+      finalists: updated,
+      protectedKey: leader.key,
+      changed: true,
+      evictedKey: evicted.key
+    };
+  }
+
   async function jevMaxDecision() {
     const context = buildAdvancedCandidates('max');
     let candidates = context.candidates;
@@ -5996,10 +6049,10 @@
     const recallChoice = String(fanoutData?.answers?.recall_check?.choice || 'MAIN_SET').toUpperCase();
     const globalBest = compactAnswer(fanoutData?.answers?.global_best);
 
-    let atomicTop4 = [...candidates]
-      .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
-        || (a.localRank || 999) - (b.localRank || 999))
-      .slice(0, Math.min(4, candidates.length));
+    let searchFinalistCoverage = maxAtomicFinalistsWithSearchCoverage(
+      context, candidates, deepAnalysis
+    );
+    let atomicTop4 = searchFinalistCoverage.finalists;
 
     const preCoverageCandidates = [...candidates];
     const coverage = await closeMaxThreatCoverage(
@@ -6010,10 +6063,10 @@
     );
     candidates = coverage.candidates;
     threatAnalysis = coverage.threatAnalysis;
-    atomicTop4 = [...candidates]
-      .sort((a, b) => (b.atomicScore || 0) - (a.atomicScore || 0)
-        || (a.localRank || 999) - (b.localRank || 999))
-      .slice(0, Math.min(4, candidates.length));
+    searchFinalistCoverage = maxAtomicFinalistsWithSearchCoverage(
+      context, candidates, deepAnalysis
+    );
+    atomicTop4 = searchFinalistCoverage.finalists;
 
     if (!candidates.length || allMaxCandidatesHardLost(candidates)) {
       const rescueBaseline = candidates.length ? candidates : preCoverageCandidates;
@@ -6337,6 +6390,8 @@
           maxWorkers: HEAVY_WORKER_POOL_SIZE,
           workerPoolPersistent: true,
           fanoutSpeculativePool: fanout.speculativePool,
+          protectedSearchFinalist: searchFinalistCoverage.protectedKey || null,
+          searchFinalistAddedToAtomicTop4: Boolean(searchFinalistCoverage.changed),
           fanoutPairwiseCount: fanout.pairs.length * 2,
           fanoutCriticCount: fanout.speculativePool.length,
           opponentPredictionCount: fanout.opponentPredictionCandidates?.length || 0,
