@@ -2653,6 +2653,37 @@ async function testGame19CorroboratedEarlySearchGuard() {
     }))
   }));
 
+  if (ctx.localSearchChoice !== 'H10') {
+    throw new Error('Game 19 production Local opening #1 changed: ' + ctx.localSearchChoice);
+  }
+  // Exercise the actual production focused Worker against this real opening.
+  // The original completed multi-root scores below were recorded in the
+  // supplied game's decision trace. A shallow/reversing focused rerun MUST
+  // leave Jev's move untouched; the strict synthetic tests pin the threshold.
+  const originalDeep = {
+    status:'completed',depthReached:4,rankingOnly:false,
+    scores:[
+      {move:'H10',score:-316.1},{move:'H7',score:-708.3},
+      {move:'G8',score:-782.7},{move:'I9',score:-904.6},
+      {move:'G7',score:-919.9}
+    ]
+  };
+  const realGuard = await engine.game19SemanticGuard('G8',originalDeep);
+  console.log('game19 independent focused verification:', JSON.stringify({
+    choice:realGuard.choice,
+    reason:realGuard.reason,
+    vetoed:realGuard.vetoed,
+    depth:realGuard.analysis?.depthReached,
+    status:realGuard.analysis?.status,
+    best:realGuard.analysis?.scores?.map(row=>({move:row.move,score:row.score}))
+  }));
+  if (realGuard.vetoed && realGuard.choice !== 'H10') {
+    throw new Error('Game 19 opening guard must never pick a third unrelated move');
+  }
+  if (!realGuard.vetoed && realGuard.choice !== 'G8') {
+    throw new Error('Game 19 unconfirmed opening search must preserve Jev choice');
+  }
+
   const alternatives = [
     { key:'H10', searchScore:410.5, analysis:{ facts:{tactical_safety:'SAFE'} } },
     { key:'G8', searchScore:-265.9, analysis:{ facts:{tactical_safety:'SAFE'} } }
