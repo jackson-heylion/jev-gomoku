@@ -183,7 +183,7 @@ The current policy is intentionally narrow:
 
 Normal disagreements remain Jev decisions.
 
-## Game 12: corroborating an early search disagreement
+## 2026-09-28 nineteen-ply game: corroborating an early search disagreement
 
 In the 19-ply 2026-09-28 game, Jev selected `G8` as White's fourth move despite both Local and completed depth-4 Deep preferring `H10` (Deep approximately `-316` vs `-783`; final Jev confidence around 21%). By White's 14th move, the logged principal candidates were already `FORCED_LOSS`, so the fix belongs at the earliest independently supported disagreement.
 
