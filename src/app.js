@@ -5863,7 +5863,8 @@
     );
     const finalists = sorted.slice(0, Math.min(limit, sorted.length));
     const bestDeep = deepAnalysis?.scores?.[0] || null;
-    const eligible = deepAnalysis?.status === 'completed'
+    const eligible = moves.length >= 2 && moves.length <= 12
+      && deepAnalysis?.status === 'completed'
       && Number(deepAnalysis.depthReached || 0) >= 4
       && !deepAnalysis.rankingOnly
       && bestDeep?.move === context?.localSearchChoice
