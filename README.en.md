@@ -191,8 +191,8 @@ In the 19-ply 2026-09-28 game, Jev selected `G8` as White's fourth move despite 
 
 - It acts only in the first 12 plies when Jev actually overrides the real Local #1.
 - The original completed, depth-4-or-deeper multi-root Deep search and Local must both prefer the same candidate by substantial margins.
-- A *second focused two-root search*, reaching at least depth 5 and agreeing with that conclusion, is mandatory before vetoing Jev.
-- Close comparisons (such as this game's `G11/G12` on White's tenth move), incomplete/reversed verification, proven tactics and later phases remain under the existing rules and Jev's arbitration.
+- For substantial early disagreements, a **bounded 4.8-second iterative two-root search** replaces the ineffective 9-second exact-depth-8 attempt. It must reach at least depth 5 and agree before vetoing Jev.
+- Close comparisons where both completed engines have small margins (such as `G11/G12` on White's tenth move) go directly to Jev without a wasted 9-second exact check. Incomplete/reversed verification, proven tactics and later phases retain their existing safety rules.
 - No extra Jev request, no premature candidate pruning: reuse the existing post-decision focused Worker verification.
 
 A separate move-10 fix protects candidate recall: the recorded `G11` was Local and completed depth-4 Deep #1 but missed the Atomic Top 4 by tiny score differences. Only in the first 12 plies, when Local and a completed non-sentinel Deep search agree and no proof rejects the candidate, it receives a comparison slot in Atomic Top 4 if needed. It must still pass Threat coverage and actual Jev Pairwise arbitration; this does **not** force it into the final choice.
