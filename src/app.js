@@ -4444,6 +4444,63 @@
     };
   }
 
+  // A narrow opening/mid-opening guard for games where independently-run
+  // Alpha-Beta AND a completed multi-root Deep search agree, but Jev chooses
+  // a substantially weaker searched move. The initial multi-root result alone
+  // is NEVER enough: an independently rerun focused two-root search must also
+  // agree before the guard can veto Jev. This is not a forced-loss proof.
+  function earlySearchConsensusVerdict(context, candidates, localKey, semanticKey, initial, verified) {
+    const fail = reason => ({ vetoed: false, reason });
+    if (moves.length < 2 || moves.length > 12) return fail('outside_early_consensus_window');
+    if (!localKey || !semanticKey || localKey === semanticKey) return fail('no_early_override');
+    const local = (candidates || []).find(move => move.key === localKey);
+    const semantic = (candidates || []).find(move => move.key === semanticKey);
+    if (!local || !semantic || maxHardProvenLoss(local) || semantic.analysis?.vcf) {
+      return fail('early_consensus_candidate_not_eligible');
+    }
+    const usable = (result, minDepth) =>
+      result?.status === 'completed'
+      && Number(result.depthReached || 0) >= minDepth
+      && !result.rankingOnly
+      && Array.isArray(result.scores)
+      && result.scores.length >= 2
+      && result.scores[0].move === localKey;
+    if (!usable(initial, 4) || !usable(verified, 5)) {
+      return fail('early_consensus_unconfirmed_search');
+    }
+    const scoreMargin = result => {
+      const rows = new Map(result.scores.map(row => [row.move, row]));
+      const a = rows.get(localKey);
+      const b = rows.get(semanticKey);
+      if (!a || !b || !Number.isFinite(a.score) || !Number.isFinite(b.score)
+        || isSentinelSearchScore(a.score) || isSentinelSearchScore(b.score)
+        || a.forcedResult?.forced || b.forcedResult?.forced) return null;
+      return a.score - b.score;
+    };
+    const firstMargin = scoreMargin(initial);
+    const verifiedMargin = scoreMargin(verified);
+    const localMargin = Number(local.searchScore) - Number(semantic.searchScore);
+    // A strong relative difference at both depths, corroborated by a
+    // separately-run Local ranking, is required. At close scores (e.g. this
+    // game's G11 vs G12) Jev remains free to choose either move.
+    if (firstMargin === null || firstMargin < 400
+      || verifiedMargin === null || verifiedMargin < 250
+      || !Number.isFinite(localMargin) || localMargin < 250) {
+      return fail('early_consensus_margin_not_confirmed');
+    }
+    return {
+      vetoed: true,
+      reason: 'early_search_consensus_confirmed',
+      firstMargin,
+      verifiedMargin,
+      localMargin,
+      firstDepth: initial.depthReached,
+      verifiedDepth: verified.depthReached,
+      local: localKey,
+      semantic: semanticKey
+    };
+  }
+
   async function runMaxExactPairDeep(localMove, semanticMove) {
     return runDeepWorkerVerification(
       [localMove, semanticMove],
@@ -4549,6 +4606,12 @@
       updateApiState('busy', 'Jev Max：两点仍接近，执行 exact depth-8 最终复核…');
       const exactAnalysis = await runMaxExactPairDeep(localMove, semanticMove);
       const exactVerdict = maxDeepOverrideVerdict(localKey, semanticKey, exactAnalysis);
+      // Keep the original independent five-root snapshot. Confirm the
+      // opening consensus using a second focused search, never by reading
+      // the same heuristic result twice.
+      const openingVerdict = earlySearchConsensusVerdict(
+        context, candidates, localKey, semanticKey, initialDeepAnalysis, exactAnalysis
+      );
       if (exactAnalysis) analysis = exactAnalysis;
       supplemental = true;
       if (exactVerdict.vetoed) {
@@ -4556,10 +4619,16 @@
           ...exactVerdict,
           secondStage: true
         };
+      } else if (openingVerdict.vetoed) {
+        verdict = {
+          ...openingVerdict,
+          secondStage: true
+        };
       } else {
         verdict = {
           ...verdict,
           exactReason: exactVerdict.reason,
+          earlyConsensusReason: openingVerdict.reason,
           exactDepth: exactVerdict.depth ?? null,
           secondStage: true
         };
