@@ -2772,6 +2772,9 @@ async function testGame19CorroboratedEarlySearchGuard() {
   engine.setPosition(later.board,later.moves,'jev-latest');
   const lateVerdict=judge(confirmed,independent);
   if (lateVerdict.vetoed) throw new Error('Opening consensus must never override late tactics');
+  if (engine.protectedAtomicFinalistsForTest(
+    {localSearchChoice:'G11'},atomicRows,midDeep
+  ).changed) throw new Error('Atomic search-finalist protection must end after the opening window');
 }
 
 /**
