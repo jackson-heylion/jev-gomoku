@@ -195,7 +195,9 @@ In the 19-ply 2026-09-28 game, Jev selected `G8` as White's fourth move despite 
 - Close comparisons (such as this game's `G11/G12` on White's tenth move), incomplete/reversed verification, proven tactics and later phases remain under the existing rules and Jev's arbitration.
 - No extra Jev request, no premature candidate pruning: reuse the existing post-decision focused Worker verification.
 
-Regression covers the actual opening board and independent confirmation/missing-evidence cases. A confirmed preference is not proof of a forced win or measured real-Jev win-rate improvement.
+A separate move-10 fix protects candidate recall: the recorded `G11` was Local and completed depth-4 Deep #1 but missed the Atomic Top 4 by tiny score differences. When Local and a completed non-sentinel Deep search agree and no proof rejects the candidate, it receives a comparison slot in Atomic Top 4 if needed. It must still pass Threat coverage and actual Jev Pairwise arbitration; this does **not** force it into the final choice.
+
+Regression covers the real opening, independent confirmation/missing evidence and move-10 G11 finalist-retention conditions. A confirmed preference is not proof of a forced win or measured real-Jev win-rate improvement.
 
 ## Game 11: forced defense activating two independent forks
 
