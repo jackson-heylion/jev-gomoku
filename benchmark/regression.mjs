@@ -2742,6 +2742,18 @@ async function testGame19CorroboratedEarlySearchGuard() {
     status:'completed',depthReached:4,rankingOnly:false,
     scores:[{move:'G11',score:666.4},{move:'G12',score:634.8}]
   };
+  const closeMidCandidates = [
+    {key:'G11',searchScore:-1003.1,analysis:{facts:{tactical_safety:'SAFE'}}},
+    {key:'G12',searchScore:-1029.5,analysis:{facts:{tactical_safety:'SAFE'}}}
+  ];
+  const midTie = await engine.semanticGuardForTest(
+    {localSearchChoice:'G11'},closeMidCandidates,'G12',midDeep
+  );
+  if (midTie.vetoed || midTie.choice !== 'G12' || midTie.supplemental
+    || midTie.reason !== 'early_correlated_search_near_tie') {
+    throw new Error('Game 19 White 10 G11/G12 near-tie must preserve Jev without costly re-search: '
+      + JSON.stringify(midTie));
+  }
   const protectedTop = engine.protectedAtomicFinalistsForTest(
     {localSearchChoice:'G11'},atomicRows,midDeep
   );
